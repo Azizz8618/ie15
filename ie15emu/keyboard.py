@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .charset import RUS7
+from .charset import RUS7, encode_koi7
 
 KBD_ROM = "15bbb.rt5"
 
@@ -62,9 +62,17 @@ def key_to_bytes(key: str, koi7: bool = False) -> bytes:
         return b"\x1bH"
     if key == "KEY_ESC" or key == "\x1b":
         return b"\x1b"
+    # Несколько знаков подряд (--feed "строка") — кодируем целиком.
+    if len(key) > 1 and not key.startswith("KEY_"):
+        return encode_koi7(key) if koi7 else key.encode("ascii", errors="replace")
     ch = key if len(key) == 1 else ""
     if not ch:
         return b""
+    # Русский символ всегда уходит в линию как код КОИ7 Н1
+    # (заглавные 0x00..0x1E, строчные 0x60..0x7E), а не как «?».
+    if ch.upper().replace("Ё", "Е") in RUS7:
+        return encode_koi7(ch)
+    # Латиница при --koi7 — псевдо-ЙЦУКЕН: клавиша ПК → код КОИ7-буквы.
     if koi7 and ch.lower() in QWERTY2KOI7:
         code = QWERTY2KOI7[ch.lower()]
         return bytes([code | 0x60 if ch.islower() else code])
@@ -94,7 +102,11 @@ _SEQ_LEN = sorted({len(seq) for seq in SEQ_KEYS}, reverse=True)
 
 
 def decode_key_bytes(data: bytes) -> list[str]:
-    """Распарсить байты нажатий в имена клавиш/символы для feed_key()."""
+    """Распарсить байты нажатий в имена клавиш/символы для feed_key().
+
+    Многобайтовые UTF-8-символы (русские буквы с клавиатуры ПК) собираются
+    в один символ, чтобы дальше корректно кодироваться в КОИ7.
+    """
     out: list[str] = []
     i = 0
     n = len(data)
@@ -121,6 +133,17 @@ def decode_key_bytes(data: bytes) -> list[str]:
                 out.append("KEY_ESC")
                 i += 1
             continue
+        if b >= 0x80:                      # UTF-8 (русская буква с ПК)
+            ln = (2 if b < 0xE0 else 3 if b < 0xF0 else 4)
+            chunk = data[i:i + ln]
+            try:
+                out.append(chunk.decode("utf-8"))
+                i += ln
+                continue
+            except UnicodeDecodeError:
+                out.append(chr(b))
+                i += 1
+                continue
         out.append(chr(b))
         i += 1
     return out

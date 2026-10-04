@@ -74,7 +74,7 @@ def _write_png(path: str, parser: Parser) -> None:
 
 def run_line(parser: Parser, url: str, png: str | None,
              seconds: float, feed: str | None, mode: str = "host",
-             **linkkw) -> None:
+             koi7: bool = False, **linkkw) -> None:
     import os
     import select
     import termios
@@ -83,11 +83,11 @@ def run_line(parser: Parser, url: str, png: str | None,
     from .keyboard import decode_key_bytes
 
     link = open_link(url, **linkkw)
-    session = TerminalSession(parser, link=link, mode=mode)
+    session = TerminalSession(parser, link=link, mode=mode, koi7=koi7)
     print(f"[линия] {url} — подключено (режим: {mode})")
     print("[клавиши] ввод — в линию/буфер; F10 — SEND, F11 — АВТОНОМНО↔С ЭВМ, Ctrl-C — выход")
     if feed:
-        session.emit(key_to_bytes(feed))
+        session.emit(key_to_bytes(feed, koi7=koi7))
 
     fd = sys.stdin.fileno() if sys.stdin.isatty() else None
     old = termios.tcgetattr(fd) if fd is not None else None
@@ -172,7 +172,7 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.line:
         run_line(parser, args.line, args.png, args.seconds,
-                 args.feed, mode=args.mode,
+                 args.feed, mode=args.mode, koi7=args.koi7,
                  password=args.password, keyfile=args.keyfile)
     else:
         run_script(parser, args.png)

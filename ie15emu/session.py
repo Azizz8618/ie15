@@ -26,12 +26,14 @@ SERVICE_HOST = "М1=ГОТОВНОСТЬ  М2=ВВОД  М3=КАНАЛ ОК  С 
 class TerminalSession:
     """Состояние терминала: режим работы + накопленный буфер автономного набора."""
 
-    def __init__(self, parser, link=None, mode: str = MODE_LOCAL) -> None:
+    def __init__(self, parser, link=None, mode: str = MODE_LOCAL,
+                 koi7: bool = False) -> None:
         if mode not in (MODE_LOCAL, MODE_HOST):
             raise ValueError(f"неизвестный режим: {mode!r}")
         self.parser = parser
         self.link = link
         self.mode = mode
+        self.koi7 = koi7
         self.buffer = bytearray()
         self._update_service()
 
@@ -64,7 +66,7 @@ class TerminalSession:
         if key == "MODE":
             self.toggle_mode()
             return None
-        data = key_to_bytes(key)
+        data = key_to_bytes(key, koi7=self.koi7)
         if not data:
             return None
         if self.mode == MODE_HOST:
@@ -95,5 +97,6 @@ class TerminalSession:
         """"Приём из линии (ответ ЭВМ), возможный ответ терминала — ESC/ и т.п."""
         if not data:
             return None
-        reply = self.parser.feed(data)
+        from .charset import normalize_line_bytes
+        reply = self.parser.feed(normalize_line_bytes(data))
         return reply.encode("latin-1") if reply else None
