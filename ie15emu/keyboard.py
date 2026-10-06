@@ -6,16 +6,30 @@
 
 Соответствие ПК-клавиш → коды терминала:
   обычные символы  — как есть (7 бит)
-  Backspace        — 08 (курсор влево, «authbs»)
+  Backspace        — 08 (ВК, «authbs»)
+  Tab              — 09 (ТАБ), Ctrl-G — 07 (ЗВН), Esc — ESC
   Enter            — 0D 0A (ПР ПС)
   Стрелки          — ESC A / B / C / D  (набор команд №2)
-  Home/End/PgUp    — ESC H / ESC K / ESC Y
+  Home             — ESC H  (курсор в «дом»)
+  End              — ESC K  (стереть до конца строки)
+  PgUp / PgDn      — ESC J / ESC E (стереть до конца экрана / очистить)
+  Insert / Delete  — ESC b / ESC c (инверсное / нормальное видео)
+  F8               — РЕЖИМ: набор №1 ↔ набор №2 (VT52) (служебная)
+  F9               — смена режима АВТОНОМНО ↔ С ЭВМ (служебная)
+  F10              — SEND (служебная)
+  (F1 и F11 не используются — заняты окружением рабочего стола)
+
+В режиме --koi7 «регистр» (Shift) переключает алфавит, как на клавиатуре
+15ВВВ: клавиши без Shift печатают русские буквы по фонетической таблице
+QWERTY2KOI7, а Shift+клавиша — английские. Работает при любой раскладке
+ОС: EN-раскладка присылает «W» (проходит как есть), RU-раскладка — «Ц»
+(возвращается назначенной клавишей латиницей, «C»).
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-from .charset import RUS7, encode_koi7
+from .charset import ALPHA_BIT, RUS7, encode_koi7
 
 KBD_ROM = "15bbb.rt5"
 
@@ -28,6 +42,15 @@ QWERTY2KOI7 = {
     "z": 0x1A, "x": 0x17, "c": 0x03, "v": 0x16, "b": 0x02, "n": 0x0E,
     "m": 0x0D, ",": 0x00, ".": 0x1B,
 }
+
+# Обратная таблица: код КОИ7-буквы → клавиша QWERTY. «Регистр» (Shift)
+# в русской раскладке переключает алфавит: заглавная кириллица с
+# клавиатуры (RU-раскладка ОС шлёт «Ц» на Shift+ц) печатается английской
+# буквой, какой она назначена в QWERTY2KOI7. Повторные значения (w/v → В)
+# разрешаются в пользу последней записи таблицы (фонетический приоритет).
+KOI7_TO_QWERTY = {}
+for _key, _code in QWERTY2KOI7.items():
+    KOI7_TO_QWERTY[_code] = _key
 
 
 def load_kbd_rom(rom_dir: str | Path) -> bytes | None:
@@ -45,7 +68,11 @@ def lookup_key(kbd_rom: bytes | None, col: int, row: int) -> int | None:
 
 
 def key_to_bytes(key: str, koi7: bool = False) -> bytes:
-    """Нажатие ПК-клавиши → байты для линии токовой петли/SSH."""
+    """Нажатие ПК-клавиши → байты внутреннего КОИ7-потока терминала.
+
+    Заглавные русские — с битом алфавита (0x80); в байты линии их
+    переводит `charset.to_line` (см. `session.emit`).
+    """
     if key in ("KEY_ENTER", "\n", "\r"):
         return b"\r\n"
     if key in ("KEY_BACKSPACE", "\x7f"):
@@ -60,42 +87,66 @@ def key_to_bytes(key: str, koi7: bool = False) -> bytes:
         return b"\x1bD"
     if key == "KEY_HOME":
         return b"\x1bH"
+    if key == "KEY_END":
+        return b"\x1bK"        # стереть до конца строки
+    if key == "KEY_PAGEUP":
+        return b"\x1bJ"        # стереть до конца экрана
+    if key == "KEY_PAGEDOWN":
+        return b"\x1bE"        # очистить экран, курсор в «дом»
+    if key == "KEY_INSERT":
+        return b"\x1bb"        # инверсное видео
+    if key == "KEY_DELETE":
+        return b"\x1bc"        # нормальное видео
     if key == "KEY_ESC" or key == "\x1b":
         return b"\x1b"
-    # Несколько знаков подряд (--feed "строка") — кодируем целиком.
+    # Несколько знаков подряд (--feed "строка") — кодируем целиком в КОИ7 Н1
+    # (в т.ч. кириллицу; ascii-кодирование съедало русские буквы).
     if len(key) > 1 and not key.startswith("KEY_"):
-        return encode_koi7(key) if koi7 else key.encode("ascii", errors="replace")
+        return encode_koi7(key)
     ch = key if len(key) == 1 else ""
     if not ch:
         return b""
-    # Русский символ всегда уходит в линию как код КОИ7 Н1
-    # (заглавные 0x00..0x1E, строчные 0x60..0x7E), а не как «?».
-    if ch.upper().replace("Ё", "Е") in RUS7:
+    # Русский символ уходит в линию как код КОИ7 Н1 (с битом алфавита).
+    # В режиме --koi7 «регистр» (Shift) переключает алфавит: заглавная
+    # кириллица печатается соответствующей английской буквой.
+    up = ch.upper().replace("Ё", "Е")
+    if up in RUS7:
+        if koi7 and ch.isupper():
+            lat = KOI7_TO_QWERTY.get(RUS7.index(up))
+            if lat:
+                return lat.upper().encode("ascii")
         return encode_koi7(ch)
-    # Латиница при --koi7 — псевдо-ЙЦУКЕН: клавиша ПК → код КОИ7-буквы.
-    if koi7 and ch.lower() in QWERTY2KOI7:
-        code = QWERTY2KOI7[ch.lower()]
-        return bytes([code | 0x60 if ch.islower() else code])
+    # Латиница при --koi7 — псевдо-ЙЦУКЕН: нажатая без Shift клавиша ПК
+    # даёт код русской буквы. Залитый Shift перехвата не требует:
+    # заглавная латинская печатается как есть (английский набор).
+    if koi7 and ch in QWERTY2KOI7:
+        return bytes([QWERTY2KOI7[ch] | ALPHA_BIT | 0x60])
     return ch.encode("ascii", errors="replace")
 
 
 # Служебные клавиши сеанса (команды эмулятора, а не коды линии).
-KEY_SEND = "SEND"     # «передать накопленное» (аналог клавиши SEND)
-KEY_MODE = "MODE"     # переключение АВТОНОМНО ↔ С ЭВМ
+KEY_SEND = "SEND"       # «передать накопленное» (аналог клавиши SEND)
+KEY_MODE = "MODE"       # переключение АВТОНОМНО ↔ С ЭВМ
+KEY_CMDSET = "CMDSET"   # клавиша «РЕЖИМ»: набор №1 ↔ набор №2 (VT52)
 
 SPECIAL_KEYS = {"KEY_SEND": KEY_SEND, "KEY_MODE": KEY_MODE,
-                "F10": KEY_SEND, "F11": KEY_MODE}
+                "KEY_CMDSET": KEY_CMDSET,
+                "F8": KEY_CMDSET, "F9": KEY_MODE, "F10": KEY_SEND}
 
 # Последовательности клавиатуры ПК (терминал в режиме cbreak) → ключи сеанса.
+# F1 и F11 не разбираются принципиально: перехватываются окружением.
 SEQ_KEYS = {
     b"\x1b[A": "KEY_UP", b"\x1bOA": "KEY_UP",
     b"\x1b[B": "KEY_DOWN", b"\x1bOB": "KEY_DOWN",
     b"\x1b[C": "KEY_RIGHT", b"\x1bOC": "KEY_RIGHT",
     b"\x1b[D": "KEY_LEFT", b"\x1bOD": "KEY_LEFT",
-    b"\x1b[H": "KEY_HOME", b"\x1b[1~": "KEY_HOME",
-    b"\x1b[4~": "KEY_END",
-    b"\x1b[21~": KEY_SEND, b"\x1b[20~": KEY_SEND,   # F10 / F9 — SEND
-    b"\x1b[23~": KEY_MODE, b"\x1b[24~": KEY_MODE,   # F11 / F12 — режим
+    b"\x1b[H": "KEY_HOME", b"\x1b[1~": "KEY_HOME", b"\x1bOH": "KEY_HOME",
+    b"\x1b[4~": "KEY_END", b"\x1b[F": "KEY_END", b"\x1bOF": "KEY_END",
+    b"\x1b[2~": "KEY_INSERT", b"\x1b[3~": "KEY_DELETE",
+    b"\x1b[5~": "KEY_PAGEUP", b"\x1b[6~": "KEY_PAGEDOWN",
+    b"\x1b[19~": KEY_CMDSET,                        # F8 — РЕЖИМ (набор 1↔2)
+    b"\x1b[20~": KEY_MODE,                          # F9 — АВТОНОМНО↔С ЭВМ
+    b"\x1b[21~": KEY_SEND,                          # F10 — SEND
     b"\x1b\x1b": "KEY_ESC",
 }
 _SEQ_LEN = sorted({len(seq) for seq in SEQ_KEYS}, reverse=True)

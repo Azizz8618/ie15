@@ -61,7 +61,7 @@ def to_png_bytes(screen: Screen, charset: Charset, path: str) -> None:
                     on = ((row >> (6 - c)) & 1) ^ inv
                     glyph_rows[r] += bytes(GREEN if on else DARK) * SCALE
         for r in range(8):
-            line = b"\x00" + glyph_rows[r] * SCALE
+            line = b"\x00" + glyph_rows[r]   # пиксели уже масштабированы по X
             for _ in range(SCALE):
                 rows.append(line)
     raw = b"".join(rows)

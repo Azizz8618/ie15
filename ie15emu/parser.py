@@ -3,6 +3,10 @@
 15ИЭ-00-013 совместим с командами VT52. Реализован базовый набор:
 
   УП (0x00..0x1F):  ПР(0D) ПС(0A) ВК(08) ТАБ(09) ЗВН(07) ...
+  ESC [ … — CSI (ECMA-48): коды SGR/курсорных последовательностей
+              проглатываются (линии SIMH VT340 шлют «ESC [ 2 m» для
+              отображаемых УП); после «ESC [» буквы A/B/C/D работают
+              как и без «[» — стрелки ANSI
   ESC A/B/C/D  — курсор вверх/вниз/вправо/влево
   ESC H        — курсор в «дом» (0,0)
   ESC I        — курсор вверх со скроллом вниз (RI)
@@ -16,6 +20,7 @@
 from __future__ import annotations
 
 from . import COLS, ROWS
+from .charset import ALPHA_BIT
 from .screen import Screen
 
 # Управляющие коды
@@ -38,19 +43,24 @@ ESC = 0x1B
 class Parser:
     """Побайтовый автомат разбора потока от ЭВМ.
 
-    rus_letters=True — КОИ7 Н1: коды 0x01..0x1A (кроме 08/09/0A/0D)
-    выводятся как русские буквы; иначе трактуются как УП
-    (гашение, ВЛК, ЗП, КАН …). Выбор соответствует биту алфавита
-    терминала (ГОСТ 27463-87, «З[8]3»).
+    Режим 2 (по умолчанию, «набор команд №2», VT52) разбирает ESC-
+    последовательности; режим 1 принимает только управляющие коды и
+    печать. С БЭСМ-6 терминаль работает в режиме 2.
+
+    Бит алфавита (0x80) у кода 0x00..0x1E — русская заглавная буква
+    КОИ7 Н1, кладётся в ОЗУ без изменения значений; без бита те же коды
+    — управляющие. Не распознаваемые УП (НУС, ЕОТ …) проглатываются:
+    настоящие буквы приходят только с битом алфавита или строкой
+    0x60..0x7E, поэтому «кириллица» из УП-кодов на экране невозможна.
     """
 
-    CTRL = {BS, HT, LF, CR, BEL, VT, FF}
-
-    def __init__(self, rus_letters: bool = False) -> None:
+    def __init__(self, mode: int = 2) -> None:
+        if mode not in (1, 2):
+            raise ValueError(f"неизвестный режим набора команд: {mode!r}")
         self.screen = Screen()
         self.state = "raw"
         self._esc_args: list[int] = []
-        self.rus_letters = rus_letters
+        self.mode = mode         # 1 — только УП; 2 — набор №2 (VT52), по умолчанию
 
     def feed(self, data: bytes) -> str | None:
         """Разобрать буфер; вернуть текст запроса от терминала (ESC Z и т.п.)."""
@@ -65,6 +75,14 @@ class Parser:
         s = self.state
         if s == "esc":
             return self._esc_byte(b)
+        if s == "csi":
+            # ECMA-48: ESC [ params final(0x40..0x7E). Параметры пропускаются,
+            # финальный байт идёт в общий диспетчер (линии VT340 шлют
+            # стрелки как ESC [ A, а УП — как «dim» ESC [ 2m …).
+            if 0x40 <= b <= 0x7E:
+                self.state = "raw"
+                return self._esc_byte(b)
+            return None
         if s == "esc_y":
             self._esc_args.append(b)
             self.state = "esc_y2"
@@ -79,8 +97,13 @@ class Parser:
             return None
 
         # raw
+        if b >= ALPHA_BIT:
+            self.screen.put(b)     # знак алфавита: русская заглавная (Н1+0x80)
+            return None
         if b == ESC:
-            self.state = "esc"
+            # режим 1 (набор №1): ESC-последовательностей нет — код гасится
+            if self.mode == 2:
+                self.state = "esc"
             return None
         if b == CR:
             self.screen.cr()
@@ -94,18 +117,19 @@ class Parser:
             self.screen.bell = True
         elif b in (VT, FF):
             self.screen.erase_eod()
-        elif 0x20 <= b < 0x7F:
-            self.screen.put(b)
-        elif b < 0x20 and self.rus_letters and b not in self.CTRL:
-            self.screen.put(b)     # КОИ7-буква
+        elif 0x20 <= b <= 0x7F:
+            self.screen.put(b)     # печать, 0x7F — сплошная заливка
         else:
-            self.screen.put(b)     # 7-разрядный код: старший бит игнорируется
+            pass                   # прочие УП (НУС, ЕОТ, СО …) — без отображения
         return None
 
     def _esc_byte(self, b: int) -> str | None:
         sc = self.screen
         self.state = "raw"
-        if b == ord("A"):
+        if b == ord("["):
+            self.state = "csi"
+            self._esc_args = []
+        elif b == ord("A"):
             sc.y = max(0, sc.y - 1)
         elif b == ord("B"):
             sc.y = min(ROWS - 1, sc.y + 1)

@@ -27,12 +27,13 @@ except ImportError:
 
 def pump(src, dst, strip_iac: bool = False) -> None:
     try:
+        filt = IacFilter() if strip_iac else None
         while True:
             data = src.recv(4096)
             if not data:
                 break
-            if strip_iac:
-                data = drop_iac(data)
+            if filt:
+                data = filt.feed(data)
             dst.sendall(data)
     except OSError:
         pass
@@ -44,24 +45,47 @@ def pump(src, dst, strip_iac: bool = False) -> None:
                 pass
 
 
-def drop_iac(buf: bytes) -> bytes:
-    """Убрать telnet-IAC (RFC 854): мост работает на уровне терминала."""
-    out = bytearray()
-    i, n = 0, len(buf)
-    while i < n:
-        if buf[i] == 0xFF and i + 1 < n:
-            cmd = buf[i + 1]
-            if 0xFB <= cmd <= 0xFE:
-                i += 3
-            elif cmd == 0xFA:
-                j = buf.find(b"\xff\xf0", i)
-                i = (j + 2) if j >= 0 else n
-            else:
-                i += 2
-        else:
-            out.append(buf[i])
+IAC, DONT, DO, WONT, WILL, SB, SE = 0xFF, 254, 253, 252, 251, 250, 240
+
+
+class IacFilter:
+    """Убрать telnet-IAC (RFC 854): мост работает на уровне терминала.
+
+    Состояние переживает границы recv(): последовательность IAC может
+    быть разрезана между кусками.
+    """
+
+    def __init__(self) -> None:
+        self.state = "data"          # data | cmd | opt | sb | sb_iac
+
+    def feed(self, buf: bytes) -> bytes:
+        out = bytearray()
+        i, n = 0, len(buf)
+        while i < n:
+            b = buf[i]
+            if self.state == "data":
+                if b == IAC:
+                    self.state = "cmd"
+                else:
+                    out.append(b)
+            elif self.state == "cmd":
+                if b in (WILL, WONT, DO, DONT):
+                    self.state = "opt"
+                elif b == SB:
+                    self.state = "sb"
+                elif b == IAC:
+                    self.state = "data"
+                else:
+                    self.state = "data"
+            elif self.state == "opt":
+                self.state = "data"
+            elif self.state == "sb":
+                if b == IAC:
+                    self.state = "sb_iac"
+            else:                    # sb_iac
+                self.state = "data" if b == SE else "sb"
             i += 1
-    return bytes(out)
+        return bytes(out)
 
 
 class BridgeServer(paramiko.ServerInterface):
@@ -82,6 +106,9 @@ class BridgeServer(paramiko.ServerInterface):
         return "password,publickey"
 
     def check_channel_exec_request(self, channel, command):
+        # paramiko передаёт команду как bytes (Message.get_string)
+        if isinstance(command, bytes):
+            command = command.decode("utf-8", "replace")
         if command.strip() in ("terminal", "ie15", ""):
             self.event.set()
             return True
@@ -107,17 +134,19 @@ def handle_client(client: socket.socket, args) -> None:
         client.close()
         return
     server.event.wait(30)
+    host, _, port = args.target.rpartition(":")
     try:
-        upstream = socket.create_connection(
-            tuple(args.target.rsplit(":", 1)[0:1] + (int(args.target.rsplit(":", 1)[1]),)), 10)
+        upstream = socket.create_connection((host, int(port)), 10)
     except OSError as e:
         channel.send(f"БЭСМ-6 линия недоступна: {e}\r\n".encode())
         channel.close()
         transport.close()
         return
     print(f"[мост] сессия от {client.getpeername()} → {args.target}", flush=True)
-    t1 = threading.Thread(target=pump, args=(channel, upstream, True), daemon=True)
-    t2 = threading.Thread(target=pump, args=(upstream, channel, False), daemon=True)
+    # IAC-неговацию шлёт SIMH (upstream), её и вырезаем; терминал→SIMH идёт
+    # чистый КОИ7/UTF-8 без 0xFF.
+    t1 = threading.Thread(target=pump, args=(channel, upstream, False), daemon=True)
+    t2 = threading.Thread(target=pump, args=(upstream, channel, True), daemon=True)
     t1.start()
     t2.start()
     t2.join()

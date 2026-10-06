@@ -6,8 +6,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from ie15emu.charset import (Charset, decode_koi7, encode_koi7,
-                             normalize_line_bytes)
+from ie15emu.charset import (Charset, RUS7, decode_koi7, encode_koi7,
+                             normalize_incremental, normalize_line_bytes,
+                             to_line)
 
 ROM = Path(__file__).resolve().parent.parent / "rom" / "chargen-15ie.bin"
 
@@ -18,7 +19,8 @@ def make_charset() -> Charset:
 
 def test_encode_lower_and_upper():
     b = encode_koi7("аА")
-    assert b == bytes([0x61, 0x01])      # «а» = 0x60+1, «А» = 0x01
+    # Внутренний поток: бит алфавита 0x80; строчная ещё и 0x60.
+    assert b == bytes([0xE1, 0x81])      # «а» = 0xE0+1, «А» = 0x80+1
     assert decode_koi7(b) == "аА"
 
 
@@ -37,27 +39,78 @@ def test_ascii_passthrough():
     assert b == b"hello 123"
 
 
+def test_control_passthrough():
+    # ПР/ПС/ВК/ESC в тексте не должны становиться «█» (дефект --feed)
+    assert encode_koi7("выд\r\n") == encode_koi7("выд") + b"\r\n"
+
+
 def test_unknown_char_maps_to_block():
     assert encode_koi7("№") == b"\x7f"
-    assert decode_koi7(b"\x7f") == "\u2588"
+    assert decode_koi7(b"\x7f") == "█"
 
 
 def test_normalize_line_bytes_utf8():
-    # UTF-8 вход (как с линии SIMH БЭСМ-6) → 7-разрядные коды КОИ7
-    src = "\u0411\u042d\u0421\u041c-6".encode("utf-8")
+    # UTF-8 вход (как с линии SIMH БЭСМ-6) → внутренний поток КОИ7 Н1:
+    # заглавные помечаются битом алфавита (0x8D «М» ≠ 0x0D ПР!),
+    # перевод строки не превращается в «█».
+    src = "БЭСМ-6М\r\n".encode("utf-8")
     out = normalize_line_bytes(src)
-    assert all(b < 0x80 for b in out)
-    assert decode_koi7(out) == "\u0411\u042d\u0421\u041c-6"
+    assert decode_koi7(out[:-2]) == "БЭСМ-6М"   # ПР ПС — не буквы!
+    assert out[6] == 0x8D                  # «М» заглавная = Н1+0x80
+    assert out[-2:] == b"\r\n"
 
 
 def test_normalize_line_bytes_raw7bit_passes_unchanged():
-    raw = encode_koi7("\u043f\u0440\u0438\u0432\u0435\u0442")   # уже 7 бит
+    # линия RAW: машина отдаёт внутренние КОИ7-коды (< 0x80) — как есть
+    raw = bytes(0x60 + RUS7.index(c) for c in "ПРИВЕТ")
     assert normalize_line_bytes(raw) == raw
+
+
+def test_koi7_raw_upper():
+    # линия RAW: строка 0x60.. машины — заглавные (алфавит одно-регистрный)
+    from ie15emu.charset import koi7_raw_upper
+    raw = bytes(0x60 + RUS7.index(c) for c in "ВЫД")     # b"wyd"
+    out = koi7_raw_upper(raw)
+    assert out == encode_koi7("ВЫД")                     # форма 0x80+i
+    assert decode_koi7(out) == "ВЫД"
+    assert koi7_raw_upper(b"HYC\r\n") == b"HYC\r\n"      # латиница/УП не тронуты
+
+
+def test_to_line_raw_matches_besm_internal():
+    # линия RAW/KOI-7: буква уходит во внутреннюю строку БЭСМ-6 0x60.. —
+    # ровно как в живом тесте: «ВЫД» → b"wyd"; конец строки — ETX
+    assert to_line(encode_koi7("ВЫД"), "raw") == b"wyd"
+    assert to_line(encode_koi7("выд"), "raw") == b"wyd"
+    assert to_line(encode_koi7("МАМА\r\n"), "raw") == b"mama\x03"
+
+
+def test_to_line_utf8_sends_cyrillic_as_utf8():
+    # линия UTF-8: кириллица уходит многобайтово (unicode_to_koi7 в SIMH
+    # положит её в ту же строку 0x60..); ПР ПС сворачивается в один ПР,
+    # иначе vt_fix прочитал бы два конца строки; латиница — как есть
+    assert to_line(encode_koi7("МАМА"), "utf8") == "МАМА".encode("utf-8")
+    assert to_line(encode_koi7("ма"), "utf8") == "ма".encode("utf-8")
+    assert to_line(b"HYC\r\n", "utf8") == b"HYC\r"
+    assert to_line(b"work", "utf8") == b"work"
+    assert to_line(encode_koi7("ВЫД\r\n"), "utf8") \
+        == "ВЫД\r".encode("utf-8")
+
+
+def test_normalize_incremental_splits_utf8():
+    # разрез многобайтового символа на границе recv() не даёт «█»-мусор
+    src = to_line(encode_koi7("ПРИВЕТ"), "utf8")   # UTF-8 с заглавными
+    out = b""
+    carry = b""
+    for i in range(len(src)):                      # по одному байту
+        part, carry = normalize_incremental(src[i:i + 1], carry)
+        out += part
+    assert carry == b""
+    assert decode_koi7(out) == "ПРИВЕТ"
 
 
 def test_label_block_char():
     c = make_charset()
-    assert c.label(0x7F) == "\u2588"
+    assert c.label(0x7F) == "█"
 
 
 def test_glyph_block_is_filled():

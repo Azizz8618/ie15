@@ -91,9 +91,8 @@ class Screen:
 
     # --- выдача -----------------------------------------------------
     def text(self) -> str:
-        rows = ["".join(chr(c) if 0x20 <= c < 0x7F else "." for c in row)
-                for row in self.cells]
-        return "\n".join(rows)
+        from .charset import decode_koi7
+        return "\n".join(decode_koi7(bytes(row)) for row in self.cells)
 
     def dump(self) -> str:
         out = ["+" + "-" * COLS + "+"]
