@@ -14,7 +14,7 @@
 """
 from __future__ import annotations
 
-from . import COLS
+from . import COLS, ROWS
 from .charset import (koi7_display_upper, koi7_raw_upper,
                       normalize_incremental, to_line)
 from .keyboard import DEFAULT_LAYOUT, key_to_bytes
@@ -59,6 +59,7 @@ class TerminalSession:
         self.layout = layout
         self.koi7 = layout is not None
         self.buffer = bytearray()
+        self._echo_top = None        # строка, с которой началось локальное эхо блока
         self.encoding = encoding     # «utf8» | «raw» | «dks» — передача
         self.rx_encoding = encoding  # приём (у ДКС-линии — raw без НУСов)
         self.enc_decided = False     # баннер «Encoding is …» обработан
@@ -111,7 +112,22 @@ class TerminalSession:
             self.last_key = hint
             self._update_service()
         if key == "SEND":
-            return self.send()
+            data = self.send()
+            if data:
+                # «отдать строку»: если оператора не закрыл её Enter'ом,
+                # ПЕРЕДАЧА добавляет ПР ПС — иначе Э-60 доэхомит блок
+                # в незакрытую строку
+                if data[-1:] not in (b"\r", b"\n"):
+                    data += b"\r\n"
+                # Э-60 (ДКС) всегда локально эхит отданный блок — стираем
+                # свою копию, чтобы эхо машины встала на её место
+                # одной строкой (на serial-линиях эха может не быть).
+                if self.encoding == "dks":
+                    self._erase_local_echo()
+                # как на настоящем терминале: отдав буфер, терминал
+                # переходит в режим С ЭВМ
+                self.set_mode(MODE_HOST)
+            return data
         if key == "MODE":
             self.toggle_mode()
             return None
@@ -128,10 +144,27 @@ class TerminalSession:
         # держим линию свободной (как на незаполненном PLAN-символ «Р»).
         # Эхо — заглавными (Н1 не различает регистр, так же отвечает ЭВМ);
         # в буфере код остаётся как дана раскладка.
+        if not self.buffer:
+            self._echo_top = self.parser.screen.y
         self.buffer += data
         self.parser.feed(koi7_display_upper(data))
         self._update_service()
         return None
+
+    def _erase_local_echo(self) -> None:
+        """Стереть строки локального эха отдаваемого блока и вернуть
+        курсор в начало: эхо ЭВМ (на Э-60 оно всегда включено) впишет
+        текст заново — без дублирования внахлёст."""
+        if self._echo_top is None:
+            return
+        y_end = min(self.parser.screen.y, ROWS - 1)
+        top = min(self._echo_top, y_end)   # блок мог убежать при скролле
+        cmd = bytearray()
+        for y in range(top, y_end + 1):
+            cmd += b"\x1bY" + bytes([0x20 + y, 0x20]) + b"\x1bK"
+        cmd += b"\x1bY" + bytes([0x20 + top, 0x20])
+        self._echo_top = None
+        self.parser.feed(bytes(cmd))
 
     # --- передача буфера --------------------------------------------
     def send(self) -> bytes:

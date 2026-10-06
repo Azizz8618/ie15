@@ -42,10 +42,12 @@ def test_send_key_transmits_buffer_then_clears():
     for ch in "work":
         session.feed_key(ch)
     out = session.feed_key(KEY_SEND)
-    assert out == b"work"
+    # ПЕРЕДАЧА завершает строку (добавлены ПР ПС) и переводит в С ЭВМ
+    assert out == b"work\r\n"
     session.emit(out)
-    assert link.sent == [b"work"]
+    assert link.sent == [b"work\r"]          # utf8: ПР ПС → один ПР
     assert session.pending() == b""
+    assert session.mode == MODE_HOST
 
 
 def test_host_mode_sends_immediately():
@@ -87,7 +89,7 @@ def test_local_uppercase_echo_and_send_raw():
     assert session.parser.screen.text().startswith("МАМЫ")
     session.encoding = "raw"
     session.emit(session.feed_key(KEY_SEND))
-    assert link.sent == [b"mamy"]
+    assert link.sent == [b"mamy\x03"]        # без Enter ПЕРЕДАЧА сама закрыла строку
     assert session.pending() == b""
 
 
@@ -102,7 +104,28 @@ def test_local_echo_uppercase_buffer_keeps_layout():
     assert session.parser.screen.text().startswith("Й")
     assert session.pending() == bytes([0x8A | 0x60])
     session.emit(session.feed_key("SEND"))
-    assert link.sent == [bytes([0x60 | 0x0A])]        # «j» = код Й в Н1
+    assert link.sent == [bytes([0x60 | 0x0A, 0x03])]  # «j»=Й в Н1 + ETX-окончание
+
+
+def test_send_dks_replaces_local_echo():
+    # ДКС: Э-60 всегда эхит отданный блок. ПЕРЕДАЧА стирает локальную
+    # копию — эхо машины вписывает текст на её место, без «PFLPFL»
+    link = FakeLink()
+    session = TerminalSession(Parser(), link=link, mode=MODE_LOCAL)
+    session.encoding = "dks"
+    for ch in "abc":
+        session.feed_key(ch)
+    cells = session.parser.screen.cells
+    assert cells[0][:3] == [ord("a"), ord("b"), ord("c")]   # локальное эхо
+    session.emit(session.feed_key("SEND"))
+    # после SEND: строка чиста, курсор в её начало, режим — С ЭВМ
+    assert cells[0][:3] == [0x20, 0x20, 0x20]
+    assert (session.parser.screen.x, session.parser.screen.y) == (0, 0)
+    assert session.mode == MODE_HOST
+    # эхо ЭВМ ложится единственной копией
+    session.handle_line_reply(b"abc\r\n")
+    assert cells[0][:3] == [ord("a"), ord("b"), ord("c")]
+    assert cells[0][3] == 0x20
 
 
 def test_host_uppercase_utf8_line():
