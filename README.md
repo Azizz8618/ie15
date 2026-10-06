@@ -144,7 +144,8 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 | `[ssh] password` | пароль (когда ключ не задан/не найден) |
 | `[terminal] mode` | `host` (С ЭВМ) или `local` (АВТОНОМНО) |
 | `[terminal] sets` | набор команд при запуске: `2` (VT52) или `1` |
-| `[terminal] koi7` | `true` — русская раскладка: клавиши QWERTY печатают русские буквы, Shift+клавиша — английские |
+| `[terminal] layout` | русская раскладка: `positional` — по положению клавиш ЙЦУКЕН (по умолчанию: q→Й), `phonetic` — фонетическая (q→Я, w→В), `off` — выключена |
+| `[terminal] koi7` | `true` — включить раскладку (`layout` по умолчанию — позиционную), если `layout` не задан |
 
 Другой файл: `./ie15 --conf /путь/ie15.conf`.
 

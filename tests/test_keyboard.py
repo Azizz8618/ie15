@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ie15emu.charset import encode_koi7
-from ie15emu.keyboard import (KEY_CMDSET, KEY_MODE, KEY_SEND,
+from ie15emu.keyboard import (DEFAULT_LAYOUT, KEY_CMDSET, KEY_MODE, KEY_SEND,
                               decode_key_bytes, key_to_bytes)
 
 
@@ -37,29 +37,42 @@ def test_send_then_mode():
 
 def test_f1_f11_ne_razbirayutsya():
     # F1 (\x1bOP) и F11 (\x1b[23~) не служат клавишами терминала: не должны
-    # давать служебных ключей (экранные коды из них не делает и parсер-режим)
+    # давать ни служебных ключей, ни экранных кодов
     assert KEY_MODE not in decode_key_bytes(b"\x1b[23~")
     assert KEY_SEND not in decode_key_bytes(b"\x1b[23~")
     assert KEY_CMDSET not in decode_key_bytes(b"\x1bOP")
 
 
-def test_koi7_shift_prints_english():
-    # Русская раскладка (--koi7): без Shift — русская буква,
-    # с Shift — английская (таблица Key-ов нижнего регистра)
-    assert key_to_bytes("w", koi7=True) == bytes([0xF6])     # «в» = 0xE0|0x16
-    assert key_to_bytes("W", koi7=True) == b"W"              # Shift → английский
-    assert key_to_bytes("Q", koi7=True) == b"Q"
-    assert key_to_bytes("<", koi7=True) == b"<"              # Shift+«,” — англ.
-    assert key_to_bytes("1", koi7=True) == b"1"
-    assert key_to_bytes("ж", koi7=True) == encode_koi7("ж")  # прямая кириллица — как была
+def test_positional_layout_default():
+    # Позиционная (по умолчанию): клавиша даёт русскую букву своего места
+    assert DEFAULT_LAYOUT == "positional"
+    assert key_to_bytes("q", layout="positional") == bytes([0x0A | 0xE0])  # Й
+    assert key_to_bytes("w", layout="positional") == bytes([0x03 | 0xE0])  # Ц
+    assert key_to_bytes("Q", layout="positional") == b"Q"          # Shift — англ.
+    assert key_to_bytes("<", layout="positional") == b"<"
+    assert key_to_bytes("1", layout="positional") == b"1"
+
+
+def test_phonetic_layout():
+    # Фонетическая: w→В, q→Я, x→Ч (историческая таблица проекта)
+    assert key_to_bytes("w", layout="phonetic") == bytes([0x16 | 0xE0])  # Ж
+    assert key_to_bytes("q", layout="phonetic") == bytes([0x11 | 0xE0])  # Я
+    assert key_to_bytes("W", layout="phonetic") == b"W"
+
+
+def test_shift_switches_alphabet_ru_os():
     # RU-раскладка ОС: Shift+ц присылает «Ц» — «регистр» переключает
-    # алфавит: буква уходит английской, какой назначена в QWERTY2KOI7
-    assert key_to_bytes("Ц", koi7=True) == b"C"              # «c»→Ц
-    assert key_to_bytes("В", koi7=True) == b"X"              # «x»→В
-    assert key_to_bytes("Ж", koi7=True) == b"V"              # w/v→Ж: берётся v
-    assert key_to_bytes("Й", koi7=True) == b"J"              # «j»→Й
-    assert key_to_bytes("ц", koi7=True) == encode_koi7("ц")  # без Shift — русская
-    assert key_to_bytes("Ц", koi7=False) == encode_koi7("Ц")  # вне --koi7 — без переключения
+    # алфавит: буква уходит английской по обратной таблице выбранной раскладки
+    assert key_to_bytes("Ц", layout="positional") == b"W"          # pos: w→Ц
+    assert key_to_bytes("Ц", layout="phonetic") == b"C"            # phon: c→Ц
+    assert key_to_bytes("ц", layout="positional") == encode_koi7("ц")   # без Shift — русская
+    assert key_to_bytes("Ж", layout="phonetic") == b"W"            # w/v→Ж: первая w
+
+
+def test_layout_off_passes_through():
+    # Выключенная раскладка: латиница как есть, заглавная кириллица не тронется
+    assert key_to_bytes("q", layout=None) == b"q"
+    assert key_to_bytes("Ц", layout=None) == encode_koi7("Ц")
 
 
 def test_control_keys_send_esc():

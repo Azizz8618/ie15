@@ -20,7 +20,7 @@ from pathlib import Path
 
 from . import COLS, ROWS, __version__
 from .charset import Charset, encode_koi7
-from .keyboard import key_to_bytes
+from .keyboard import DEFAULT_LAYOUT, key_to_bytes
 from .link import LinkError, open_link
 from .parser import Parser
 from .render import to_png_bytes, to_text
@@ -62,6 +62,9 @@ def apply_conf(ns, cp: configparser.ConfigParser):
         ns.sets = cp.get("terminal", "sets", fallback="2") or "2"
     if not ns.koi7:
         ns.koi7 = cp.getboolean("terminal", "koi7", fallback=False)
+    if ns.layout is None:
+        lay = cp.get("terminal", "layout", fallback="").strip().lower()
+        ns.layout = lay or None    # "" — не задано; "off" снимет разбор в main()
     if ns.password is None:
         ns.password = cp.get("ssh", "password", fallback="") or None
     if ns.keyfile is None:
@@ -124,7 +127,7 @@ def _drain_banner(session, timeout: float = 2.0) -> None:
 
 def run_line(parser: Parser, url: str, png: str | None,
              seconds: float, feed: str | None, mode: str = "host",
-             koi7: bool = False, **linkkw) -> None:
+             layout: str | None = None, **linkkw) -> None:
     import os
     import select
     import termios
@@ -137,7 +140,7 @@ def run_line(parser: Parser, url: str, png: str | None,
     except (LinkError, OSError) as e:
         print(f"[линия] {url} — не удалось подключиться: {e}")
         return
-    session = TerminalSession(parser, link=link, mode=mode, koi7=koi7)
+    session = TerminalSession(parser, link=link, mode=mode, layout=layout)
     print(f"[линия] {url} — подключено (режим: {mode})")
     print("[клавиши] ввод — в линию/буфер; F8 — РЕЖИМ (набор №1↔№2), "
           "F9 — АВТОНОМНО↔С ЭВМ, F10 — SEND, Ctrl-C — выход")
@@ -146,7 +149,7 @@ def run_line(parser: Parser, url: str, png: str | None,
     if url.startswith(("tcp://", "ssh://")):
         _drain_banner(session, timeout=2.0)
     if feed:
-        session.emit(key_to_bytes(feed, koi7=koi7))
+        session.emit(key_to_bytes(feed, layout=layout))
 
     fd = sys.stdin.fileno() if sys.stdin.isatty() else None
     old = termios.tcgetattr(fd) if fd is not None else None
@@ -241,7 +244,11 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--keyfile", default=None,
                     help="закрытый ключ ssh (иначе keyfile из [ssh])")
     ap.add_argument("--koi7", action="store_true",
-                    help="раскладка клавиатуры КОИ7 (ЙЦУКЕН)")
+                    help="включить русскую раскладку (по умолчанию — позиционная)")
+    ap.add_argument("--layout", choices=["positional", "phonetic", "off"],
+                    default=None, help="русская раскладка: positional — по "
+                    "положению ЙЦУКЕН (по умолчанию), phonetic — фонетическая, "
+                    "off — выключена")
     ap.add_argument("--mode", choices=["local", "host"], default=None,
                     help="автономная работа (local) или работа с ЭВМ (host, "
                          "по умолчанию); F8 — режим наборов №1/№2, "
@@ -254,6 +261,16 @@ def main(argv: list[str] | None = None) -> None:
     args = apply_conf(args, load_conf(args.conf))
     args.mode = args.mode or "host"
     args.sets = args.sets or "2"
+    # Итоговая раскладка: --layout/off явнее всего; иначе --koi7 (или
+    # koi7 в конфиге) включает позиционную по умолчанию.
+    if args.layout == "off":
+        layout = None
+    elif args.layout:
+        layout = args.layout
+    elif args.koi7:
+        layout = DEFAULT_LAYOUT
+    else:
+        layout = None
 
     charset = Charset(Path(args.roms) / "chargen-15ie.bin")
     parser = Parser(mode=int(args.sets))
@@ -261,7 +278,7 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.line:
         run_line(parser, args.line, args.png, args.seconds,
-                 args.feed, mode=args.mode, koi7=args.koi7,
+                 args.feed, mode=args.mode, layout=layout,
                  password=args.password, keyfile=args.keyfile)
     else:
         run_script(parser, args.png)

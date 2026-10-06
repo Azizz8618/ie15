@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from . import COLS
 from .charset import koi7_raw_upper, normalize_incremental, to_line
-from .keyboard import key_to_bytes
+from .keyboard import DEFAULT_LAYOUT, key_to_bytes
 
 MODE_LOCAL = "local"      # «АВТОНОМНО»
 MODE_HOST = "host"        # «С ЭВМ»
@@ -37,17 +37,26 @@ CONTROL_HINTS = {
 }
 
 
+LAYOUT_LABELS = {"phonetic": "ФОН", "positional": "ПОЗ"}
+
+
 class TerminalSession:
     """Состояние терминала: режим работы + накопленный буфер автономного набора."""
 
     def __init__(self, parser, link=None, mode: str = MODE_LOCAL,
-                 koi7: bool = False, encoding: str = "utf8") -> None:
+                 koi7: bool = False, encoding: str = "utf8",
+                 layout: str | None = None) -> None:
         if mode not in (MODE_LOCAL, MODE_HOST):
             raise ValueError(f"неизвестный режим: {mode!r}")
         self.parser = parser
         self.link = link
         self.mode = mode
-        self.koi7 = koi7
+        # layout — выбранная русская раскладка; koi7 (старый флаг) включает
+        # раскладку по умолчанию (позиционную).
+        if layout is None and koi7:
+            layout = DEFAULT_LAYOUT
+        self.layout = layout
+        self.koi7 = layout is not None
         self.buffer = bytearray()
         self.encoding = encoding     # «utf8» | «raw» | «dks» — передача
         self.rx_encoding = encoding  # приём (у ДКС-линии — raw без НУСов)
@@ -77,9 +86,11 @@ class TerminalSession:
         parts = ["С ЭВМ" if self.mode == MODE_HOST else "АВТОНОМНО",
                  f"РЕЖИМ {self.parser.mode}=" + ("VT52" if self.parser.mode == 2 else "УП"),
                  LINE_LABELS.get(self.encoding, f"ЛИНИЯ={self.encoding}"),
-                 "АЛФ=Н1",
-                 "ВИДЕО=" + ("ИНВ" if sc.inverse else "НОРМ"),
-                 "ПЕРЕДАЧА=" + (str(len(self.buffer)) if self.buffer else "ПУСТО")]
+                 "АЛФ=Н1"]
+        if self.layout:
+            parts.append("РАСК=" + LAYOUT_LABELS.get(self.layout, self.layout))
+        parts += ["ВИДЕО=" + ("ИНВ" if sc.inverse else "НОРМ"),
+                  "ПЕРЕДАЧА=" + (str(len(self.buffer)) if self.buffer else "ПУСТО")]
         left = " ".join(parts)
         right = self.last_key or ""
         gap = COLS - len(left) - len(right)
@@ -107,7 +118,7 @@ class TerminalSession:
             self.parser.mode = 1 if self.parser.mode == 2 else 2
             self._update_service()
             return None
-        data = key_to_bytes(key, koi7=self.koi7)
+        data = key_to_bytes(key, layout=self.layout)
         if not data:
             return None
         if self.mode == MODE_HOST:

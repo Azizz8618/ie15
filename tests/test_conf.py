@@ -25,12 +25,13 @@ password = secret
 mode = local
 sets = 1
 koi7 = true
+layout = phonetic
 """
 
 
 def ns(**kw):
     base = dict(line=None, script=None, mode=None, sets=None, koi7=False,
-                password=None, keyfile=None)
+                layout=None, password=None, keyfile=None)
     base.update(kw)
     return SimpleNamespace(**base)
 
@@ -67,7 +68,13 @@ def test_apply_fills_defaults():
     cp = cp_from(CONF)
     got = apply_conf(ns(), cp)
     assert got.mode == "local" and got.sets == "1" and got.koi7 is True
+    assert got.layout == "phonetic"
     assert got.password == "secret"
+
+
+def test_layout_off_in_conf():
+    cp = cp_from(CONF.replace("layout = phonetic", "layout = off"))
+    assert apply_conf(ns(), cp).layout == "off"
 
 
 def test_cli_wins_over_conf():
