@@ -29,8 +29,10 @@ class TestUpKody(unittest.TestCase):
         sc = p.screen
         self.assertEqual(sc.cells[0][0], ord("c"))   # ПР: «c» поверх «a»
         self.assertEqual(sc.cells[0][1], ord("b"))
-        self.assertEqual(sc.cells[1][0], 0x20)       # ПС: без возврата каретки
-        self.assertEqual(sc.cells[1][1], ord("d"))
+        # ПС — новая строка с возвратом каретки (шаблон ДИСПАК «ПС текст ПР»):
+        # «d» в нулевую колонку, лесенки за чистым ПС нет
+        self.assertEqual(sc.cells[1][0], ord("d"))
+        self.assertEqual(sc.cells[1][1], 0x20)
 
     def test_vk_kursor_vlevo(self):
         p = Parser()
@@ -230,6 +232,17 @@ class TestPerenosStroki(unittest.TestCase):
         self.assertEqual(p.screen.cells[ROWS - 2][0], ord("4"))   # последняя
         self.assertEqual(p.screen.cells[ROWS - 1][0], 0x20)
         self.assertEqual(p.screen.y, ROWS - 1)
+
+    def test_ps_s_vozvratom_karetki(self):
+        # ПС без ПР (шаблон ДИСПАК «ПС текст ПР») обязан ровнять колонку:
+        # иначе ответы машины «лесенкой» за эхом Э-60
+        p = Parser()
+        p.feed(b"abcd" + bytes([LF]) + b"XY")
+        self.assertEqual(p.screen.cells[0][:4],
+                         [ord(c) for c in "abcd"])
+        self.assertEqual(p.screen.cells[1][0], ord("X"))
+        self.assertEqual(p.screen.cells[1][1], ord("Y"))
+        self.assertEqual(p.screen.cells[1][2], 0x20)
 
     def test_csi_sgr_glossitsya(self):
         # линии SIMH VT340 рисуют УП через «ESC [ 2 m <символ> ESC [ m»
