@@ -91,6 +91,20 @@ def test_local_uppercase_echo_and_send_raw():
     assert session.pending() == b""
 
 
+def test_local_echo_uppercase_buffer_keeps_layout():
+    # АВТОНОМНО с позиционной раскладкой: эхо заглавная «Й», в буфере —
+    # строчный код раскладки (0xEA), на линию уходит КОИ7 (0x6A = Й)
+    link = FakeLink()
+    session = TerminalSession(Parser(), link=link, mode=MODE_LOCAL,
+                              layout="positional")
+    session.encoding = session.rx_encoding = "raw"
+    session.feed_key("q")
+    assert session.parser.screen.text().startswith("Й")
+    assert session.pending() == bytes([0x8A | 0x60])
+    session.emit(session.feed_key("SEND"))
+    assert link.sent == [bytes([0x60 | 0x0A])]        # «j» = код Й в Н1
+
+
 def test_host_uppercase_utf8_line():
     session, link = make_session(MODE_HOST)
     session.encoding = "utf8"

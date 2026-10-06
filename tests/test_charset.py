@@ -66,6 +66,14 @@ def test_normalize_line_bytes_raw7bit_passes_unchanged():
     assert normalize_line_bytes(raw) == raw
 
 
+def test_koi7_display_upper():
+    # локальное эхо АВТОНОМНО: строчные Н1 (0xE0..) → заглавные (0x80..),
+    # латиница и УП не тронуты
+    from ie15emu.charset import koi7_display_upper
+    assert koi7_display_upper(encode_koi7("ва")) == encode_koi7("ВА")
+    assert koi7_display_upper(b"HELLO\r\n") == b"HELLO\r\n"
+
+
 def test_koi7_raw_upper():
     # линия RAW: строка 0x60.. машины — заглавные (алфавит одно-регистрный)
     from ie15emu.charset import koi7_raw_upper

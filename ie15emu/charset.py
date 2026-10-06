@@ -190,6 +190,14 @@ def koi7_raw_upper(data: bytes) -> bytes:
                  for b in data)
 
 
+def koi7_display_upper(data: bytes) -> bytes:
+    """Локальное эхо АВТОНОМНО: алфавит Н1 одно-регистрный — русские
+    буквы печатаются заглавными, как их покажет ЭВМ (`koi7_rus_to_unicode`
+    в SIMH отдаёт строку 0x60.. заглавными)."""
+    return bytes(b - 0x60 if 0xE0 <= b < 0xE0 + len(RUS7) else b
+                 for b in data)
+
+
 def to_line(data: bytes, encoding: str = "utf8") -> bytes:
     """Внутренний КОИ7 Н1 поток (бит алфавита 0x80) → байты линии ЭВМ.
 

@@ -15,7 +15,8 @@
 from __future__ import annotations
 
 from . import COLS
-from .charset import koi7_raw_upper, normalize_incremental, to_line
+from .charset import (koi7_display_upper, koi7_raw_upper,
+                      normalize_incremental, to_line)
 from .keyboard import DEFAULT_LAYOUT, key_to_bytes
 
 MODE_LOCAL = "local"      # «АВТОНОМНО»
@@ -125,8 +126,10 @@ class TerminalSession:
             return data
         # АВТОНОМНО: накапливаем в буфере и печатаем на экране,
         # держим линию свободной (как на незаполненном PLAN-символ «Р»).
+        # Эхо — заглавными (Н1 не различает регистр, так же отвечает ЭВМ);
+        # в буфере код остаётся как дана раскладка.
         self.buffer += data
-        self.parser.feed(data)
+        self.parser.feed(koi7_display_upper(data))
         self._update_service()
         return None
 
