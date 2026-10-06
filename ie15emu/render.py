@@ -11,7 +11,7 @@ import zlib
 
 from . import COLS, ROWS
 from .charset import Charset
-from .screen import ATTR_INV, Screen
+from .screen import ATTR_BLINK, ATTR_INV, Screen
 
 GREEN = (0x33, 0xFF, 0x66)
 DARK = (0x08, 0x14, 0x0C)
@@ -26,7 +26,7 @@ def to_ansi(screen: Screen, charset: Charset,
     for y in range(ROWS):
         for x in range(COLS):
             code = screen.cells[y][x]
-            inv = screen.attr[y][x] & ATTR_INV
+            inv = screen.attr[y][x] & (ATTR_INV | ATTR_BLINK)
             is_cur = cursor and (x, y) == (screen.x, screen.y)
             bits = charset.rows(code)
             for r, row in enumerate(bits):
@@ -55,7 +55,7 @@ def to_png_bytes(screen: Screen, charset: Charset, path: str) -> None:
         glyph_rows = [b"" for _ in range(8)]
         for x in range(COLS):
             code = screen.cells[y][x]
-            inv = bool(screen.attr[y][x] & ATTR_INV)
+            inv = bool(screen.attr[y][x] & (ATTR_INV | ATTR_BLINK))
             for r, row in enumerate(charset.rows(code)):
                 for c in range(7):
                     on = ((row >> (6 - c)) & 1) ^ inv
@@ -88,5 +88,7 @@ def to_text(screen: Screen, charset: Charset | None = None) -> str:
         out.append(f"|{line}|{marker}")
     out.append("+" + "-" * COLS + "+")
     out.append("|" + "".join(sc.service) + f"|  (служебная, стр. 25)")
+    for extra in sc.service_more:
+        out.append("|" + extra + "|")
     out.append(f"курсор: x={sc.x} y={sc.y} inverse={sc.inverse} bell={sc.bell}")
     return "\n".join(out)

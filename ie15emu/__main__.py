@@ -91,8 +91,8 @@ DEMO_SCRIPT = (
 
 def run_script(parser: Parser, png: str | None) -> None:
     sc = parser.screen
-    sc.set_service("АВТОНОМНО РЕЖИМ 2=VT52 ЛИНИЯ=ДЕМО АЛФ=Н1"
-                   " ВИДЕО=НОРМ ПЕРЕДАЧА=ПУСТО")
+    sc.set_service("СЕТЬ=АВТОНОМНО|НАБОР=2(VT52)|ЛИНИЯ=ДЕМО|РАСК=ВЫКЛ\n"
+                   "ВИДЕО=НОРМ|БУФЕР=ПУСТО")
     for chunk in DEMO_SCRIPT:
         parser.feed(chunk)
     parser.feed(b"\x1bY8\x20")  # курсор к служебной строке (поз. 25)
@@ -207,19 +207,30 @@ def link_sock(link):
 def text_screen(parser: Parser) -> str:
     """Псевдо-ЭЛТ: текстовый вывод содержимого 80×25 (коды КОИ7 → буквы).
 
-    Курсор показывается инверсным блоком — как мигающий квадратик
-    на настоящем дисплее.
+    Курсор — инверсный блок; образные знаки УП (блинк) мигают, как dim
+    на Видеотоне-340.
     """
     from .charset import decode_koi7
+    from .screen import ATTR_BLINK
 
     sc = parser.screen
-    lines = [decode_koi7(bytes(row)) for row in sc.cells]
-    if sc.y < len(lines) and sc.x < COLS:
-        row = list(lines[sc.y])
-        row[sc.x] = f"\x1b[7m{row[sc.x]}\x1b[27m"
-        lines[sc.y] = "".join(row)
+    lines = []
+    for y, row in enumerate(sc.cells):
+        toks = []
+        for x, code in enumerate(row):
+            ch = decode_koi7(bytes([code]))
+            if sc.attr[y][x] & ATTR_BLINK:
+                # 5 мигающий, 7 инверсия: там, где мигание отключено
+                # (большинство современных терминалов), знак остаётся
+                # различим инверсным блоком
+                ch = f"\x1b[5;7m{ch}\x1b[0m"
+            if y == sc.y and x == sc.x:
+                ch = f"\x1b[7m{ch}\x1b[27m"
+            toks.append(ch)
+        lines.append("".join(toks))
     lines.append("-" * COLS)
-    lines.append("".join(sc.service))
+    lines.append("".join(sc.service).rstrip())
+    lines.extend(r.rstrip() for r in sc.service_more)
     return "\r\n\x1b[H\x1b[2J" + "\r\n".join(lines) + "\r\n"
 
 

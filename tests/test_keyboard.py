@@ -7,7 +7,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ie15emu.charset import encode_koi7
-from ie15emu.keyboard import (DEFAULT_LAYOUT, KEY_CMDSET, KEY_MODE, KEY_SEND,
+from ie15emu.keyboard import (DEFAULT_LAYOUT, KEY_BLINK, KEY_CMDSET,
+                              KEY_MODE, KEY_SEND,
                               decode_key_bytes, key_to_bytes)
 
 
@@ -26,9 +27,10 @@ def test_arrow_sequences():
 
 
 def test_send_mode_keys():
-    assert decode_key_bytes(b"\x1b[21~") == [KEY_SEND]    # F10
-    assert decode_key_bytes(b"\x1b[20~") == [KEY_MODE]    # F9
-    assert decode_key_bytes(b"\x1b[19~") == [KEY_CMDSET]  # F8 — РЕЖИМ наборов
+    assert decode_key_bytes(b"\x1b[18~") == [KEY_BLINK]   # F7 — БЛИНК
+    assert decode_key_bytes(b"\x1b[19~") == [KEY_CMDSET]  # F8 — НАБОР
+    assert decode_key_bytes(b"\x1b[20~") == [KEY_MODE]    # F9 — СЕТЬ
+    assert decode_key_bytes(b"\x1b[21~") == [KEY_SEND]    # F10 — ПЕРЕДАЧА
 
 
 def test_send_then_mode():

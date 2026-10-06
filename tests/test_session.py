@@ -167,43 +167,71 @@ def test_dks_line_raw_with_cr_eol():
 
 
 def test_service_panel_all_bits():
-    # Служебная строка 25 — панель состояний управляющих клавиш с
-    # расшифровкой + последняя нажатая клавиша с её кодом
+    # Подвал: ряд состояний + ряды-легенды «функция=клавиша:код» через «|»,
+    # последняя нажатая клавиша — справа
     session, link = make_session(MODE_HOST)
 
-    def svc() -> str:
-        return "".join(session.parser.screen.service)
+    def rows():
+        sc = session.parser.screen
+        return [l.rstrip() for l in
+                ["".join(sc.service)] + sc.service_more]
 
-    for lab in ("С ЭВМ", "РЕЖИМ 2=VT52", "ЛИНИЯ=UTF-8", "АЛФ=Н1",
-                "ВИДЕО=НОРМ", "ПЕРЕДАЧА=ПУСТО"):
-        assert lab in svc(), lab
-    assert len(svc().rstrip()) <= 80, "панель не влезает в 80 знаков"
-    session.feed_key("KEY_END")                        # не в LOCAL — хост
-    assert "END=ESCK" in svc()
+    def panel() -> str:
+        return "\n".join(rows())
+
+    for lab in ("СЕТЬ=С ЭВМ", "НАБОР=2(VT52)", "ЛИНИЯ=UTF-8", "РАСК=ВЫКЛ",
+                "ВИДЕО=НОРМ", "БУФЕР=ПУСТО", "БЛИНК=ВКЛ"):
+        assert lab in panel(), lab
+    assert "ЗВУК" not in panel()
+    session.feed_key("BLINK")                            # F7 — скрыть знаки УП
+    assert "БЛИНК=ВЫКЛ" in panel() and not session.parser.show_ctrl
+    session.feed_key("BLINK")
+    assert "БЛИНК=ВКЛ" in panel() and session.parser.show_ctrl
+    for legend in ("ВК=Bksp", "ТАБ=Tab", "ЗВН=Ctrl-G", "ПРПС=Enter",
+                   "ESC=Esc", "КУРСОР=Стрелки", "ДОМ=Home", "СТЕРСТР=End",
+                   "СТЕРЭКР=PgUp", "ОЧИСТКА=PgDn", "ИНВЕРС=Ins",
+                   "НОРМ=Del", "НАБОР=F8", "СЕТЬ=F9", "ПЕРЕДАЧА=F10"):
+        assert legend in panel(), legend
+    # колонки ровные: разделители « | » стоят на одних и тех же позициях
+    # во всех рядах легенды
+    k_rows = [l for l in rows() if "Bksp" in l or "Home" in l or "PgUp" in l
+              or "F8" in l]
+    cols = [l.index("|") for l in k_rows]
+    assert all(c == cols[0] for c in cols), cols
+    for i, line in enumerate(rows()):
+        assert len(line) <= 80, f"ряд {i} шире 80 ({len(line)})"
+    session.feed_key("KEY_END")                        # подсветка нажатия
+    assert "ПОСЛ: END=ESCK" in panel()
     session.handle_line_reply(b"\x1bb")                # ESC b — инверсное
-    assert "ВИДЕО=ИНВ" in svc()
+    assert "ВИДЕО=ИНВ" in panel()
+    session.handle_line_reply(b"\x00")                 # НУС → «@» с блинком
+    from ie15emu.screen import ATTR_BLINK
+    sc = session.parser.screen
+    assert sc.cells[sc.y][sc.x - 1] == 0x40            # образный знак
+    assert sc.attr[sc.y][sc.x - 1] & ATTR_BLINK
     session.handle_line_reply(b"Connected to DKS\r\n")
-    assert "ЛИНИЯ=ДКС" in svc()
-    session.feed_key("MODE")                           # клавиша РЕЖИМ (F9)
-    assert "АВТОНОМНО" in svc() and "РЕЖИМ" in svc()   # последняя клавиша
+    assert "ЛИНИЯ=ДКС" in panel() and "РАСК=ВЫКЛ" in panel()
+    session.feed_key("MODE")                           # клавиша СЕАНС (F9)
+    assert "СЕТЬ=АВТОНОМНО" in panel()
     for ch in "ЗАД":
         session.feed_key(ch)
-    assert "ПЕРЕДАЧА=3" in svc()                       # буфер ждёт SEND
+    assert "БУФЕР=3" in panel()                        # буфер ждёт SEND
     session.emit(session.feed_key("SEND"))
-    assert "ПЕРЕДАЧА=ПУСТО" in svc() and link.sent
+    assert "БУФЕР=ПУСТО" in panel() and link.sent
+    assert "СЕТЬ=С ЭВМ" in panel()                    # SEND вернул в сеть
 
 
 def test_default_rezhim2_vt52():
     session, _ = make_session(MODE_HOST)
     assert session.parser.mode == 2
-    assert "РЕЖИМ 2" in "".join(session.parser.screen.service)
+    assert "НАБОР=2(VT52)" in "".join(session.parser.screen.service)
 
 
 def test_cmdset_key_toggles_rezhim():
     session, _ = make_session(MODE_HOST)
-    session.feed_key("CMDSET")                 # F8 — клавиша «РЕЖИМ»
+    session.feed_key("CMDSET")                 # F8 — клавиша «НАБОР»
     assert session.parser.mode == 1
-    assert "РЕЖИМ 1" in "".join(session.parser.screen.service)
+    assert "НАБОР=1(УП)" in "".join(session.parser.screen.service)
     session.feed_key("CMDSET")
     assert session.parser.mode == 2
 

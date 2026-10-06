@@ -176,14 +176,18 @@ class TestRusLetters(unittest.TestCase):
         p.feed(bytes([CR, LF, BS, HT]))
         self.assertEqual((p.screen.x, p.screen.y), (8, 1))
 
-    def test_up_bez_funkcii_ne_pechataetsya(self):
+    def test_up_bez_funkcii_pechataetsya_blinkom(self):
+        from ie15emu.screen import ATTR_BLINK
         p = Parser()
         p.feed(bytes([0x07]))          # ЗВН, не «Г»
         self.assertTrue(p.screen.bell)
         self.assertEqual(p.screen.cells[0][0], 0x20)
-        p.feed(b"\x00\x03")            # НУС, ЕОТ — не «Ю» и не «Ц»
-        self.assertEqual(p.screen.cells[0][:2], [0x20, 0x20])
-        self.assertEqual(p.screen.x, 0)
+        # НУС/ЕОТ — образные знаки code|0x40 с блинком (как dim на ВТ-340),
+        # а не буквы «Ю»/«Ц»
+        p.feed(b"\x00\x03")
+        self.assertEqual(p.screen.cells[0][:2], [0x40, 0x43])   # «@» «C»
+        self.assertTrue(p.screen.attr[0][0] & ATTR_BLINK)
+        self.assertTrue(p.screen.attr[0][1] & ATTR_BLINK)
 
     def test_sedmoj_razryad_ignoriruetsya(self):
         p = Parser()

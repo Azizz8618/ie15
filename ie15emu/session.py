@@ -34,7 +34,7 @@ CONTROL_HINTS = {
     "KEY_LEFT": "LEFT=ESCD", "KEY_HOME": "HOME=ESCH", "KEY_END": "END=ESCK",
     "KEY_PAGEUP": "PGUP=ESCJ", "KEY_PAGEDOWN": "PGDN=ESCE",
     "KEY_INSERT": "INS=ESCb", "KEY_DELETE": "DEL=ESCc",
-    "SEND": "SEND", "MODE": "РЕЖИМ", "CMDSET": "НАБОР",
+    "SEND": "SEND", "MODE": "СЕАНС", "CMDSET": "НАБОР", "BLINK": "БЛИНК",
 }
 
 
@@ -81,23 +81,37 @@ class TerminalSession:
         return self.mode
 
     def _update_service(self) -> None:
-        # Служебная строка 25 — панель управляющих клавиш/сигналов:
-        # состояние каждого с расшифровкой + справа последняя нажатая
-        # клавиша и отданный ею код.
+        # Подвал — панель управляющих клавиш: состояния и легенды
+        # «ФУНКЦИЯ=клавиша» ровными колонками через « | »; справа внизу —
+        # последняя нажатая клавиша.
         sc = self.parser.screen
-        parts = ["С ЭВМ" if self.mode == MODE_HOST else "АВТОНОМНО",
-                 f"РЕЖИМ {self.parser.mode}=" + ("VT52" if self.parser.mode == 2 else "УП"),
-                 LINE_LABELS.get(self.encoding, f"ЛИНИЯ={self.encoding}"),
-                 "АЛФ=Н1"]
-        if self.layout:
-            parts.append("РАСК=" + LAYOUT_LABELS.get(self.layout, self.layout))
-        parts += ["ВИДЕО=" + ("ИНВ" if sc.inverse else "НОРМ"),
-                  "ПЕРЕДАЧА=" + (str(len(self.buffer)) if self.buffer else "ПУСТО")]
-        left = " ".join(parts)
-        right = self.last_key or ""
-        gap = COLS - len(left) - len(right)
-        text = left + " " * max(gap, 1) + right if gap > 1 and right else left
-        sc.set_service(text)
+        host = self.mode == MODE_HOST
+        lay = ("ВЫКЛ" if not self.layout
+               else LAYOUT_LABELS.get(self.layout, self.layout.upper()))
+        col = 15                         # единая ширина колонок (вмещает
+                                         # «СЕТЬ=АВТОНОМНО» — ряды равны)
+        def row(fields):
+            return " | ".join(f.ljust(col) for f in fields).rstrip()
+        state1 = row(["СЕТЬ=" + ("С ЭВМ" if host else "АВТОНОМНО"),
+                      "НАБОР=" + ("2(VT52)" if self.parser.mode == 2
+                                  else "1(УП)"),
+                      LINE_LABELS.get(self.encoding,
+                                      f"ЛИНИЯ={self.encoding}"),
+                      "РАСК=" + lay])
+        state2 = row(["ВИДЕО=" + ("ИНВ" if sc.inverse else "НОРМ"),
+                      "БУФЕР=" + (str(len(self.buffer)) if self.buffer
+                                  else "ПУСТО"),
+                      "БЛИНК=" + ("ВКЛ" if self.parser.show_ctrl
+                                  else "ВЫКЛ")]
+                     + ([f"ПОСЛ: {self.last_key}"] if self.last_key else []))
+        keys1 = row(["ВК=Bksp", "ТАБ=Tab", "ЗВН=Ctrl-G", "ПРПС=Enter"])
+        keys2 = row(["ESC=Esc", "КУРСОР=Стрелки", "ДОМ=Home",
+                     "СТЕРСТР=End"])
+        keys3 = row(["СТЕРЭКР=PgUp", "ОЧИСТКА=PgDn", "ИНВЕРС=Ins",
+                     "НОРМ=Del"])
+        keys4 = row(["БЛИНК=F7", "НАБОР=F8", "СЕТЬ=F9", "ПЕРЕДАЧА=F10"])
+        sc.set_service("\n".join([state1, state2, keys1, keys2, keys3,
+                                  keys4]))
 
     # --- клавиатура -------------------------------------------------
     def feed_key(self, key: str) -> bytes | None:
@@ -133,6 +147,10 @@ class TerminalSession:
             return None
         if key == "CMDSET":
             self.parser.mode = 1 if self.parser.mode == 2 else 2
+            self._update_service()
+            return None
+        if key == "BLINK":
+            self.parser.show_ctrl = not self.parser.show_ctrl
             self._update_service()
             return None
         data = key_to_bytes(key, layout=self.layout)
