@@ -32,10 +32,11 @@ def test_local_mode_buffers_and_echoes():
     for ch in "hello":
         out = session.feed_key(ch)
         assert out is None          # линия молчит
-    assert session.pending() == b"hello"
+    assert session.pending() == b"HELLO"
     assert link.sent == []          # ничего не ушло
-    # Н2 (VT-52, по умолчанию) — ASCII: латинская строчная эхом
-    # заглавными (строчные коды 0x60.. отданы русским строчным Н1)
+    # Н2 (VT-52, по умолчанию) — набор одно-регистрный: латинская
+    # клавиша без Shift даёт верх международной строки (строчные
+    # коды 0x60.. линии отданы кириллице ЭВМ), он же и на экране
     assert "HELLO" in session.parser.screen.text()   # эхо
 
 
@@ -44,21 +45,22 @@ def test_send_key_transmits_buffer_then_clears():
     for ch in "work":
         session.feed_key(ch)
     out = session.feed_key(KEY_SEND)
-    # ПЕРЕДАЧА завершает строку (добавлены ПР ПС) и переводит в С ЭВМ
-    assert out == b"work\r\n"
+    # ПЕРЕДАЧА завершает строку (добавлены ПР ПС) и переводит в С ЭВМ;
+    # Н2 одно-регистрный — латиница в буфере и на линии верхним
+    assert out == b"WORK\r\n"
     session.emit(out)
-    assert link.sent == [b"work\r"]          # utf8: ПР ПС → один ПР
+    assert link.sent == [b"WORK\r"]          # utf8: ПР ПС → один ПР
     assert session.pending() == b""
     assert session.mode == MODE_HOST
 
 
 def test_host_mode_sends_immediately():
     session, link = make_session(MODE_HOST)
-    out = session.feed_key("A")     # Н2 + латинская раскладка: Shift+A — «А»
+    out = session.feed_key("A")     # Н2 + латинская раскладка: Shift+A — «Ф»
     assert out == bytes([0x86])     # «Ф»=0x06 + бит алфавита
     assert session.pending() == b""  # буфер не используется
     out = session.feed_key("a")
-    assert out == b"a"               # без Shift — латинская как есть
+    assert out == b"A"               # Н2 одно-регистрный: латинская — верх
 
 
 def test_mode_toggle_switches_and_service_row():
@@ -85,10 +87,11 @@ def test_reply_goes_to_line():
 
 
 def test_local_uppercase_echo_and_send_raw():
-    # АВТОНОМНО: «М» должна печататься буквой, а не двигать каретку;
-    # по SEND на линию RAW уходить внутренний КОИ7 (как «wyd» в живом тесте)
+    # АВТОНОМНО: «м» должна печататься буквой, а не двигать каретку
+    # (в Н2 русская клавиша без Shift — внутренний верх 0x80+код);
+    # по SEND на линию RAW уходить КОИ7-строка (как «wyd» в живом тесте)
     session, link = make_session(MODE_LOCAL)
-    for ch in "МАМЫ":
+    for ch in "мамы":
         session.feed_key(ch)
     assert session.parser.screen.text().startswith("МАМЫ")
     session.encoding = "raw"
@@ -136,7 +139,7 @@ def test_send_dks_replaces_local_echo():
 def test_host_uppercase_utf8_line():
     session, link = make_session(MODE_HOST)
     session.encoding = "utf8"
-    session.emit(session.feed_key("М"))
+    session.emit(session.feed_key("м"))   # Н2: ru без Shift — внутренний верх 0x8D
     assert link.sent == ["М".encode("utf-8")]
 
 
@@ -155,17 +158,22 @@ def test_banner_sets_encoding():
 
 
 def test_dks_line_raw_with_cr_eol():
-    # ДКС-линия в raw: передача — внутренние КОИ7 (буква «В» → 0x77),
-    # но окончание — ПР, не ETX (ETX для dks_line_char — просто знак);
-    # приём — raw + заглавные, tmxr-баннер в UTF-8 не ломается
+    # ДКС-линия в raw: передача — внутренние КОИ7 (русская «в» без Shift
+    # в Н2 — внутренний верх 0x97 → код линии 0x77), но окончание — ПР,
+    # не ETX (ETX для dks_line_char — просто знак); приём — raw + заглавные
+    # (только Н2), tmxr-баннер в UTF-8 не ломается
     session, link = make_session(MODE_HOST)
     # реальный порядок баннеров tmxr: сначала «Encoding is RAW», затем
     # регистрация Э-60 «Connected to DKS»
     session.handle_line_reply(b"Encoding is RAW\r\nConnected to DKS\r\n")
     assert session.encoding == "dks" and session.rx_encoding == "raw"
     assert session.enc_decided
-    session.emit(session.feed_key("В"))
+    session.emit(session.feed_key("в"))
     assert link.sent == [b"w"]
+    # в Н2 Shift на русской раскладке меняет алфавит: «В» — клавиша d,
+    # значит её верхний регистр печатает латинскую D
+    session.emit(session.feed_key("В"))
+    assert link.sent[-1] == b"D"
     session.emit(session.feed_key("KEY_ENTER"))      # ПР ПС → один ПР
     assert link.sent[-1] == b"\r"
     raw = bytes(0x60 + RUS7.index(c) for c in "ВЫД")  # «wyd» от машины
@@ -455,7 +463,8 @@ def test_echo_off_hides_password():
     for ch in "root":
         session.emit(session.feed_key(ch))
     assert link.sent                                  # в линию ушло
-    session.handle_line_reply(b"root\r\n")            # эхо-ответ линии
+    # Н2 одно-регистрный: клавиши уходят верхом, эхо-ответ линии — верхом
+    session.handle_line_reply(b"ROOT\r\n")            # эхо-ответ линии
     screen = session.parser.screen.text()
     assert "root" not in screen and "ROOT" not in screen
     session.handle_line_reply("ВХОД РАЗРЕШЁН\r\n".encode("utf-8"))
@@ -473,11 +482,11 @@ def test_echo_off_line_feeds_still_work():
     session.handle_line_reply(b"LOGIN: ")
     session.feed_key("ECHO")
     for ch in "abc":
-        session.emit(session.feed_key(ch))
-    session.handle_line_reply(b"abc\r\nOK\r\n")
+        session.emit(session.feed_key(ch))           # Н2: ушло «ABC»
+    session.handle_line_reply(b"ABC\r\nOK\r\n")      # одно-регистное эхо линии
     assert sc.y == 2 and sc.x == 0
     rows = sc.text().splitlines()
-    assert rows[0].startswith("LOGIN:") and "abc" not in rows[0]
+    assert rows[0].startswith("LOGIN:") and "ABC" not in rows[0]
     assert rows[1].strip() == "OK"              # без эха, с новой строки
 
 

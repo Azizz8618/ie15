@@ -105,6 +105,11 @@ def encode_koi7(text: str) -> bytes:
         if ch in TYPO_FALLBACK:
             out.append(TYPO_FALLBACK[ch])   # «–» из баннеров SIMH → «-»
             continue
+        if ch == "№":
+            # внутренний знак 0x1F с битом алфавита (в Н2 показывается
+            # «№»); на линию to_line кладёт его позицию 2/3 — «#»
+            out.append(ALPHA_BIT | 0x1F)
+            continue
         up = ch.upper().replace("Ё", "Е")
         if up in RUS7:
             code = RUS7.index(up)
@@ -133,27 +138,41 @@ N0_SPECIAL = {0x24: "¤", 0x5E: "¬"}
 
 
 def display_char(code: int, name: str) -> str:
-    """Знак кода ВЗУ в данном наборе: Н0 — ASCII целиком (латиница в
-    обоих регистрах, кириллических кодов нет), Н1 — русские верхний и
-    нижний регистры (+ съеденная Н1 латинская верхняя строка), Н2 —
-    международная строка + кириллица кодов ЭВМ (как отдаёт SIMH/ДКС)."""
+    """Знак кода ВЗУ в данном наборе: Н0 — ASCII целиком (кириллических
+    кодов нет); Н1 — русские верхний и нижний регистры (+ латинская
+    верхняя строка, занятая Н1); Н2 — международная строка без замен
+    Н0 («^» и «$» на своих местах, 0x23 — «#»), латиница в обоих
+    регистрах, кириллица — только заглавная, кодами ЭВМ 0x00…0x1E
+    (как их отдаёт SIMH/ДКС после koi7_raw_upper); 0x1F — номерной знак
+    «№» (внутренний 0x9F, на линию — позиция 2/3 = «#»)."""
     code &= 0x7F
-    if name == "n0":
-        if code < 0x20:
-            return ""                      # в ASCII эти коды — УП, не знаки
+    if name == "n2":
+        if code == 0x1F:
+            return "№"
+        if code >= 0x20:
+            if code == 0x7F:
+                return "█"
+            return chr(code)               # «^» «$» — как в ПЗУ, без Н0-замен
+    if name in ("n0", "n2") and code >= 0x20:
         if code == 0x7F:
             return "█"
-        return N0_SPECIAL.get(code, chr(code))
+        return N0_SPECIAL.get(code, chr(code))   # 0x60.. — латинская строчная
+    if name == "n0":
+        return ""                          # в ASCII коды <0x20 — УП, не знаки
     if name == "n1" and 0x40 <= code <= 0x5F:
         code -= 0x40                       # латинская строка → русские верх
     return decode_koi7(bytes([code]))
 
 
 def rom_slot(code: int, name: str = "n2"):
-    """Физический слот ПЗУ для кода ВЗУ в наборе; None — пустое место."""
+    """Физический слот ПЗУ для кода ВЗУ в наборе; None — пустое место.
+    Н0/Н2: строка 0x60.. — слоты латинской строчной; Н2 кириллицу берёт
+    из внутренних кодов ЭВМ 0x00..0x1E (слот 0xE0..)."""
     code &= 0x7F
+    if name in ("n0", "n2") and code >= 0x20:
+        return code                               # 0x60.. — латинская строчная
     if name == "n0":
-        return None if code < 0x20 else code    # 0x60.. — латинская строчная
+        return None if code < 0x20 else code
     if name == "n1" and 0x40 <= code <= 0x5F:
         code -= 0x40
     return rom_addr(code)
@@ -288,6 +307,9 @@ def to_line(data: bytes, encoding: str = "utf8") -> bytes:
             ch = RUS7[b - 0xE0].lower()
             out += ch.encode("utf-8") if encoding == "utf8" \
                 else bytes([0x60 + (b - 0xE0)])
+        elif b == ALPHA_BIT | 0x1F:
+            # «№»: на линии ВТ у него нет своего кода — позиция 2/3 («#»)
+            out.append(0x23)
         else:
             out.append(b)
     return bytes(out)

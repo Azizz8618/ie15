@@ -45,7 +45,9 @@ def test_control_passthrough():
 
 
 def test_unknown_char_maps_to_block():
-    assert encode_koi7("№") == b"\x7f"
+    # «№» с этого теста ушёл в первый класс (внутренний 0x9F, позиция
+    # 2/3 линии); заполнитель остаётся для неизвестных знаков
+    assert encode_koi7("‖") == b"\x7f"
     assert decode_koi7(b"\x7f") == "█"
 
 
@@ -165,10 +167,21 @@ def test_display_char_matrix():
     # Н1 — русские два регистра: 0x40-я строка — верхний, 0x60-я — нижний
     assert display_char(0x42, "n1") == "Б" and display_char(0x62, "n1") == "б"
     assert display_char(0x02, "n1") == "Б"          # и внутренние коды ЭВМ
-    # Н2 — международная строка + кириллица кодов ЭВМ (два регистра строк
-    # 0x60.. — по-прежнему русские: так их отдаёт utf8/ДКС-приём)
-    assert display_char(0x42, "n2") == "B" and display_char(0x62, "n2") == "б"
+    # Н2 — международная строка (латиница в обоих регистрах, 0x60.. —
+    # латинская строчная; без замен Н0: «^» и «$» на своих местах)
+    # + кириллица только заглавная, кодами ЭВМ 0x00..
+    # (русская строка 0x60.. с линии поднимается koi7_raw_upper)
+    assert display_char(0x42, "n2") == "B" and display_char(0x62, "n2") == "b"
     assert display_char(0x02, "n2") == "Б"
+    assert display_char(0x5E, "n2") == "^" and display_char(0x5E, "n0") == "¬"
+    assert display_char(0x24, "n2") == "$" and display_char(0x24, "n0") == "¤"
+    assert display_char(0x23, "n2") == "#" and display_char(0x1F, "n2") == "№"
+    # №: клавиша → внутренний 0x9F → эхо «№»; на линию — позиция 2/3 («#»)
+    from ie15emu.charset import encode_koi7, to_line
+    assert encode_koi7("№") == bytes([0x80 | 0x1F])
+    assert to_line(encode_koi7("№"), "utf8") == b"#"
+    assert to_line(encode_koi7("№"), "raw") == b"#"
+    assert to_line(encode_koi7("№"), "dks") == b"#"
 
 
 def test_nabor_h1_echo_two_cases():

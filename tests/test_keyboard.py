@@ -88,18 +88,50 @@ def test_control_keys_send_esc():
     assert key_to_bytes("\x07") == b"\x07"        # ЗВН (Ctrl-G)
 
 
+def test_h2_symbols_same_keys_both_layouts():
+    # Н2: RU-раскладка отдаёт знак клавишей того же физического положения,
+    # что EN; карта по самому знаку — CapsLock/Shift-состояние не важны
+    for rus, lat in (('"', "@"), (":", "^"), ("ё", "|"),
+                     ("Ё", "|"), ("ъ", "]"), ("Ъ", "]")):
+        assert key_to_bytes(rus, None, shift_to_rus=True) == lat.encode("ascii")
+    # «№» (RU клавиша 3) — внутренний номерной знак 0x9F, на линию — 0x23
+    assert key_to_bytes("№", None, shift_to_rus=True) == bytes([0x80 | 0x1F])
+    # русская буква+Shift — латинская положения (те же [ ] ' ; на RU)
+    assert key_to_bytes("Х", None, shift_to_rus=True) == b"["
+    assert key_to_bytes("Э", None, shift_to_rus=True) == b"'"
+    assert key_to_bytes("Ж", None, shift_to_rus=True) == b";"
+    assert key_to_bytes("Щ", None, shift_to_rus=True) == b"O"   # o→Щ
+    # ASCII-знаки проходят как есть — с обеих раскладок одним и тем же
+    for s in "@#^[]'|?%;!<>":
+        assert key_to_bytes(s, None, shift_to_rus=True) == s.encode("ascii")
+    # вне Н2 карта знаков не работает (Н0/Н1 — историческое поведение)
+    assert key_to_bytes('"', None) == b'"'
+    assert key_to_bytes('"', "positional") == b'"'
+
+
 def test_host_mode_key_mapping():
     assert key_to_bytes("KEY_ENTER") == b"\r\n"
     assert key_to_bytes("KEY_ESC") == b"\x1b"
 
 
 def test_shift_to_rus_h2():
-    # Н2, латинская раскладка: Shift+клавиша — русская буква положения
+    # Н2, латинская раскладка без Shift — английские заглавные
+    # (одно-регистрный набор: строка 0x60.. линии — кириллица ЭВМ)
+    assert key_to_bytes("w", None, shift_to_rus=True) == b"W"
+    # Н2, Shift+латинская клавиша — русская буква положения
     assert key_to_bytes("W", None, shift_to_rus=True) == bytes([0x03 | 0x80])
     assert key_to_bytes("Q", None, shift_to_rus=True) == bytes([0x0A | 0x80])
-    # без флага и без Shift — как раньше
+    # Н2, русская раскладка: без Shift — русские заглавные (внутренний
+    # верх 0x80+код), с Shift — симметрично латинская буква положения
+    assert key_to_bytes("ц", None, shift_to_rus=True) == bytes([0x03 | 0x80])
+    assert key_to_bytes("Ц", None, shift_to_rus=True) == b"W"
+    assert key_to_bytes("Й", None, shift_to_rus=True) == b"Q"
+    assert key_to_bytes("Е", None, shift_to_rus=True) == b"T"
+    # «Ё» в Н2 — не буква: её клавиша (общая с EN «\|») даёт вертикальную черту
+    assert key_to_bytes("Ё", None, shift_to_rus=True) == b"|"
+    # без флага (Н0/Н1 вне раскладки) — как раньше
     assert key_to_bytes("W", None) == b"W"
-    assert key_to_bytes("w", None, shift_to_rus=True) == b"w"
+    assert key_to_bytes("w", None) == b"w"
 
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):

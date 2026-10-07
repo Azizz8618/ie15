@@ -185,7 +185,8 @@ def login(session, link, head: bytes = b"") -> None:
             detect_line_type(link, session)
         except AssertionError:
             pass
-    feed_keys(session, "HYC")            # окончание подберёт to_line
+    feed_keys(session, "hyc")            # Н2: латиница без Shift — верх
+                                         # международной строки; окончание подберёт to_line
     feed_enter(session)
     # serial: приветствие «…117…»; Э-60: эхо «HYC» локальным редактором
     read_until_any(link, session, (b"117", b"HYC", b"3,T0", b") "), 20)
@@ -244,7 +245,7 @@ class LineRoundtripMixin:
         """
         session = self.session
         drain(self.link, session)
-        feed_keys(session, "ВЫД")
+        feed_keys(session, "выд")        # Н2: ru без Shift — внутренний верх
         feed_enter(session)
         if session.encoding == "dks":
             wait_screen(self.link, session, "ВЫД", 20)   # эхо от ОС
@@ -289,7 +290,7 @@ class TestTcpRoundtrip(LineRoundtripMixin, unittest.TestCase):
         session = self.session
         drain(self.link, session)
         session.set_mode(MODE_LOCAL)
-        feed_keys(session, "ЗАД")
+        feed_keys(session, "зад")        # Н2 без Shift — русские заглавные
         feed_enter(session)
         self.assertTrue(session.pending())     # линия свободна, ждём SEND
         self.assertIn("ЗАД", fold(session.parser.screen.text()))
