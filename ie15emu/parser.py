@@ -39,6 +39,15 @@ CAN = 0x18
 SUB = 0x1A
 ESC = 0x1B
 
+# Одно-байтовые команды Видеотона-340 (besm6_tty.c, vt_send): в наборе №2
+# 15ИЭ эти коды не используются (русские буквы ЭВМ шлёт строкой 0x60..),
+# поэтому терминал принимает их как Видеотон: программы ДИСПАК (например
+# «ИГРА») рисуют поле этими кодами.
+VT_RIGHT = 0x18        # ПРД  — курсор вправо
+VT_UP    = 0x19        # ВВ   — курсор вверх
+VT_DOWN  = 0x1A        # ВНИЗ — курсор вниз
+VT_ERASE = 0x1F        # РЕВЕРС/ПРОСВЕТКА — стирание экрана + «дом»
+
 
 class Parser:
     """Побайтовый автомат разбора потока от ЭВМ.
@@ -120,6 +129,17 @@ class Parser:
             self.screen.bell = True
         elif b in (VT, FF):
             self.screen.erase_eod()
+        # Одно-байтовые команды Видеотона-340 (besm6_tty.c, vt_send):
+        # программы ДИСПАК («ИГРА») рисуют ими поле — набор №2 15ИЭ эти
+        # коды не использует (буквы ЭВМ шлёт строкой 0x60..), конфликта нет
+        elif b == VT_UP:
+            self.screen.y = max(0, self.screen.y - 1)
+        elif b == VT_DOWN:
+            self.screen.y = min(ROWS - 1, self.screen.y + 1)
+        elif b == VT_RIGHT:
+            self.screen.x = min(COLS - 1, self.screen.x + 1)
+        elif b == VT_ERASE:
+            self.screen.clear_all()
         elif 0x20 <= b <= 0x7F:
             self.screen.put(b)     # печать, 0x7F — сплошная заливка
         elif self.show_ctrl:

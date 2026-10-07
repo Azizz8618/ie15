@@ -221,6 +221,34 @@ class TestRezhimyNaborov(unittest.TestCase):
         self.assertEqual((p.screen.x, p.screen.y), (4, 0))
 
 
+class TestVideotonKody(unittest.TestCase):
+    """Одно-байтовые команды Видеотона-340 из besm6_tty.c (vt_send):
+    игра ДИСПАК «ИГРА» рисует поле ими, 15ИЭ обязан отрабатывать."""
+
+    def test_kursory_i_stiranie(self):
+        p = Parser()
+        p.feed(b"abc")
+        p.feed(bytes([0x18]))                    # вправо
+        self.assertEqual(p.screen.x, 4)
+        p.feed(b"\n")                            # ПС = перевод с возвратом
+        self.assertEqual((p.screen.x, p.screen.y), (0, 1))
+        p.feed(b"\x1bH" + b"X")                  # «дом», печать
+        p.feed(bytes([0x19]))                    # вверх из строки 0 — без выхода
+        self.assertEqual(p.screen.y, 0)
+        p.feed(bytes([0x1A]))                    # вниз
+        self.assertEqual(p.screen.y, 1)
+        p.feed(bytes([0x1F]))                    # стирание экрана + «дом»
+        self.assertTrue(all(c == 0x20 for r in p.screen.cells for c in r))
+        self.assertEqual((p.screen.x, p.screen.y), (0, 0))
+
+    def test_pole_igry_cherez_1f(self):
+        # кадр игры: 12 «очисток» подряд, затем ряды поля (LF без CR)
+        p = Parser()
+        p.feed(b"\x1f" * 12 + b"   ---\n  I6\n")
+        self.assertEqual(decode_koi7(bytes(p.screen.cells[0][:7])).strip(), "---")
+        self.assertEqual(p.screen.cells[1][2], ord("I"))
+
+
 class TestPerenosStroki(unittest.TestCase):
     def test_avtoperenos_80(self):
         p = Parser()
