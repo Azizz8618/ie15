@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import os
 import sys
 import time
 from pathlib import Path
@@ -173,6 +174,8 @@ def run_line(parser: Parser, url: str, png: str | None,
     old = termios.tcgetattr(fd) if fd is not None else None
     if fd is not None:
         tty.setcbreak(fd)
+        # экран собирается абсолютной позицией — настоящая каретка не нужен
+        sys.stdout.write("\x1b[?25l")
     t0 = time.time()
     try:
         while seconds <= 0 or time.time() - t0 < seconds:
@@ -203,6 +206,8 @@ def run_line(parser: Parser, url: str, png: str | None,
         sys.stdout.write("\x1b[0m\r\n")
         print(f"[линия] {e} — сеанс завершён")
     finally:
+        if fd is not None:
+            sys.stdout.write("\x1b[?25h")
         if old is not None and fd is not None:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
         link.close()
@@ -232,6 +237,10 @@ def text_screen(parser: Parser) -> str:
     from .screen import ATTR_BLINK
 
     sc = parser.screen
+    try:
+        term_h = os.get_terminal_size().lines
+    except OSError:
+        term_h = 24
     lines = []
     for y, row in enumerate(sc.cells):
         toks = []
@@ -249,7 +258,13 @@ def text_screen(parser: Parser) -> str:
     lines.append("-" * COLS)
     lines.append("".join(sc.service).rstrip())
     lines.extend(r.rstrip() for r in sc.service_more)
-    return "\r\n\x1b[H\x1b[2J" + "\r\n".join(lines) + "\r\n"
+    # рисуем абсолютной позицией (каждая строка на свою поз.1), без
+    # последовательного перевода строк: в коротком окне не скроллится и
+    # верх поля всегда виден; в конец влезает, что осталось
+    out = "\x1b[H\x1b[2J"
+    for i, ln in enumerate(lines[:term_h]):
+        out += f"\x1b[{i + 1};1H{ln}"
+    return out
 
 
 def main(argv: list[str] | None = None) -> None:
