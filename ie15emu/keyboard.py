@@ -103,6 +103,20 @@ for _name, _table in KOI7_TABLES.items():
     KOI7_TO_QWERTY[_name] = _inv
 
 
+def unescape_key(s: str) -> str:
+    """Значение из конфига [keys]: «\\xNN» — символ с кодом NN (УП от
+    Ctrl+клавиша), остальное читается как есть."""
+    head, *rest = s.split("\\x")
+    out = head
+    for part in rest:
+        hex2 = part[:2]
+        if len(hex2) == 2 and all(c in "0123456789abcdefABCDEF" for c in hex2):
+            out += chr(int(hex2, 16)) + part[2:]
+        else:
+            out += "\\x" + part
+    return out
+
+
 def load_kbd_rom(rom_dir: str | Path) -> bytes | None:
     p = Path(rom_dir) / KBD_ROM
     return p.read_bytes() if p.exists() else None

@@ -9,7 +9,8 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from ie15emu.__main__ import apply_conf, line_url_from_conf, load_conf
+from ie15emu.__main__ import (apply_conf, keymap_from_conf,
+                              line_url_from_conf, load_conf)
 
 CONF = """
 [line]
@@ -143,6 +144,19 @@ def test_nabor_from_conf():
     assert apply_conf(ns(), cp2).nabor == "n2"
     # CLI --nabor важнее конфига
     assert apply_conf(ns(nabor="n0"), cp2).nabor == "n0"
+
+
+def test_keys_remap():
+    # [keys]: «что прислал терминал = что набирать»; \xNN — код УП,
+    # пустое значение гасит клавишу; без секции — пусто
+    cp = cp_from(CONF + "\n[keys]\n\\x1c = [\nБ = <\nW = Ё\n\x02 =\n")
+    km = keymap_from_conf(cp)
+    assert km["\x1c"] == "[" and km["Б"] == "<" and km["W"] == "Ё"
+    assert km["\x02"] == ""
+    assert keymap_from_conf(cp_from(CONF)) == {}
+    # apply_conf отдаёт карту сеансу (регистр латиницы сохранён)
+    assert apply_conf(ns(), cp).keymap.get("W") == "Ё"
+
 
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):

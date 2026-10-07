@@ -54,6 +54,23 @@ def test_send_key_transmits_buffer_then_clears():
     assert session.mode == MODE_HOST
 
 
+def test_keymap_remaps_before_nabor_rules():
+    # [keys]: привязка применяется до правил набора; пустое значение
+    # гасит клавишу; непогашенный УП виден кодом в подвале (для привязки)
+    session, link = make_session(MODE_HOST)
+    out = session.feed_key("\x1c")          # пока без карты — уходит УП
+    assert out == b"\x1c"
+    sc = session.parser.screen
+    assert "УП 1C" in "\n".join(["".join(sc.service)] + sc.service_more)
+    session.keymap = {"\x1c": "[", "Б": "<", "\x02": ""}
+    assert session.feed_key("\x1c") == b"["       # Н2: ASCII-знак как есть
+    assert session.feed_key("Б") == b"<"
+    assert session.feed_key("\x02") is None       # погашена
+    # и служебные клавиши переназначаемы: SEND как знак
+    session.keymap = {"SEND": "\x13"}
+    assert session.feed_key("SEND") == b"\x13"
+
+
 def test_host_mode_sends_immediately():
     session, link = make_session(MODE_HOST)
     out = session.feed_key("A")     # Н2 + латинская раскладка: Shift+A — «Ф»

@@ -49,7 +49,8 @@ class TerminalSession:
 
     def __init__(self, parser, link=None, mode: str = MODE_LOCAL,
                  koi7: bool = False, encoding: str = "utf8",
-                 layout: str | None = None) -> None:
+                 layout: str | None = None,
+                 keymap: dict[str, str] | None = None) -> None:
         if mode not in (MODE_LOCAL, MODE_HOST):
             raise ValueError(f"неизвестный режим: {mode!r}")
         self.parser = parser
@@ -60,6 +61,8 @@ class TerminalSession:
         if layout is None and koi7:
             layout = DEFAULT_LAYOUT
         self.layout = layout
+        # переназначение из [keys] конфига: клавиша → знак/строка/KEY_имя
+        self.keymap = keymap or {}
         self.default_layout = layout     # раскладка, включаемая набором Н1
         self.koi7 = layout is not None
         self.buffer = bytearray()
@@ -158,10 +161,23 @@ class TerminalSession:
         Возвращает байты, которые нужно немедленно передать в линию
         (в режиме С ЭВМ — сам знак, по SEND — весь накопленный буфер),
         либо None, если передавать нечего.
+
+        keymap (секция [keys] конфига) применяется до правил набора:
+        нажатие заменяется знаком/строкой/KEY-именем, пустое значение
+        гасит клавишу. Неизвестный УП показывается кодом в подвале
+        («ПОСЛ: УП 18») — по нему и пишут привязку в [keys].
         """
+        if key in self.keymap:
+            key = self.keymap[key]
+            if not key:
+                self._update_service()
+                return None
         hint = CONTROL_HINTS.get(key)
         if hint:
             self.last_key = hint
+            self._update_service()
+        elif len(key) == 1 and ord(key) < 0x20:
+            self.last_key = f"УП {ord(key):02X}"
             self._update_service()
         if key == "KEY_PAGEUP":
             self.parser.screen.scroll_view(-self.parser.screen._view_h + 1)

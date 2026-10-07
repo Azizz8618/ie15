@@ -32,12 +32,29 @@ CONF_DEFAULT = ROM_DEFAULT.parent / "ie15.conf"
 
 
 def load_conf(path: str | None = None) -> configparser.ConfigParser:
-    """Читает ie15.conf (рядом с пакетом, если путь не указан)."""
-    cp = configparser.ConfigParser()
+    """Читает ie15.conf (рядом с пакетом, если путь не указан).
+
+    optionxform=str — опции [keys] чувствительны к знаку (это нажатия,
+    а не имена настроек); interpolation=None — «%» и «$» в значениях
+    читаются как есть."""
+    cp = configparser.ConfigParser(interpolation=None)
+    cp.optionxform = str
     p = Path(path).expanduser() if path else CONF_DEFAULT
     if p.is_file():
         cp.read(p, encoding="utf-8")
     return cp
+
+
+def keymap_from_conf(cp: configparser.ConfigParser) -> dict[str, str]:
+    """Переназначение клавиш из [keys]: «что прислал терминал = что
+    набирать». Ключ/значение — знак, строка, KEY-имя или код «\\xNN»
+    (УП от Ctrl+клавиша); пустое значение гасит клавишу. Знак «=»
+    ключом не выразить (разделитель ini)."""
+    if not cp.has_section("keys"):
+        return {}
+    from .keyboard import unescape_key
+    return {unescape_key(k): unescape_key(v)
+            for k, v in cp.items("keys") if k != "escape"}
 
 
 def line_url_from_conf(cp: configparser.ConfigParser) -> str | None:
@@ -138,6 +155,7 @@ def apply_conf(ns, cp: configparser.ConfigParser):
             else:
                 nb = "n2"
         ns.nabor = nb
+    ns.keymap = keymap_from_conf(cp)
     return ns
 
 
@@ -193,7 +211,8 @@ def _drain_banner(session, timeout: float = 2.0) -> None:
 
 def run_line(parser: Parser, url: str, png: str | None,
              seconds: float, feed: str | None, mode: str = "host",
-             layout: str | None = None, **linkkw) -> None:
+             layout: str | None = None, keymap: dict[str, str] | None = None,
+             **linkkw) -> None:
     import os
     import select
     import termios
@@ -206,7 +225,8 @@ def run_line(parser: Parser, url: str, png: str | None,
     except (LinkError, OSError) as e:
         say(f"[линия] {url} — не удалось подключиться: {e}")
         return
-    session = TerminalSession(parser, link=link, mode=mode, layout=layout)
+    session = TerminalSession(parser, link=link, mode=mode, layout=layout,
+                              keymap=keymap)
     say(f"[линия] {url} — подключено (режим: {mode})")
     say("[клавиши] ввод — в линию/буфер; F6 — ЭХО (пароль без вывода), "
         "F8 — РЕЖИМ (набор №1↔№2), F9 — АВТОНОМНО↔С ЭВМ, F10 — SEND, "
@@ -405,6 +425,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.line:
         run_line(parser, args.line, args.png, args.seconds,
                  args.feed, mode=args.mode, layout=layout,
+                 keymap=args.keymap,
                  password=args.password, keyfile=args.keyfile)
     else:
         run_script(parser, args.png)
