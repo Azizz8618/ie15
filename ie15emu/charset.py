@@ -116,16 +116,42 @@ def encode_koi7(text: str) -> bytes:
     return bytes(out)
 
 
+# --- наборы знаков 15ИЭ (КОИ-7, ГОСТ 27463-87) ---------------------------
+# Н0 — международный ISO 646 IRV: как ASCII, но 0x24 = «¤» (дензнак) и
+#     0x7E = «¯» (черта сверху) вместо «$» и «~»; 0x5E = «¬».
+# Н1 — первый национальный: 0x40…0x5E — русские ЗАГЛАВНЫЕ в порядке
+#     ЮАБЦДЕФГХИЙКЛМНОПЯРСТУЖВЬЫЗШЭЩЧ, 0x5F — «Ъ», 0x60…0x7E — строчные.
+# Внутренние коды кадров (0x01…0x1E заглавные, 0x60… строчные) не меняются:
+# набор — режим отображения кодов 0x20…0x7F, как переключатель «набор»
+# на щитке терминала.
+
+N0_SPECIAL = {0x24: "¤", 0x5E: "¬", 0x7E: "¯"}
+
+
+def apply_set(code: int, name: str) -> int:
+    """Код ВЗУ → код отображения в выбранном наборе знаков ('n0'/'n1')."""
+    code &= 0x7F
+    if name == "n1" and 0x40 <= code <= 0x5F:
+        # латинская/спец-строка 0x40…0x5F в наборе Н1 — русские заглавные
+        # (0x40='Ю' … 0x5E='Ч', 0x5F='Ъ'); отображаются тем же слотом
+        # знакогенератора, что и внутренние коды 0x00…0x1F
+        return code - 0x40
+    return code
+
+
 def decode_koi7(data: bytes) -> str:
     """7-разрядные коды КОИ7 Н1 → Unicode (строчные/заглавные русские)."""
     chars = []
     labels = {i: RUS7[i] for i in range(len(RUS7))}
+    labels[0x1F] = "Ъ"                       # Н1: 0x40+0x1F — твёрдый знак
     labels.update({i | _LOWER_OFFSET: RUS7[i].lower()
                    for i in range(len(RUS7))})
     for b in data:
         b &= 0x7F
         if b in labels:
             chars.append(labels[b])
+        elif b in N0_SPECIAL:                  # Н0: ¤ вместо $, ¬ вместо ^
+            chars.append(N0_SPECIAL[b])
         elif 0x20 <= b < 0x7F:
             chars.append(chr(b))
         elif b == 0x7F:

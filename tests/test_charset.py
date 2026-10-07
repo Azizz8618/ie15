@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from ie15emu.charset import (Charset, RUS7, decode_koi7, encode_koi7,
+from ie15emu.charset import (Charset, RUS7, apply_set, decode_koi7, encode_koi7,
                              normalize_incremental, normalize_line_bytes,
                              to_line)
 
@@ -124,6 +124,37 @@ def test_label_block_char():
 def test_glyph_block_is_filled():
     c = make_charset()
     assert all(all(r) for r in c.bitmap(0x7F))   # сплошная заливка
+
+
+def test_apply_set_n1_uppercase_row():
+    # Н1: 0x40…0x5E — русские заглавные (ЮАБЦ…Ч), 0x5F — «Ъ»
+    assert apply_set(0x40, "n1") == 0x00            # Ю
+    assert apply_set(0x42, "n1") == 0x02            # Б
+    assert apply_set(0x5E, "n1") == 0x1E            # Ч
+    assert apply_set(0x5F, "n1") == 0x1F            # Ъ
+    # строчная строка 0x60… — уже Н1 (внутренние строчные), не трогаем
+    assert apply_set(0x62, "n1") == 0x62            # б
+    # Н0 — то, что есть
+    assert apply_set(0x42, "n0") == 0x42
+    assert decode_koi7(bytes([apply_set(0x42, "n1")])) == "Б"
+    assert decode_koi7(b"B") == "B"
+
+
+def test_n0_special_signs():
+    # Н0 (ISO 646 IRV): 0x24 = ¤ (дензнак), 0x5E = ¬ — не $ и ^
+    assert decode_koi7(b"$") == "¤"
+    assert decode_koi7(b"^") == "¬"
+
+
+def test_screen_display_set_toggle():
+    from ie15emu.parser import Parser
+    p = Parser()
+    p.feed(b"KX-")
+    assert p.screen.text().splitlines()[0][:3] == "KX-"
+    p.screen.display_set = "n1"     # Н1: 0x4B=К, 0x58=Ь, 0x2D тире везде
+    assert p.screen.text().splitlines()[0][:3] == "КЬ-"
+    p.screen.display_set = "n0"
+    assert p.screen.text().splitlines()[0][:3] == "KX-"
 
 
 if __name__ == "__main__":

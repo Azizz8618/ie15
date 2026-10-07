@@ -123,6 +123,8 @@ def apply_conf(ns, cp: configparser.ConfigParser):
         ns.keyfile = kf if kf and Path(kf).is_file() else None
     if getattr(ns, "history", None) is None:
         ns.history = cp.get("terminal", "history", fallback="1000") or "1000"
+    if getattr(ns, "charset", None) is None:
+        ns.charset = cp.get("terminal", "charset", fallback="n0") or "n0"
     return ns
 
 
@@ -281,11 +283,9 @@ def text_screen(parser: Parser) -> str:
         toks = []
         for x, code in enumerate(cells):
             a = attr[x]
-            if a & ATTR_CTRL:
-                if not sc.show_ctrl:
-                    code, a = 0x20, 0          # УП скрыт кнопкой УПР.СИМВ
-                else:
-                    code |= 0x40               # образный знак, как dim на ВТ-340
+            code = sc.display_code(code, a)     # УПР.СИМВ + набор знаков
+            if a & ATTR_CTRL and not sc.show_ctrl:
+                a = 0                            # скрытый УП не мигает
             ch = decode_koi7(bytes([code]))
             if a & ATTR_BLINK:
                 # 5 мигающий, 7 инверсия: там, где мигание отключено
@@ -356,6 +356,10 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--history", default=None, type=str,
                     help="строк «истории» выдачи над экраном для PgUp "
                          "(по умолчанию 1000; 0 — не сохранять)")
+    ap.add_argument("--charset", choices=["n0", "n1"], default=None,
+                    help="набор знаков дисплея: n0 — международный "
+                         "(ISO 646 IRV: ¤ ¬ ¯), n1 — первый национальный "
+                         "КОИ-7 (0x40…0x5F — русские заглавные)")
     ap.add_argument("--version", action="version", version=__version__)
     args = ap.parse_args(argv)
     args = apply_conf(args, load_conf(args.conf))
@@ -374,6 +378,7 @@ def main(argv: list[str] | None = None) -> None:
 
     charset = Charset(Path(args.roms) / "chargen-15ie.bin")
     parser = Parser(mode=int(args.sets), history=int(args.history))
+    parser.screen.display_set = args.charset          # набор знаков Н0/Н1
     parser.charset = charset
 
     if args.line:

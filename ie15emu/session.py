@@ -114,7 +114,8 @@ class TerminalSession:
                                  else "ПУСТО"),
                      "УПР.СИМВ=" + ("ВКЛ" if self.parser.show_ctrl
                                     else "ВЫКЛ"))
-        state3 = row(f"ПОСЛ: {self.last_key}" if self.last_key else "ПОСЛ:")
+        state3 = row(f"ПОСЛ: {self.last_key}" if self.last_key else "ПОСЛ:",
+                     "ЗНАКИ=" + sc.display_set.upper())
         keys1 = row("ВК=Bksp", "ТАБ=Tab", "ЗВН=Ctrl-G", "ПРПС=Enter")
         keys2 = row("ESC=Esc", "КУРСОР=Стрелки", "ДОМ=Home", "СТЕРСТР=End")
         keys3 = row("СЛОВО=Ctrl+→", "СЛОВО=Ctrl+←", "НАЧСТР=Ctrl+↑",
