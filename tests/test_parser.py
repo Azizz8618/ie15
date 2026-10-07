@@ -188,17 +188,21 @@ class TestRusLetters(unittest.TestCase):
         p.feed(bytes([0x07]))                      # ЗВН, не «Г»
         self.assertTrue(p.screen.bell)
         self.assertEqual(p.screen.cells[0][0], 0x20)
-        # НУС/ЕОТ хранятся как коды УП; образные знаки code|0x40 с блинком
-        # (как dim на ВТ-340) показываются только при включённом УПР.СИМВ
-        p.feed(b"\x00\x03")
-        self.assertEqual(p.screen.cells[0][:2], [0x00, 0x03])
+        # НУС — заполнитель ленты: не печатается и каретку не двигает
+        # (кадры КАЛАХА идут парами «ПС НУС НУС», сдвиг ломал раскладку)
+        p.feed(b"\x00\x00")
+        self.assertEqual((p.screen.x, p.screen.cells[0][0]), (0, 0x20))
+        # прочие УП (ЕОТ …) хранятся как коды; образ code|0x40 с блинком
+        # (dim на ВТ-340) — только при включённом УПР.СИМВ
+        p.feed(b"\x03")
+        self.assertEqual(p.screen.cells[0][0], 0x03)
         self.assertTrue(p.screen.attr[0][0] & (ATTR_BLINK | ATTR_CTRL))
-        self.assertTrue(p.screen.attr[0][1] & (ATTR_BLINK | ATTR_CTRL))
-        self.assertNotIn("@", p.screen.text())     # выключен — не видно
+        self.assertNotIn("C", p.screen.text())     # выключен — не видно
         p.show_ctrl = True
-        self.assertEqual(p.screen.text().splitlines()[0][:2], "@C")
+        self.assertEqual(p.screen.text().splitlines()[0][0], "C")
         p.show_ctrl = False                        # переключение гасит сразу
-        self.assertNotIn("@", p.screen.text())
+        self.assertNotIn("C", p.screen.text())
+        self.assertEqual(p.screen.x, 1)            # ЕОТ позицию занимает
 
     def test_sedmoj_razryad_ignoriruetsya(self):
         p = Parser()

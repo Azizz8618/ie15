@@ -191,7 +191,7 @@ def login(session, link, head: bytes = b"") -> None:
     read_until_any(link, session, (b"117", b"HYC", b"3,T0", b") "), 20)
     drain(link, session)                 # дочитать хвост приветствия/эха
     feed_enter(session)                  # пустая строка
-    # готовность: serial — приглашение/НУС; ДКС — ПР-хвост или «NNNN) »
+    # готовность: serial — приглашение/NUL; ДКС — ПР-хвост или «NNNN) »
     if session.encoding == "dks":
         read_until_any(link, session, (b"\n", b") "), 15)
     else:
@@ -218,6 +218,10 @@ def connect_logged_in(link_factory, tries: int = 5):
                 except Exception:
                     pass
             time.sleep(8)          # дать СВЯЗЬ7 обработать отключение
+    if "занят" in str(last):
+        # линия Э-60 занята живой сессией (игра/другой терминал) —
+        # это состояние среды, а не поломка протокола
+        raise unittest.SkipTest(f"нет свободных линий Э-60: {last}")
     raise AssertionError(f"вход не состоялся за {tries} попытки: {last}")
 
 

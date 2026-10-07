@@ -155,7 +155,9 @@ def test_dks_line_raw_with_cr_eol():
     # но окончание — ПР, не ETX (ETX для dks_line_char — просто знак);
     # приём — raw + заглавные, tmxr-баннер в UTF-8 не ломается
     session, link = make_session(MODE_HOST)
-    session.handle_line_reply(b"Connected to DKS\r\n")
+    # реальный порядок баннеров tmxr: сначала «Encoding is RAW», затем
+    # регистрация Э-60 «Connected to DKS»
+    session.handle_line_reply(b"Encoding is RAW\r\nConnected to DKS\r\n")
     assert session.encoding == "dks" and session.rx_encoding == "raw"
     assert session.enc_decided
     session.emit(session.feed_key("В"))
@@ -212,17 +214,20 @@ def test_service_panel_all_bits():
     assert "ПОСЛ: END=ESCK" in panel()
     session.handle_line_reply(b"\x1bb")                # ESC b — инверсное
     assert "ВИДЕО=ИНВ" in panel()
-    session.handle_line_reply(b"\x00")                 # НУС → знак при УПР.СИМВ
+    x0 = session.parser.screen.x
+    session.handle_line_reply(b"\x00")             # НУС: ни знака, ни сдвига
+    assert session.parser.screen.x == x0
+    session.handle_line_reply(b"\x03")             # ЕОТ → знак при УПР.СИМВ
     from ie15emu.screen import ATTR_BLINK, ATTR_CTRL
     sc = session.parser.screen
     ux, uy = sc.x - 1, sc.y                        # позиция УП-клетки
-    assert sc.cells[uy][ux] == 0x00                # код УП в ВЗУ как есть
+    assert sc.cells[uy][ux] == 0x03                # код УП в ВЗУ как есть
     assert sc.attr[uy][ux] & (ATTR_BLINK | ATTR_CTRL)
-    assert "@" not in sc.text().splitlines()[uy]   # выключено — не виден
+    assert "C" not in sc.text().splitlines()[uy]   # выключено — не виден
     session.feed_key("BLINK")                          # включить показ УП
-    assert "@" in sc.text().splitlines()[uy]           # виден образом «@»
+    assert "C" in sc.text().splitlines()[uy]           # виден образом «C»
     session.feed_key("BLINK")                          # выключить — исчезает
-    assert "@" not in sc.text().splitlines()[uy]
+    assert "C" not in sc.text().splitlines()[uy]
     session.handle_line_reply(b"Connected to DKS\r\n")
     assert "ЛИНИЯ=ДКС" in panel() and "РАСК=ВЫКЛ" in panel()
     session.feed_key("MODE")                           # клавиша СЕАНС (F9)

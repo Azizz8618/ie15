@@ -3,7 +3,7 @@
 Тип линии определяется по баннеру и поддерживаются оба:
   serial-RAW («Encoding is RAW», без «Connected to DKS»):
       вход HYC<ETX>; приглашение «ЭВМ-3,TNNN» по пустой строке;
-      ответы команд оканчиваются НУС-НУС (0x00 0x00);
+      ответы команд оканчиваются парой NUL (0x00 0x00);
       ВЫД -> «ВАМ НЕЛЬЗЯ», ЗАД/ГОД -> «ОШИБ» (уровень ЭВМ-3).
   Э-60 через ДКС («Connected to DKS», линия в raw-кодировке):
       вход HYC<ПР>; ОС подтверждает терминал видом «NNNN)» и эхом
@@ -32,6 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ie15emu.charset import Charset, normalize_line_bytes
+from ie15emu.link import IacStripper
 from ie15emu.link import LinkError, TCPLink
 from ie15emu.parser import Parser
 from ie15emu.render import to_text
@@ -39,7 +40,7 @@ from ie15emu.render import to_text
 HOST = "127.0.0.1"
 # перебор ДКС-линий (dispak.ini: 4199=tty2 … 4223=tty24): занятые линии
 # TCPLink пропускает сам — тесту не мешает чужая сессия на дефолтном 4202
-PORT = os.environ.get("IE15_TEST_PORT", "4202-4223")
+PORT = os.environ.get("IE15_TEST_PORT", "4203-4223")
 ROM = Path(__file__).resolve().parent.parent / "rom" / "chargen-15ie.bin"
 
 # «выд зад год» → внутренние КОИ7 линии (строка 0x60..)
@@ -63,23 +64,37 @@ class Besm6Live(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        # PORT — спецификация («4202-4204»): TCPLink сам обойдёт занятые
+        # PORT — спецификация («4202-4223»): TCPLink сам обойдёт занятые
         # линии («Line connection busy») и возьмёт первую свободную
         try:
             link = TCPLink(HOST, PORT, timeout=3.0, probe=2.0)
         except LinkError as e:
             raise unittest.SkipTest(f"БЭСМ-6 недоступна на {HOST}:{PORT}: {e}")
+        cls.link = link
         cls.sock = link.sock
         cls.buf = link._pending      # баннер разведки не теряем
         cls.sock.setblocking(False)
         cls.parser = Parser()
         cls.parser.charset = Charset(ROM)
+        cls.raw = False
         cls.buf = b""
-        banner = cls._wait_any((b"Connected to DKS", b"Encoding is"), 25)
+        # ждём весь баннер: у ДКС-линии «Connected to DKS» приходит после
+        # tmxr-строк (даже если те говорят «Encoding is UTF-8» — soctty
+        # сериала + dks)
+        cls._wait_any((b"Connected to DKS", b"Encoding is RAW"), 25)
+        banner = cls._wait_any((b"Connected to DKS", b"Connected to DKS"), 3)
+        banner = cls.buf
         cls.dks = b"Connected to DKS" in banner
+        # ДКС-линии dispak.ini — «dks,raw»: сырые Н1-коды; serial-RAW — тоже
+        cls.raw = b"Encoding is RAW" in banner or cls.dks
+        if cls.raw:
+            # telnet-IAC вырезаем stateful-но: else 0xFF-байты уходят в
+            # N1-разбор и портят эталонный приём (тест проверяет поток «как
+            # есть», без сессии)
+            cls.iac = IacStripper()
         cls.eol = b"\r" if cls.dks else b"\x03"
         mark = len(cls.buf)
-        cls.sock.sendall(b"HYC" + cls.eol)          # вход
+        cls.sock.sendall(b"HYC" + cls.eol)          # «НУС» — подключение нового терминала
         if cls.dks:
             cls._wait_any((b"HYC",), 15, mark)      # Э-60 эхо входа (после mark)
         else:
@@ -89,7 +104,10 @@ class Besm6Live(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        cls.sock.close()
+        cls.link.close()
+        # СВЯЗЬ7 должна обработать отключение Э-60: слот освобождается не
+        # сразу, иначе следующий тест/сессия упрётся в занятую линию
+        time.sleep(10)
 
     @classmethod
     def _pump(cls, timeout: float) -> None:
@@ -104,8 +122,11 @@ class Besm6Live(unittest.TestCase):
                 continue
             if not c:
                 return
+            if getattr(cls, "raw", False):
+                c = cls.iac.feed(c)
             cls.buf += c
-            cls.parser.feed(normalize_line_bytes(c))
+            cls.parser.feed(c if getattr(cls, "raw", False)
+                            else normalize_line_bytes(c))
 
     @classmethod
     def _wait_any(cls, pats, timeout: float, mark: int = 0) -> bytes:
@@ -127,7 +148,7 @@ class Besm6Live(unittest.TestCase):
             cls._wait_any((wire,), 12, mark)   # Э-60: подтверждение — эхо
             cls._pump(1.0)                     # добрать строку «NNNN) приказ»
         else:
-            cls._wait_any((b"\x00\x00",), 12, mark)   # serial: НУС-НУС
+            cls._wait_any((b"\x00\x00",), 12, mark)   # serial: пара NUL
             cls._pump(0.6)
         return fold(to_text(cls.parser.screen, cls.parser.charset))
 

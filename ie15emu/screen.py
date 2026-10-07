@@ -172,7 +172,8 @@ class Screen:
         self.y = min(ROWS - 1, self.y + 1)
 
     # --- изображение ------------------------------------------------
-    def put(self, code: int, blink: bool = False, ctrl: bool = False) -> None:
+    def put(self, code: int, blink: bool = False, ctrl: bool = False,
+            advance: bool = True) -> None:
         code &= 0x7F
         self.cells[self.y][self.x] = code
         a = ATTR_INV if self.inverse else 0
@@ -184,6 +185,8 @@ class Screen:
             # а не по будущим байтам
             a |= ATTR_CTRL | ATTR_BLINK
         self.attr[self.y][self.x] = a
+        if not advance:
+            return
         self.x += 1
         self.wrap_cursor()
 

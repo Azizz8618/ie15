@@ -68,7 +68,7 @@ class TerminalSession:
                                      # выключенном эхе (срезается с приёма)
         self._echo_top = None        # строка, с которой началось локальное эхо блока
         self.encoding = encoding     # «utf8» | «raw» | «dks» — передача
-        self.rx_encoding = encoding  # приём (у ДКС-линии — raw без НУСов)
+        self.rx_encoding = encoding  # приём (у ДКС-линии — raw без NUL-преобразований)
         self.enc_decided = False     # баннер «Encoding is …» обработан
         self.last_key = ""           # последняя управляющая клавиша (панель)
         self._carry = b""            # незавершённый хвост UTF-8 из линии
@@ -302,19 +302,22 @@ class TerminalSession:
     def _detect_encoding(self, data: bytes) -> None:
         """Кодировки приёма/передачи по баннеру линии SIMH.
 
-        «Encoding is …» задаёт оба направления; для ДКС-линии (Э-60)
-        приём остаётся raw-КОИ7, но окончание строки — ПР, а не ETX.
+        «Encoding is …» задаёт направления; «Connected to DKS» меняет
+        только передачу (окончание строки — ПР, а не ETX): приём остаётся
+        тем, что объявил tmxr (RAW-ДКС у dispak.ini — raw; ДКС без raw
+        говорит с терминалом UTF-8, и дешифровать его как КОИ7 нельзя).
         Смена типа линии обязывает обновить служебную строку.
         """
         self._sniff = (self._sniff + data)[-200:]
         was = self.encoding
         if b"Connected to DKS" in self._sniff:
             # Э-60 регистрируется ОС не сразу — строка может прийти позже
-            # любых serial-баннеров и имеет приоритет. Линия ДКС в raw-
-            # кодировке: обе стороны — внутренние КОИ7 (`set ttyN raw`
-            # в dispak.ini), окончание строки — ПР, а не ETX.
-            self.encoding, self.rx_encoding = "dks", "raw"
-            self.enc_decided = True
+            # любых serial-баннеров и имеет приоритет для передачи.
+            self.encoding = "dks"
+            if b"Encoding is RAW" in self._sniff or b"Encoding is KOI-7" \
+                    in self._sniff:
+                self.rx_encoding = "raw"
+                self.enc_decided = True
         elif self.enc_decided:
             return
         elif b"Encoding is UTF-8" in self._sniff:
@@ -336,11 +339,17 @@ class TerminalSession:
         if not data:
             return None
         self._detect_encoding(data)
-        # raw-приём читается инкрементально: tmxr-баннер («Connected to
-        # the БЭСМ-6…») приходит в UTF-8 даже на raw/dks-линии
-        stream, self._carry = normalize_incremental(data, self._carry)
         if self.rx_encoding == "raw":
-            stream = koi7_raw_upper(stream)
+            # RAW/ДКС-линия — байтовый канал ВТ-340: коды Н1 приходят как
+            # есть (русская буква — 0x60.. или уже с битом алфавита 0x80..);
+            # UTF-8-разбор здесь портил кадры («MОЙ ХОД» на ~1,5 знака левее
+            # на каждый двухбайтовый символ), а tmxr-баннер — единственная
+            # UTF-8-строка, ей жертвуем (на Видеотоне он тоже «кракозябрами»)
+            stream, self._carry = koi7_raw_upper(data), b""
+        else:
+            # utf8-приём читается инкрементально: незавершённая на границе
+            # recv() многобайтовая кириллица доносит остатком
+            stream, self._carry = normalize_incremental(data, self._carry)
         if not self.echo and stream:
             stream = self._strip_pending_echo(stream)
         reply = self.parser.feed(stream)
