@@ -81,9 +81,9 @@ class TerminalSession:
         return self.mode
 
     def _update_service(self) -> None:
-        # Подвал — панель управляющих клавиш: состояния и легенды
-        # «ФУНКЦИЯ=клавиша» ровными колонками через « | »; справа внизу —
-        # последняя нажатая клавиша.
+        # Подвал: сегмент строк состояния — выше отделительной черты,
+        # справочные ряды «ФУНКЦИЯ=клавиша» — ниже; последняя нажатая
+        # клавиша — в конце сегмента состояния.
         sc = self.parser.screen
         host = self.mode == MODE_HOST
         lay = ("ВЫКЛ" if not self.layout
@@ -110,8 +110,8 @@ class TerminalSession:
         keys3 = row(["СТЕРЭКР=PgUp", "ОЧИСТКА=PgDn", "ИНВЕРС=Ins",
                      "НОРМ=Del"])
         keys4 = row(["БЛИНК=F7", "НАБОР=F8", "СЕТЬ=F9", "ПЕРЕДАЧА=F10"])
-        sc.set_service("\n".join([state1, state2, keys1, keys2, keys3,
-                                  keys4]))
+        sc.set_service("\n".join([state1, state2, "-" * COLS,
+                                  keys1, keys2, keys3, keys4]))
 
     # --- клавиатура -------------------------------------------------
     def feed_key(self, key: str) -> bytes | None:

@@ -95,7 +95,7 @@ class Screen:
     def set_service(self, text: str) -> None:
         # текст с переводом строк раскладывается на несколько рядов
         # подвала; каждый ряд — строго 80 знаков
-        rows = text.split("\n")[:6]
+        rows = text.split("\n")[:8]
         first = (rows[0] if rows else "")[:COLS].ljust(COLS)
         for i, ch in enumerate(first):
             self.service[i] = ch

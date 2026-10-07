@@ -49,15 +49,19 @@ class TestUpKody(unittest.TestCase):
         p.feed(bytes([BEL]))
         self.assertTrue(p.screen.bell)
 
-    def test_pu_stb_stirayut_do_konca(self):
+    def test_stb_pf_kursor_bez_stiraniya(self):
+        # ПП (\v) и ПФ (\f) у Видеотона — курсорные шаги (вниз / «дом»),
+        # как их же выдаёт vt_send на операторский терминал; ничего не стирают
         p = Parser()
         feed(p, b"aaaa", bytes([CR, LF]), b"bbbb")
         p.screen.x = p.screen.y = 0
         p.feed(bytes([VT]))
-        self.assertEqual(p.screen.cells[0][0], 0x20)
-        self.assertEqual(p.screen.cells[1][0], 0x20)
+        self.assertEqual(p.screen.y, 1)
+        self.assertEqual(p.screen.x, 0)          # колонку \v не трогает
+        self.assertEqual(p.screen.cells[0][0], ord("a"))
         p.feed(bytes([FF]))
-        self.assertTrue(all(c == 0x20 for row in p.screen.cells for c in row))
+        self.assertEqual((p.screen.x, p.screen.y), (0, 0))
+        self.assertEqual(p.screen.cells[0][0], ord("a"))   # кадр цел
 
 
 class TestKomandyNabora2(unittest.TestCase):
@@ -247,6 +251,64 @@ class TestVideotonKody(unittest.TestCase):
         p.feed(b"\x1f" * 12 + b"   ---\n  I6\n")
         self.assertEqual(decode_koi7(bytes(p.screen.cells[0][:7])).strip(), "---")
         self.assertEqual(p.screen.cells[1][2], ord("I"))
+
+    def test_polnyy_kadr_igry_559(self):
+        # живой кадр поля «ИГРА» (шифр 4199) с ДКС-линии 2 после починки
+        # vt_putc: 12 очисток + 11 рядов поля + «ВАШ ХОД:» — ни один ряд
+        # не теряется (раньше tmxr-буфер 256Б отбрасывал хвост кадра)
+        frame = bytes.fromhex(
+            "1f1f1f1f1f1f1f1f1f1f1f1f2020202020202020202020202d2d2d2d2d2d2d20"
+            "202020202d2d2d2d2d2d2d20202020202d2d2d2d2d2d2d0a2020202020202020"
+            "20202020493120626220492d2d2d2d2d493620202020492d2d2d2d2d49372020"
+            "2020490a2020202020202020202020202d2d2d2d2d2d2d20202020202d2d2d2d"
+            "2d2d2d20202020202d2d2d2d2d2d2d0a2020202020202020202f202020202049"
+            "20202020205c20202020204920202020202f20202020204920202020205c200a"
+            "2d2d2d2d2d2d2d20202020202d2d2d2d2d2d2d20202020202d2d2d2d2d2d2d20"
+            "202020202d2d2d2d2d2d2d20202020202d2d2d2d2d2d2d2d0a49302062622049"
+            "2d2d2d2d2d493220202020492d2d2d2d2d4935207e7e20492d2d2d2d2d493820"
+            "202020492d2d2d2d2d49313020202020490a2d2d2d2d2d2d2d20202020202d2d"
+            "2d2d2d2d2d20202020202d2d2d2d2d2d2d20202020202d2d2d2d2d2d2d202020"
+            "20202d2d2d2d2d2d2d2d0a2020202020202020205c2020202020492020202020"
+            "2f20202020204920202020205c20202020204920202020202f200a2020202020"
+            "202020202020202d2d2d2d2d2d2d20202020202d2d2d2d2d2d2d20202020202d"
+            "2d2d2d2d2d2d0a202020202020202020202020493320626220492d2d2d2d2d49"
+            "3420202020492d2d2d2d2d493920202020490a2020202020202020202020202d"
+            "2d2d2d2d2d2d20202020202d2d2d2d2d2d2d20202020202d2d2d2d2d2d2d0a42"
+            "417b20586f643a200d0a203d2d2a20")
+        p = Parser()
+        from ie15emu.charset import koi7_raw_upper
+        p.feed(koi7_raw_upper(frame))
+        text = p.screen.text().splitlines()
+        self.assertTrue(text[1].strip().startswith("I1"))
+        self.assertIn("ЧЧ", text[5])            # ряд 5 дошел целиком
+        self.assertIn("I10", text[5])
+        self.assertIn("I9", text[9])             # последние ряды поля
+        self.assertEqual((p.screen.x, p.screen.y), (5, 12))
+
+    def test_kadr_obnovleniya_ne_losit_pole(self):
+        # живой кадр обновления «ИГРА» (перехвачен с линии 4199): ДОМ,
+        # 11 вниз, 11 \v, затем служебные строки — чистый курсорный
+        # переезд, поле обязано остаться целым, сообщение ниже поля
+        p = Parser()
+        frame = (b"I" + b"-" * 39 + b"I\n"
+                 + b"  I  POLE SHASHKI                I\n"
+                 + b"  I  bb                          I\n"
+                 + b"  I                              I\n"
+                 + b"I" + b"-" * 39 + b"I\n")
+        p.feed(b"\x1f" * 12 + frame)
+        p.feed(b"\x0c" + b"\x1a" * 11 + b"\x0b" * 11
+               + b"ETO NE XOD!\r\nVASH XOD:\r\n =-* ")
+        # курсор уехал на 22-й ряд (ДОМ + 11 вниз + 11 \v), печать там;
+        # последнее ПС сдвигает кадр на строку (как на настоящем терминале)
+        self.assertEqual(p.screen.y, ROWS - 1)
+        # поле НЕ стёрто: после сдвига на строку вверх рамки и ряды на месте
+        self.assertEqual(p.screen.cells[0][2], ord("I"))    # был ряд 1
+        self.assertEqual(p.screen.cells[0][5], ord("P"))
+        self.assertEqual(p.screen.cells[ROWS - 3][0], ord("E"))   # «ETO NE XOD!»
+        self.assertEqual(decode_koi7(bytes(p.screen.cells[ROWS - 2])).strip(),
+                         "VASH XOD:")
+        self.assertEqual(decode_koi7(bytes(p.screen.cells[ROWS - 1])[:5]),
+                         " =-* ")
 
 
 class TestPerenosStroki(unittest.TestCase):

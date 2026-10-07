@@ -113,7 +113,7 @@ def key_to_bytes(key: str, layout: str | None = None) -> bytes:
     if key == "KEY_LEFT":
         return b"\x1bD"
     if key == "KEY_HOME":
-        return b"\x1bH"
+        return b"\x1bH"        # как на клавиатуре 15ИЭ: ESC H
     if key == "KEY_END":
         return b"\x1bK"        # стереть до конца строки
     if key == "KEY_PAGEUP":
