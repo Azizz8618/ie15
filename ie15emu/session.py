@@ -36,7 +36,7 @@ CONTROL_HINTS = {
     "KEY_INSERT": "INS=ESCb", "KEY_DELETE": "DEL=ESCc",
     "KEY_CTRLRIGHT": "СЛОВО=^→", "KEY_CTRLLEFT": "СЛОВО=^←",
     "KEY_CTRLUP": "СТРОКА=^↑", "KEY_CTRLDOWN": "СТРОКА=^↓",
-    "SEND": "SEND", "MODE": "СЕАНС", "CMDSET": "НАБОР", "BLINK": "БЛИНК",
+    "SEND": "SEND", "MODE": "СЕАНС", "CMDSET": "НАБОР", "BLINK": "УПР.СИМВ",
     "ECHO": "ЭХО", "CLEAR": "ОЧИСТКА",
 }
 
@@ -112,15 +112,15 @@ class TerminalSession:
                      "ВИДЕО=" + ("ИНВ" if sc.inverse else "НОРМ"),
                      "БУФЕР=" + (str(len(self.buffer)) if self.buffer
                                  else "ПУСТО"),
-                     "БЛИНК=" + ("ВКЛ" if self.parser.show_ctrl
-                                 else "ВЫКЛ"))
+                     "УПР.СИМВ=" + ("ВКЛ" if self.parser.show_ctrl
+                                    else "ВЫКЛ"))
         state3 = row(f"ПОСЛ: {self.last_key}" if self.last_key else "ПОСЛ:")
         keys1 = row("ВК=Bksp", "ТАБ=Tab", "ЗВН=Ctrl-G", "ПРПС=Enter")
         keys2 = row("ESC=Esc", "КУРСОР=Стрелки", "ДОМ=Home", "СТЕРСТР=End")
         keys3 = row("СЛОВО=Ctrl+→", "СЛОВО=Ctrl+←", "НАЧСТР=Ctrl+↑",
                     "НИЖСТР=Ctrl+↓")
         keys4 = row("ЭКРАН↑=PgUp", "ЭКРАН↓=PgDn", "ИНВЕРС=Ins", "НОРМ=Del")
-        keys5 = row("ЭХО=F6", "БЛИНК=F7", "НАБОР=F8", "СЕТЬ=F9")
+        keys5 = row("ЭХО=F6", "УПР.СИМВ=F7", "НАБОР=F8", "СЕТЬ=F9")
         keys6 = row("ПЕРЕДАЧА=F10", "ОЧИСТКА=F5")
         sc.set_service("\n".join([state1, state2, state3, "-" * COLS,
                                   keys1, keys2, keys3, keys4, keys5,

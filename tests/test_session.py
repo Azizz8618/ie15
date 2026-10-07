@@ -181,19 +181,19 @@ def test_service_panel_all_bits():
         return "\n".join(rows())
 
     for lab in ("СЕТЬ=С ЭВМ", "НАБОР=2(VT52)", "ЛИНИЯ=UTF-8", "РАСК=ВЫКЛ",
-                "ВИДЕО=НОРМ", "БУФЕР=ПУСТО", "БЛИНК=ВКЛ"):
+                "ВИДЕО=НОРМ", "БУФЕР=ПУСТО", "УПР.СИМВ=ВЫКЛ"):
         assert lab in panel(), lab
     assert "ЗВУК" not in panel()
-    session.feed_key("BLINK")                            # F7 — скрыть знаки УП
-    assert "БЛИНК=ВЫКЛ" in panel() and not session.parser.show_ctrl
+    session.feed_key("BLINK")                            # F7 — показать УП
+    assert "УПР.СИМВ=ВКЛ" in panel() and session.parser.show_ctrl
     session.feed_key("BLINK")
-    assert "БЛИНК=ВКЛ" in panel() and session.parser.show_ctrl
+    assert "УПР.СИМВ=ВЫКЛ" in panel() and not session.parser.show_ctrl
     for legend in ("ВК=Bksp", "ТАБ=Tab", "ЗВН=Ctrl-G", "ПРПС=Enter",
                    "ЭКРАН↑=PgUp", "ЭКРАН↓=PgDn",
                    "ESC=Esc", "КУРСОР=Стрелки", "ДОМ=Home", "СТЕРСТР=End",
                    "СЛОВО=Ctrl+→", "СЛОВО=Ctrl+←", "НАЧСТР=Ctrl+↑",
                    "НИЖСТР=Ctrl+↓", "ИНВЕРС=Ins",
-                   "НОРМ=Del", "ЭХО=F6", "БЛИНК=F7", "НАБОР=F8", "СЕТЬ=F9",
+                   "НОРМ=Del", "ЭХО=F6", "УПР.СИМВ=F7", "УПР.СИМВ=F7", "НАБОР=F8", "СЕТЬ=F9",
                    "ПЕРЕДАЧА=F10"):
         assert legend in panel(), legend
     assert "ЭХО=ВКЛ" in panel()                      # состояние в ряду состояний
@@ -212,11 +212,17 @@ def test_service_panel_all_bits():
     assert "ПОСЛ: END=ESCK" in panel()
     session.handle_line_reply(b"\x1bb")                # ESC b — инверсное
     assert "ВИДЕО=ИНВ" in panel()
-    session.handle_line_reply(b"\x00")                 # НУС → «@» с блинком
-    from ie15emu.screen import ATTR_BLINK
+    session.handle_line_reply(b"\x00")                 # НУС → знак при УПР.СИМВ
+    from ie15emu.screen import ATTR_BLINK, ATTR_CTRL
     sc = session.parser.screen
-    assert sc.cells[sc.y][sc.x - 1] == 0x40            # образный знак
-    assert sc.attr[sc.y][sc.x - 1] & ATTR_BLINK
+    ux, uy = sc.x - 1, sc.y                        # позиция УП-клетки
+    assert sc.cells[uy][ux] == 0x00                # код УП в ВЗУ как есть
+    assert sc.attr[uy][ux] & (ATTR_BLINK | ATTR_CTRL)
+    assert "@" not in sc.text().splitlines()[uy]   # выключено — не виден
+    session.feed_key("BLINK")                          # включить показ УП
+    assert "@" in sc.text().splitlines()[uy]           # виден образом «@»
+    session.feed_key("BLINK")                          # выключить — исчезает
+    assert "@" not in sc.text().splitlines()[uy]
     session.handle_line_reply(b"Connected to DKS\r\n")
     assert "ЛИНИЯ=ДКС" in panel() and "РАСК=ВЫКЛ" in panel()
     session.feed_key("MODE")                           # клавиша СЕАНС (F9)
@@ -359,7 +365,7 @@ def test_history_keeps_scrolled_rows():
                                   str(i % 10).encode() + b"\r\n")
     assert len(sc.history) == 6                       # 30 - 24 строки кадра
     from ie15emu.charset import decode_koi7
-    assert decode_koi7(bytes(sc.history[0][0])).strip() == "A0"
+    assert decode_koi7(bytes(sc.history[0][0])).strip() == "А0"
     for _ in range(6):
         session.feed_key("KEY_PAGEUP")
     assert sc.view_top == 0                           # дошли до первой строки

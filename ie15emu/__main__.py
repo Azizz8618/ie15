@@ -269,7 +269,7 @@ def text_screen(parser: Parser) -> str:
     знаки УП (блинк) мигают, как dim на Видеотоне-340.
     """
     from .charset import decode_koi7
-    from .screen import ATTR_BLINK
+    from .screen import ATTR_BLINK, ATTR_CTRL
 
     sc = parser.screen
     try:
@@ -280,8 +280,14 @@ def text_screen(parser: Parser) -> str:
     def row_line(cells, attr, y=None):
         toks = []
         for x, code in enumerate(cells):
+            a = attr[x]
+            if a & ATTR_CTRL:
+                if not sc.show_ctrl:
+                    code, a = 0x20, 0          # УП скрыт кнопкой УПР.СИМВ
+                else:
+                    code |= 0x40               # образный знак, как dim на ВТ-340
             ch = decode_koi7(bytes([code]))
-            if attr[x] & ATTR_BLINK:
+            if a & ATTR_BLINK:
                 # 5 мигающий, 7 инверсия: там, где мигание отключено
                 # (большинство современных терминалов), знак остаётся
                 # различим инверсным блоком

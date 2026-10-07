@@ -11,7 +11,7 @@ import zlib
 
 from . import COLS, ROWS
 from .charset import Charset
-from .screen import ATTR_BLINK, ATTR_INV, Screen
+from .screen import ATTR_BLINK, ATTR_CTRL, ATTR_INV, Screen
 
 GREEN = (0x33, 0xFF, 0x66)
 DARK = (0x08, 0x14, 0x0C)
@@ -25,8 +25,11 @@ def to_ansi(screen: Screen, charset: Charset,
         out.append("\x1b[32;40m\x1b[2J\x1b[H")
     for y in range(ROWS):
         for x in range(COLS):
-            code = screen.cells[y][x]
-            inv = screen.attr[y][x] & (ATTR_INV | ATTR_BLINK)
+            code = screen.glyph(y, x)
+            a = screen.attr[y][x]
+            if a & ATTR_CTRL and not screen.show_ctrl:
+                a = 0
+            inv = a & (ATTR_INV | ATTR_BLINK)
             is_cur = cursor and (x, y) == (screen.x, screen.y)
             bits = charset.rows(code)
             for r, row in enumerate(bits):
@@ -54,8 +57,11 @@ def to_png_bytes(screen: Screen, charset: Charset, path: str) -> None:
     for y in range(ROWS):
         glyph_rows = [b"" for _ in range(8)]
         for x in range(COLS):
-            code = screen.cells[y][x]
-            inv = bool(screen.attr[y][x] & (ATTR_INV | ATTR_BLINK))
+            code = screen.glyph(y, x)
+            a = screen.attr[y][x]
+            if a & ATTR_CTRL and not screen.show_ctrl:
+                a = 0
+            inv = bool(a & (ATTR_INV | ATTR_BLINK))
             for r, row in enumerate(charset.rows(code)):
                 for c in range(7):
                     on = ((row >> (6 - c)) & 1) ^ inv

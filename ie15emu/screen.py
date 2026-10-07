@@ -9,7 +9,9 @@ from __future__ import annotations
 from . import COLS, ROWS, SERVICE_ROW
 
 ATTR_INV = 0x80    # младшие 7 битов — код ВЗУ, старший — инверсия
-ATTR_BLINK = 0x40  # «блинк», как на Видеотоне-340: образные знаки УП
+ATTR_BLINK = 0x40  # мигание (режим blink Видеотона-340)
+ATTR_CTRL = 0x20   # знак — управляющий код, сохранённый как есть: виден
+                   # только при включённом «УПР.СИМВ» (парсер/экран)
 
 
 class Screen:
@@ -28,6 +30,8 @@ class Screen:
         # скролле; глубина — из конфига ([terminal] history, по умолчанию 1000)
         self.history: list[tuple[list[int], list[int]]] = []
         self.history_max = history
+        self.show_ctrl = False     # клавиша «УПР.СИМВ» (F7): показывать
+                                   # управляющие знаки образом с миганием
         # представление (PgUp/PgDn): None — авто-следить за курсором;
         # целое — закреплённая верхняя строка окна вывода
         self.view_top: int | None = None
@@ -168,12 +172,17 @@ class Screen:
         self.y = min(ROWS - 1, self.y + 1)
 
     # --- изображение ------------------------------------------------
-    def put(self, code: int, blink: bool = False) -> None:
+    def put(self, code: int, blink: bool = False, ctrl: bool = False) -> None:
         code &= 0x7F
         self.cells[self.y][self.x] = code
         a = ATTR_INV if self.inverse else 0
         if blink:
             a |= ATTR_BLINK
+        if ctrl:
+            # УП кладётся в ВЗУ как есть (код < 0x20) и показывается лишь
+            # при включённом «УПР.СИМВ» — переключение работает по экрану,
+            # а не по будущим байтам
+            a |= ATTR_CTRL | ATTR_BLINK
         self.attr[self.y][self.x] = a
         self.x += 1
         self.wrap_cursor()
@@ -215,9 +224,20 @@ class Screen:
         self.service_dirty = True
 
     # --- выдача -----------------------------------------------------
+    def glyph(self, y: int, x: int) -> int:
+        """Знак в позиции с учётом режима «УПР.СИМВ»: УП виден образом
+        code|0x40 только когда он включён."""
+        code = self.cells[y][x]
+        a = self.attr[y][x]
+        if a & ATTR_CTRL:
+            return code | 0x40 if self.show_ctrl else 0x20
+        return code
+
     def text(self) -> str:
         from .charset import decode_koi7
-        return "\n".join(decode_koi7(bytes(row)) for row in self.cells)
+        return "\n".join(
+            decode_koi7(bytes(self.glyph(y, x) for x in range(COLS)))
+            for y in range(ROWS))
 
     def dump(self) -> str:
         out = ["+" + "-" * COLS + "+"]

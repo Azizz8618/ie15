@@ -182,17 +182,23 @@ class TestRusLetters(unittest.TestCase):
         self.assertEqual((p.screen.x, p.screen.y), (8, 1))
 
     def test_up_bez_funkcii_pechataetsya_blinkom(self):
-        from ie15emu.screen import ATTR_BLINK
+        from ie15emu.screen import ATTR_BLINK, ATTR_CTRL
         p = Parser()
-        p.feed(bytes([0x07]))          # ЗВН, не «Г»
+        self.assertFalse(p.show_ctrl)              # УПР.СИМВ по умолчанию выкл
+        p.feed(bytes([0x07]))                      # ЗВН, не «Г»
         self.assertTrue(p.screen.bell)
         self.assertEqual(p.screen.cells[0][0], 0x20)
-        # НУС/ЕОТ — образные знаки code|0x40 с блинком (как dim на ВТ-340),
-        # а не буквы «Ю»/«Ц»
+        # НУС/ЕОТ хранятся как коды УП; образные знаки code|0x40 с блинком
+        # (как dim на ВТ-340) показываются только при включённом УПР.СИМВ
         p.feed(b"\x00\x03")
-        self.assertEqual(p.screen.cells[0][:2], [0x40, 0x43])   # «@» «C»
-        self.assertTrue(p.screen.attr[0][0] & ATTR_BLINK)
-        self.assertTrue(p.screen.attr[0][1] & ATTR_BLINK)
+        self.assertEqual(p.screen.cells[0][:2], [0x00, 0x03])
+        self.assertTrue(p.screen.attr[0][0] & (ATTR_BLINK | ATTR_CTRL))
+        self.assertTrue(p.screen.attr[0][1] & (ATTR_BLINK | ATTR_CTRL))
+        self.assertNotIn("@", p.screen.text())     # выключен — не видно
+        p.show_ctrl = True
+        self.assertEqual(p.screen.text().splitlines()[0][:2], "@C")
+        p.show_ctrl = False                        # переключение гасит сразу
+        self.assertNotIn("@", p.screen.text())
 
     def test_sedmoj_razryad_ignoriruetsya(self):
         p = Parser()
