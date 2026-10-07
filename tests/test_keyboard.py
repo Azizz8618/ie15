@@ -93,6 +93,14 @@ def test_host_mode_key_mapping():
     assert key_to_bytes("KEY_ESC") == b"\x1b"
 
 
+def test_shift_to_rus_h2():
+    # Н2, латинская раскладка: Shift+клавиша — русская буква положения
+    assert key_to_bytes("W", None, shift_to_rus=True) == bytes([0x03 | 0x80])
+    assert key_to_bytes("Q", None, shift_to_rus=True) == bytes([0x0A | 0x80])
+    # без флага и без Shift — как раньше
+    assert key_to_bytes("W", None) == b"W"
+    assert key_to_bytes("w", None, shift_to_rus=True) == b"w"
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

@@ -226,7 +226,8 @@ class TerminalSession:
             getattr(self.parser.screen, move)()
             self._update_service()
             return None
-        data = key_to_bytes(key, layout=self.layout)
+        data = key_to_bytes(key, layout=self.layout,
+                            shift_to_rus=self.nabor == "n2")
         if not data:
             return None
         if self.mode == MODE_HOST:
@@ -258,6 +259,10 @@ class TerminalSession:
     def _queue_echo(self, data: bytes) -> None:
         """Что вернёт линия в эхо на отданные байты (в форме приёма) —
         при выключенном эхе это не печатается, а срезается с потока."""
+        if self.rx_encoding == "raw" and self.nabor != "n2":
+            # Н0/Н1: линия эхит байты как есть
+            self._echo_pending += bytes(data)
+            return
         stream, _ = normalize_incremental(to_line(bytes(data), self.encoding))
         if self.rx_encoding == "raw":
             stream = koi7_raw_upper(stream)
@@ -380,10 +385,12 @@ class TerminalSession:
         if self.rx_encoding == "raw":
             # RAW/ДКС-линия — байтовый канал ВТ-340: коды Н1 приходят как
             # есть (русская буква — 0x60.. или уже с битом алфавита 0x80..);
-            # UTF-8-разбор здесь портил кадры («MОЙ ХОД» на ~1,5 знака левее
-            # на каждый двухбайтовый символ), а tmxr-баннер — единственная
-            # UTF-8-строка, ей жертвуем (на Видеотоне он тоже «кракозябрами»)
-            stream, self._carry = koi7_raw_upper(data), b""
+            # UTF-8-разбор здесь портил кадры, tmxr-баннер — единственная
+            # UTF-8-строка, ей жертвуем. Верхний регистр (одно-регистная
+            # традиция ЭВМ) применяется только в Н2 — в Н0/Н1 линия
+            # печатает оба регистра как есть
+            stream = koi7_raw_upper(data) if self.nabor == "n2" else data
+            stream, self._carry = stream, b""
         else:
             # utf8-приём читается инкрементально: незавершённая на границе
             # recv() многобайтовая кириллица доносит остатком

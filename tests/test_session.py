@@ -54,9 +54,11 @@ def test_send_key_transmits_buffer_then_clears():
 
 def test_host_mode_sends_immediately():
     session, link = make_session(MODE_HOST)
-    out = session.feed_key("A")
-    assert out == b"A"              # при вводе С ЭВМ приходит сразу
-    assert session.pending() == b"" # буфер не используется
+    out = session.feed_key("A")     # Н2 + латинская раскладка: Shift+A — «А»
+    assert out == bytes([0x86])     # «Ф»=0x06 + бит алфавита
+    assert session.pending() == b""  # буфер не используется
+    out = session.feed_key("a")
+    assert out == b"a"               # без Shift — латинская как есть
 
 
 def test_mode_toggle_switches_and_service_row():

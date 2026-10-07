@@ -103,13 +103,16 @@ def lookup_key(kbd_rom: bytes | None, col: int, row: int) -> int | None:
 
 DEFAULT_LAYOUT = "positional"   # русская раскладка по умолчанию — по позиции ЙЦУКЕН
 
-def key_to_bytes(key: str, layout: str | None = None) -> bytes:
+def key_to_bytes(key: str, layout: str | None = None,
+                 shift_to_rus: bool = False) -> bytes:
     """Нажатие ПК-клавиши → байты внутреннего КОИ7-потока терминала.
 
     layout: None — выключена; "positional" (по умолчанию для --koi7) —
     клавиша даёт русскую букву своего положения (q→Й); "phonetic" —
     фонетическая таблица (w→В, q→Я). Заглавные русские — с битом
     алфавита (0x80); в байты линии их переводит `charset.to_line`.
+    shift_to_rus (режим Н2 при layout=None): Shift+латинская клавиша —
+    русская буква положения (W→Ц).
     """
     if key in ("KEY_ENTER", "\n", "\r"):
         return b"\r\n"
@@ -158,6 +161,12 @@ def key_to_bytes(key: str, layout: str | None = None) -> bytes:
     # (заглавная) — английский набор, переназначения нет.
     if table and ch in table:
         return bytes([table[ch] | ALPHA_BIT | 0x60])
+    if shift_to_rus and layout is None and ch.isalpha() and ch.isupper():
+        # Н2 при выключенной русской раскладке: Shift+клавиша — русская
+        # буква положения клавиши (W→Ц), симметрично «русская+Shift→лат.»
+        pos = KOI7_TABLES["positional"].get(ch.lower())
+        if pos is not None:
+            return bytes([pos | ALPHA_BIT])
     return ch.encode("ascii", errors="replace")
 
 
