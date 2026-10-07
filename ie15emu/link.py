@@ -5,6 +5,11 @@
 
   TCPLink   — «токовая петля» поверх TCP (совместимо с `attach tty` SIMH)
   SSHLink   — та же линия поверх SSH (paramiko), канал «exec»
+
+Порт можно задать одним числом, списком («4202,4210») или диапазоном
+(«4202-4223»): подключение идёт по очереди ко всем портам — если линия
+занята (SIMH отвечает «Line connection busy» и закрывает сокет) или порт
+не отвечает, пробуется следующий.
 """
 from __future__ import annotations
 
@@ -14,6 +19,72 @@ import time
 
 class LinkError(RuntimeError):
     pass
+
+
+# чем SIMH отвечает на вход в уже занятую линию (tmxr/DKS) — после этих
+# строк сокет закрывается; такие порты пропускаем при переборе
+BUSY_MARKERS = (b"connection busy", b"connection not available",
+                b"line busy", b"no free terminal",
+                # мост сообщает, что не смог дойти до линии (UTF-8)
+                "линия недоступна".encode("utf-8"))
+
+
+def parse_port_spec(spec) -> list[int]:
+    """Спецификация портов → упорядоченный список без повторов.
+
+    «4202», «4202,4210», «4202-4223», «4202-4204,4210» — как в конфигурации
+    терминала (поле port) и в ключe --port.
+    """
+    if isinstance(spec, int):
+        specs = [str(spec)]
+    elif isinstance(spec, (list, tuple)):
+        specs = [str(s) for s in spec]
+    else:
+        specs = str(spec).split(",")
+    ports: list[int] = []
+    for part in specs:
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, _, b = part.partition("-")
+            lo, hi = int(a), int(b)
+            if lo > hi:
+                raise LinkError(f"неверный диапазон портов: {part}")
+            ports.extend(range(lo, hi + 1))
+        else:
+            ports.append(int(part))
+    for p in ports:
+        if not 0 < p < 65536:
+            raise LinkError(f"порт вне диапазона: {p}")
+    if not ports:
+        raise LinkError("не задано ни одного порта")
+    if len(ports) > 512:
+        raise LinkError("слишком длинный список портов (максимум 512)")
+    return list(dict.fromkeys(ports))
+
+
+def busy_reply(data: bytes) -> bool:
+    return any(m in data.lower() for m in BUSY_MARKERS)
+
+
+def spec_hint(ports) -> str:
+    """«4202,4204-4206» из списка — компактнее длинных диапазонов."""
+    ports = sorted(set(ports))
+    if not ports:
+        return "нет"
+    out, run, prev = [], None, None
+    for p in ports:
+        if prev is not None and p == prev + 1:
+            run[1] = p
+        else:
+            if run:
+                out.append(run)
+            run = [p, p]
+        prev = p
+    if run:
+        out.append(run)
+    return ",".join(str(a) if a == b else f"{a}-{b}" for a, b in out)
 
 
 IAC, DONT, DO, WONT, WILL, SB, SE = 0xFF, 254, 253, 252, 251, 250, 240
@@ -67,14 +138,57 @@ class IacStripper:
 
 
 class TCPLink:
-    """Прямое TCP-подключение к telnet-линии SIMH (IAC коды отбрасываются)."""
+    """Прямое TCP-подключение к telnet-линии SIMH (IAC коды отбрасываются).
 
-    def __init__(self, host: str, port: int, timeout: float = 5.0):
-        self.sock = socket.create_connection((host, port), timeout)
-        self.sock.settimeout(0.2)
+    port — одно число, список или спецификация («4202-4223»): к портам
+    идут по порядку; занятая линя (SIMH шлёт «Line connection busy» и
+    закрывает сокет) и недоступный порт пропускаются, берётся следующий.
+    """
+
+    def __init__(self, host: str, port, timeout: float = 5.0,
+                 probe: float = 2.0):
+        ports = parse_port_spec(port)
+        self.port = None
+        self._pending = b""
         self._iac = IacStripper()
+        refused = []
+        busy = []
+        for p in ports:
+            try:
+                sock = socket.create_connection((host, p), timeout)
+            except OSError:
+                refused.append(p)
+                continue
+            first = b""
+            try:
+                sock.settimeout(probe)
+                first = sock.recv(4096)
+            except socket.timeout:
+                first = b""
+            except OSError:
+                sock.close()
+                refused.append(p)
+                continue
+            if busy_reply(first):
+                sock.close()
+                busy.append(p)
+                continue
+            sock.settimeout(0.2)
+            self.sock = sock
+            self.port = p
+            if first:
+                self._pending = self._iac.feed(first)
+            return
+        if busy and not refused:
+            raise LinkError(f"все линии заняты ЭВМ ({spec_hint(ports)})")
+        raise LinkError(
+            f"нет свободной линии на {host} ({spec_hint(ports)}): "
+            f"заняты {spec_hint(busy)}, недоступны {spec_hint(refused)}")
 
     def recv(self, size: int = 4096) -> bytes:
+        if self._pending:
+            out, self._pending = self._pending, b""
+            return out
         try:
             chunk = self.sock.recv(size)
         except socket.timeout:
@@ -98,32 +212,67 @@ class TCPLink:
 class SSHLink:
     """Линия терминала через SSH-сессию (нужен sshd или ssh_bridge.py)."""
 
-    def __init__(self, host: str, port: int, user: str,
+    def __init__(self, host: str, port, user: str,
                  password: str | None = None, keyfile: str | None = None,
-                 timeout: float = 10.0):
+                 timeout: float = 10.0, probe: float = 3.0):
         try:
             import paramiko
         except ImportError as e:
             raise LinkError("SSH-линия требует paramiko (pip install paramiko)") from e
-        self.client = paramiko.SSHClient()
-        self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        kwargs: dict = {"hostname": host, "port": port, "username": user,
-                        "timeout": timeout}
-        if keyfile:
-            kwargs["key_filename"] = keyfile
-        else:
-            kwargs["password"] = password or ""
-            kwargs["look_for_keys"] = False
-        self.client.connect(**kwargs)
-        self.chan = self.client.get_transport().open_session()
-        self.chan.settimeout(0.2)
-        # PTY не запрашивается: линия прозрачна для байтов (КОИ7/UTF-8), а
-        # pty-режим sshd переврал бы УП-коды (INLCR/IXON/ISTRIP).
-        self.chan.exec_command("terminal")
-        time.sleep(0.3)
+        # port — число, список или спецификация («2222,2223» / «2222-2225»):
+        # перебор мостов; порт, где линия ЭВМ уже занята (мост прокидывает
+        # «Line connection busy»), тоже пропускаем и идём дальше
+        ports = parse_port_spec(port)
+        self.port = None
+        self._pending = b""
         self._iac = IacStripper()
+        busy, refused = [], []
+        for p in ports:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            kwargs: dict = {"hostname": host, "port": p, "username": user,
+                            "timeout": timeout}
+            if keyfile:
+                kwargs["key_filename"] = keyfile
+            else:
+                kwargs["password"] = password or ""
+                kwargs["look_for_keys"] = False
+            try:
+                client.connect(**kwargs)
+            except (paramiko.SSHException, OSError):
+                client.close()
+                refused.append(p)
+                continue
+            chan = client.get_transport().open_session()
+            chan.settimeout(probe)
+            # PTY не запрашивается: линия прозрачна для байтов (КОИ7/UTF-8), а
+            # pty-режим sshd переврал бы УП-коды (INLCR/IXON/ISTRIP).
+            chan.exec_command("terminal")
+            try:
+                first = chan.recv(4096)
+            except socket.timeout:
+                first = b""
+            if busy_reply(first):
+                chan.close()
+                client.close()
+                busy.append(p)
+                continue
+            chan.settimeout(0.2)
+            self.client, self.chan, self.port = client, chan, p
+            if first:
+                self._pending = self._iac.feed(first)
+            time.sleep(0.3)
+            return
+        if busy and not refused:
+            raise LinkError(f"все SSH-линии заняты ЭВМ ({spec_hint(ports)})")
+        raise LinkError(
+            f"нет свободной SSH-линии на {host} ({spec_hint(ports)}): "
+            f"заняты {spec_hint(busy)}, недоступны {spec_hint(refused)}")
 
     def recv(self, size: int = 4096) -> bytes:
+        if self._pending:
+            out, self._pending = self._pending, b""
+            return out
         try:
             if self.chan.recv_ready():
                 chunk = self.chan.recv(size)
@@ -167,16 +316,20 @@ class StdioLink:
 
 
 def open_link(url: str, **kw):
-    """open_link('tcp://host:port') | open_link('ssh://user@host:port') | 'stdio://'"""
+    """open_link('tcp://host:port') | open_link('ssh://user@host:port') | 'stdio://'
+
+    port — одно число, список или спецификация («4202-4223», «4202,4210»);
+    при диапазоне/списке идёт перебор по порядку до свободной линии.
+    """
     if url.startswith("tcp://"):
         rest = url[6:]
         host, _, port = rest.partition(":")
-        return TCPLink(host or "127.0.0.1", int(port or 4202))
+        return TCPLink(host or "127.0.0.1", port or 4202)
     if url.startswith("ssh://"):
         rest = url[6:]
         auth, _, hostport = rest.rpartition("@")
         host, _, port = hostport.partition(":")
-        return SSHLink(host or "127.0.0.1", int(port or 22),
+        return SSHLink(host or "127.0.0.1", port or 22,
                        user=auth or kw.get("user", "ie15"),
                        password=kw.get("password"),
                        keyfile=kw.get("keyfile"))

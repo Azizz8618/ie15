@@ -85,6 +85,31 @@ def test_cli_wins_over_conf():
     assert got.mode == "host" and got.password == "иное"
 
 
+def test_port_cli_overrides_line():
+    cp = cp_from(CONF)
+    got = apply_conf(ns(line="tcp://h:4202", port="4202-4223"), cp)
+    assert got.line == "tcp://h:4202-4223"
+    # и URL без порта — порт добавляется
+    got = apply_conf(ns(line="tcp://h", port="4210"), cp)
+    assert got.line == "tcp://h:4210"
+
+
+def test_conf_port_range_passthrough():
+    conf = CONF.replace("type = ssh", "type = tcp").replace("port = 4202",
+                                                            "port = 4202-4223")
+    cp = cp_from(conf)
+    assert line_url_from_conf(cp) == "tcp://10.0.0.5:4202-4223"
+    got = apply_conf(ns(), cp)
+    assert got.line == "tcp://10.0.0.5:4202-4223"
+
+
+def test_port_becomes_default_tcp():
+    # ни --line, ни сервера в конфиге — --port даёт стоячую tcp-линию
+    cp = cp_from("")
+    got = apply_conf(ns(port="4202-4204"), cp)
+    assert got.line == "tcp://127.0.0.1:4202-4204"
+
+
 def test_script_mode_ignores_line():
     cp = cp_from(CONF)
     got = apply_conf(ns(script="demo"), cp)

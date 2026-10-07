@@ -34,6 +34,8 @@ CONTROL_HINTS = {
     "KEY_LEFT": "LEFT=ESCD", "KEY_HOME": "HOME=ESCH", "KEY_END": "END=ESCK",
     "KEY_PAGEUP": "PGUP=ESCJ", "KEY_PAGEDOWN": "PGDN=ESCE",
     "KEY_INSERT": "INS=ESCb", "KEY_DELETE": "DEL=ESCc",
+    "KEY_CTRLRIGHT": "СЛОВО=^→", "KEY_CTRLLEFT": "СЛОВО=^←",
+    "KEY_CTRLUP": "СТРОКА=^↑", "KEY_CTRLDOWN": "СТРОКА=^↓",
     "SEND": "SEND", "MODE": "СЕАНС", "CMDSET": "НАБОР", "BLINK": "БЛИНК",
 }
 
@@ -110,8 +112,10 @@ class TerminalSession:
         keys3 = row(["СТЕРЭКР=PgUp", "ОЧИСТКА=PgDn", "ИНВЕРС=Ins",
                      "НОРМ=Del"])
         keys4 = row(["БЛИНК=F7", "НАБОР=F8", "СЕТЬ=F9", "ПЕРЕДАЧА=F10"])
+        keys5 = row(["СЛОВО=Ctrl+→", "СЛОВО=Ctrl+←", "НАЧСТР=Ctrl+↑",
+                     "НИЖСТР=Ctrl+↓"])
         sc.set_service("\n".join([state1, state2, "-" * COLS,
-                                  keys1, keys2, keys3, keys4]))
+                                  keys1, keys2, keys3, keys4, keys5]))
 
     # --- клавиатура -------------------------------------------------
     def feed_key(self, key: str) -> bytes | None:
@@ -151,6 +155,14 @@ class TerminalSession:
             return None
         if key == "BLINK":
             self.parser.show_ctrl = not self.parser.show_ctrl
+            self._update_service()
+            return None
+        move = {"KEY_CTRLRIGHT": "word_right", "KEY_CTRLLEFT": "word_left",
+                "KEY_CTRLUP": "line_start", "KEY_CTRLDOWN": "line_below"}.get(key)
+        if move:
+            # локальная навигация 15ВВВ: курсор двигается по экрану,
+            # в линию ничего не уходит (таких кодов у ЭВМ нет)
+            getattr(self.parser.screen, move)()
             self._update_service()
             return None
         data = key_to_bytes(key, layout=self.layout)

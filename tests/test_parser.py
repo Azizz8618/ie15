@@ -50,18 +50,19 @@ class TestUpKody(unittest.TestCase):
         self.assertTrue(p.screen.bell)
 
     def test_stb_pf_kursor_bez_stiraniya(self):
-        # ПП (\v) и ПФ (\f) у Видеотона — курсорные шаги (вниз / «дом»),
-        # как их же выдаёт vt_send на операторский терминал; ничего не стирают
+        # ПФ (\f) у Видеотона — «дом» без стирания (vt_send: ESC[H);
+        # ПП (\v) — пустая операция (как у DEC): кадры хода «ИГРА» идут
+        # им наверх, и сдвиг курсора уводил бы сообщение (и поле) за кадр
         p = Parser()
         feed(p, b"aaaa", bytes([CR, LF]), b"bbbb")
         p.screen.x = p.screen.y = 0
         p.feed(bytes([VT]))
-        self.assertEqual(p.screen.y, 1)
-        self.assertEqual(p.screen.x, 0)          # колонку \v не трогает
-        self.assertEqual(p.screen.cells[0][0], ord("a"))
-        p.feed(bytes([FF]))
         self.assertEqual((p.screen.x, p.screen.y), (0, 0))
-        self.assertEqual(p.screen.cells[0][0], ord("a"))   # кадр цел
+        self.assertEqual(p.screen.cells[0][0], ord("a"))
+        p.feed(b"x" * 10 + bytes([FF]))
+        self.assertEqual((p.screen.x, p.screen.y), (0, 0))
+        self.assertEqual(p.screen.cells[0][0], ord("x"))   # кадр не стёрт
+        self.assertEqual(p.screen.cells[1][0], ord("b"))
 
 
 class TestKomandyNabora2(unittest.TestCase):
@@ -298,16 +299,17 @@ class TestVideotonKody(unittest.TestCase):
         p.feed(b"\x1f" * 12 + frame)
         p.feed(b"\x0c" + b"\x1a" * 11 + b"\x0b" * 11
                + b"ETO NE XOD!\r\nVASH XOD:\r\n =-* ")
-        # курсор уехал на 22-й ряд (ДОМ + 11 вниз + 11 \v), печать там;
-        # последнее ПС сдвигает кадр на строку (как на настоящем терминале)
-        self.assertEqual(p.screen.y, ROWS - 1)
-        # поле НЕ стёрто: после сдвига на строку вверх рамки и ряды на месте
-        self.assertEqual(p.screen.cells[0][2], ord("I"))    # был ряд 1
-        self.assertEqual(p.screen.cells[0][5], ord("P"))
-        self.assertEqual(p.screen.cells[ROWS - 3][0], ord("E"))   # «ETO NE XOD!»
-        self.assertEqual(decode_koi7(bytes(p.screen.cells[ROWS - 2])).strip(),
+        # ДОМ + 11 вниз — сообщение печатается прямо под полем (ряд 11);
+        # серия \v на Видеотоне — пустая операция, потому ни поля, ни
+        # скролла: кадр на месте, как на tty1
+        self.assertEqual((p.screen.x, p.screen.y), (5, 13))
+        self.assertEqual(p.screen.cells[0][0], ord("I"))    # рамка цела
+        self.assertEqual(p.screen.cells[1][2], ord("I"))
+        self.assertEqual(p.screen.cells[1][5], ord("P"))
+        self.assertEqual(p.screen.cells[11][0], ord("E"))   # «ETO NE XOD!»
+        self.assertEqual(decode_koi7(bytes(p.screen.cells[12])).strip(),
                          "VASH XOD:")
-        self.assertEqual(decode_koi7(bytes(p.screen.cells[ROWS - 1])[:5]),
+        self.assertEqual(decode_koi7(bytes(p.screen.cells[13])[:5]),
                          " =-* ")
 
 
@@ -320,10 +322,11 @@ class TestPerenosStroki(unittest.TestCase):
 
     def test_skroll_vnizu(self):
         p = Parser()
-        for i in range(ROWS + 1):               # 25 строк на экран на 24
+        for i in range(ROWS + 1):               # 26 строк на экран в 25
             p.feed(bytes([CR, ord("0") + i % 10, LF]))
         self.assertEqual(p.screen.cells[0][0], ord("2"))          # 2 скролла
-        self.assertEqual(p.screen.cells[ROWS - 2][0], ord("4"))   # последняя
+        self.assertEqual(p.screen.cells[ROWS - 3][0], ord("4"))
+        self.assertEqual(p.screen.cells[ROWS - 2][0], ord("5"))   # последняя
         self.assertEqual(p.screen.cells[ROWS - 1][0], 0x20)
         self.assertEqual(p.screen.y, ROWS - 1)
 
@@ -349,9 +352,9 @@ class TestPerenosStroki(unittest.TestCase):
     def test_csi_strelki_kak_esc(self):
         # ANSI-стрелки «ESC [ A» = «ESC A» (курсор вверх)
         p = Parser()
-        p.feed(b"\x1bY\x38\x21")                # строка min(24,23)=23, столбец 1
+        p.feed(b"\x1bY\x38\x21")                # строка 24 (последняя), столбец 1
         p.feed(b"\x1b[A")
-        self.assertEqual((p.screen.y, p.screen.x), (22, 1))
+        self.assertEqual((p.screen.y, p.screen.x), (23, 1))
 
 
 if __name__ == "__main__":

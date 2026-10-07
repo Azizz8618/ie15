@@ -22,8 +22,8 @@
 """
 from __future__ import annotations
 
+import os
 import select
-import socket
 import sys
 import time
 import unittest
@@ -32,10 +32,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ie15emu.charset import Charset, normalize_line_bytes
+from ie15emu.link import LinkError, TCPLink
 from ie15emu.parser import Parser
 from ie15emu.render import to_text
 
-HOST, PORT = "127.0.0.1", 4202
+HOST = "127.0.0.1"
+# перебор ДКС-линий (dispak.ini: 4199=tty2 … 4223=tty24): занятые линии
+# TCPLink пропускает сам — тесту не мешает чужая сессия на дефолтном 4202
+PORT = os.environ.get("IE15_TEST_PORT", "4202-4204")
 ROM = Path(__file__).resolve().parent.parent / "rom" / "chargen-15ie.bin"
 
 # «выд зад год» → внутренние КОИ7 линии (строка 0x60..)
@@ -59,10 +63,14 @@ class Besm6Live(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        # PORT — спецификация («4202-4204»): TCPLink сам обойдёт занятые
+        # линии («Line connection busy») и возьмёт первую свободную
         try:
-            cls.sock = socket.create_connection((HOST, PORT), 3)
-        except OSError as e:
+            link = TCPLink(HOST, PORT, timeout=3.0, probe=2.0)
+        except LinkError as e:
             raise unittest.SkipTest(f"БЭСМ-6 недоступна на {HOST}:{PORT}: {e}")
+        cls.sock = link.sock
+        cls.buf = link._pending      # баннер разведки не теряем
         cls.sock.setblocking(False)
         cls.parser = Parser()
         cls.parser.charset = Charset(ROM)

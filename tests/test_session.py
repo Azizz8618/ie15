@@ -256,6 +256,52 @@ def test_utf8_split_across_chunks():
     assert "█" not in session.parser.screen.text()
 
 
+def test_ctrl_arrows_word_navigation():
+    # Ctrl+→/← — по словам (разделители — пробел и точка), Ctrl+↑/↓ — по
+    # началам строк; в линию эти клавиши ничего не шлют
+    session, link = make_session(MODE_LOCAL)
+    session.parser.feed(b"PERVOE SLOVO. VTOROE\nDRUGAYA STROKA")
+    p = session.parser.screen
+    p.x, p.y = 0, 0
+    session.feed_key("KEY_CTRLRIGHT")          # -> «SLOVO» (после пробела)
+    assert (p.x, p.y) == (7, 0)
+    session.feed_key("KEY_CTRLRIGHT")          # -> «VTOROE» (после точки)
+    assert (p.x, p.y) == (14, 0)
+    session.feed_key("KEY_CTRLLEFT")           # уже в начале слова -> назад
+    assert (p.x, p.y) == (7, 0)
+    session.feed_key("KEY_CTRLLEFT")
+    assert (p.x, p.y) == (0, 0)
+    session.feed_key("KEY_CTRLUP")             # x и так 0
+    assert (p.x, p.y) == (0, 0)
+    session.feed_key("KEY_CTRLDOWN")           # начало нижней строки
+    assert (p.x, p.y) == (0, 1)
+    session.feed_key("KEY_CTRLRIGHT")          # «STROKA» в строке 2
+    assert (p.x, p.y) == (8, 1)
+    assert link.sent == []
+
+
+def test_ctrl_arrows_inside_word_jump_to_start():
+    session, link = make_session(MODE_LOCAL)
+    session.parser.feed(b"ABC DEF")
+    p = session.parser.screen
+    p.x, p.y = 5, 0                            # внутри «DEF»
+    session.feed_key("KEY_CTRLLEFT")
+    assert (p.x, p.y) == (4, 0)                # в начало слова
+    session.feed_key("KEY_CTRLLEFT")
+    assert (p.x, p.y) == (0, 0)                # в начало предыдущего
+    session.feed_key("KEY_CTRLRIGHT")
+    assert (p.x, p.y) == (4, 0)
+
+
+def test_ctrl_arrows_on_host_mode_send_nothing():
+    session, link = make_session(MODE_HOST)
+    session.parser.feed(b"AA BB")
+    session.parser.screen.x = 3
+    assert session.feed_key("KEY_CTRLLEFT") is None
+    assert link.sent == []                     # в линию — ничего
+    assert session.parser.screen.x == 0         # локальный курсор сдвинулся
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

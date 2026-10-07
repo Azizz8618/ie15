@@ -52,10 +52,28 @@ def line_url_from_conf(cp: configparser.ConfigParser) -> str | None:
     return f"tcp://{server}:{port}"
 
 
+def apply_port(url: str | None, spec: str) -> str:
+    """Спецификация портов (--port) становится портовой частью URL линии;
+    без URL —/tcp://127.0.0.1:<spec> (дефолт стоячего запуска)."""
+    if url and url.startswith("stdio"):
+        return url                       # локальная линия — порта нет
+    if not url or "://" not in url:
+        return f"tcp://127.0.0.1:{spec}"
+    head, _, rest = url.partition("://")
+    pre, colon, last = rest.rpartition(":")
+    if colon and (not last or last[0].isdigit() or last[0] == "-"):
+        return f"{head}://{pre}:{spec}"        # порт есть — заменяем
+    return f"{head}://{rest}:{spec}"           # порта нет — добавляем
+
+
 def apply_conf(ns, cp: configparser.ConfigParser):
     """Значения из конфига туда, где CLI-аргумент не задан (None/false)."""
     if ns.line is None and not getattr(ns, "script", None):
         ns.line = line_url_from_conf(cp)
+    # --port (один/список/диапазон) важнее порта в URL --line/конфига;
+    # без URL вовсе — стоячая локальная линия с этим диапазоном
+    if getattr(ns, "port", None) and not getattr(ns, "script", None):
+        ns.line = apply_port(ns.line, ns.port)
     if ns.mode is None:
         ns.mode = cp.get("terminal", "mode", fallback="host") or "host"
     if ns.sets is None:
@@ -95,7 +113,7 @@ def run_script(parser: Parser, png: str | None) -> None:
                    "ВИДЕО=НОРМ|БУФЕР=ПУСТО")
     for chunk in DEMO_SCRIPT:
         parser.feed(chunk)
-    parser.feed(b"\x1bY8\x20")  # курсор к служебной строке (поз. 25)
+    parser.feed(b"\x1bY8\x20")  # курсор к последнему ряду кадра (поз. 25)
     print(to_text(sc, parser.charset))
     if png:
         _write_png(png, parser)
@@ -243,6 +261,10 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--line", default=None,
                     help="tcp://host:port | ssh://user@host:port | stdio:// "
                          "(по умолчанию — из секции [line] конфига)")
+    ap.add_argument("--port", default=None,
+                    help="порт линии: один («4202»), список («4202,4210») или "
+                         "диапазон («4202-4223»); подставляется в --line/конфиг, "
+                         "при занятой линии берётся следующий свободный порт")
     ap.add_argument("--script", choices=["demo"],
                     help="без сети: прогнать встроенный скрипт")
     ap.add_argument("--feed", help="строка, отправить в линию после подключения")

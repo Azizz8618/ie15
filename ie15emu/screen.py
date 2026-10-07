@@ -1,7 +1,8 @@
 """ОЗУ кадра терминала 15ИЭ-00-013: 80×25, 7 разрядов на позицию.
 
-Как в терминале: код позиции + атрибут инверсии, служебная строка 25
-выводится по таймеру (прерывание БЛНС) или по флагу режима.
+Как в терминале: код позиции + атрибут инверсии. Кадр — все 25 строк,
+как у Видеотона-340 (кадры ДКС «ИГРА» разложены на 25 строк); служебная
+панель выводится под кадром.
 """
 from __future__ import annotations
 
@@ -65,6 +66,59 @@ class Screen:
         self.cells.insert(0, [0x20] * COLS)
         self.attr.insert(0, [0] * COLS)
 
+    # --- навигация по словам (Ctrl+стрелки клавиатуры 15ВВВ) ----------
+    # разделители слова — пробел и точка (знак конца предложений в Н1);
+    # прочие коды (в т.ч. русские буквы без бита алфавита) — знаки слова.
+    WORD_DELIMS = (0x20, ord("."))
+
+    def _grid_at(self, i: int) -> int:
+        return self.cells[i // COLS][i % COLS]
+
+    def word_right(self) -> None:
+        """Ctrl+→: курсор на начало следующего слова (из середины слова —
+        на начало идущего за ним)."""
+        i = self.y * COLS + self.x
+        n = ROWS * COLS
+        i += 1
+        while i < n and self._grid_at(i) not in self.WORD_DELIMS:
+            i += 1                       # через хвост текущего слова
+        while i < n and self._grid_at(i) in self.WORD_DELIMS:
+            i += 1                       # через разделители
+        if i < n:
+            self.y, self.x = divmod(i, COLS)
+
+    def word_left(self) -> None:
+        """Ctrl+←: курсор на начало текущего слова; если уже там —
+        на начало предыдущего."""
+        cur = self.y * COLS + self.x
+        if cur == 0:
+            return
+        i = cur
+        while i > 0 and self._grid_at(i - 1) in self.WORD_DELIMS:
+            i -= 1                       # назад через разделители
+        j = i
+        while j > 0 and self._grid_at(j - 1) not in self.WORD_DELIMS:
+            j -= 1                       # к началу слова слева
+        if j != cur:
+            self.y, self.x = divmod(j, COLS)
+            return
+        i = j                            # уже в начале — предыдущее слово
+        while i > 0 and self._grid_at(i - 1) in self.WORD_DELIMS:
+            i -= 1
+        j = i
+        while j > 0 and self._grid_at(j - 1) not in self.WORD_DELIMS:
+            j -= 1
+        self.y, self.x = divmod(j if i > 0 else 0, COLS)
+
+    def line_start(self) -> None:
+        """Ctrl+↑: начало текущей строки."""
+        self.x = 0
+
+    def line_below(self) -> None:
+        """Ctrl+↓: начало строки ниже."""
+        self.x = 0
+        self.y = min(ROWS - 1, self.y + 1)
+
     # --- изображение ------------------------------------------------
     def put(self, code: int, blink: bool = False) -> None:
         code &= 0x7F
@@ -113,7 +167,8 @@ class Screen:
             marker = "*" if i == self.y else " "
             out.append(f"|{line}|{marker}")
         out.append("+" + "-" * COLS + "+")
-        out.append("|" + "".join(self.service) + f"|  (служебная, стр.{SERVICE_ROW})")
+        out.append("|" + "".join(self.service) + "|  (служебная панель, поз."
+                   f"{SERVICE_ROW} — под кадром ЭВМ)")
         for extra in self.service_more:
             out.append("|" + extra + "|")
         out.append(f"курсор: x={self.x} y={self.y} inverse={self.inverse} bell={self.bell}")

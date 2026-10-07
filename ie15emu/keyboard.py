@@ -14,6 +14,9 @@
   End              — ESC K  (стереть до конца строки)
   PgUp / PgDn      — ESC J / ESC E (стереть до конца экрана / очистить)
   Insert / Delete  — ESC b / ESC c (инверсное / нормальное видео)
+  Ctrl+← / Ctrl+→  — курсор на начало текущего (следующего) слова;
+                     разделители слова — пробел и точка (локальная навигация)
+  Ctrl+↑ / Ctrl+↓  — курсор в начало текущей / нижней строки (локально)
   F8               — НАБОР: набор команд №1 ↔ №2 (VT52) (служебная)
   F7               — БЛИНК: показывать/скрыть образные знаки УП (как
                      режим blink на Видеотоне-340) (служебная)
@@ -170,6 +173,8 @@ SEQ_KEYS = {
     b"\x1b[B": "KEY_DOWN", b"\x1bOB": "KEY_DOWN",
     b"\x1b[C": "KEY_RIGHT", b"\x1bOC": "KEY_RIGHT",
     b"\x1b[D": "KEY_LEFT", b"\x1bOD": "KEY_LEFT",
+    b"\x1b[1;5C": "KEY_CTRLRIGHT", b"\x1b[1;5D": "KEY_CTRLLEFT",
+    b"\x1b[1;5A": "KEY_CTRLUP", b"\x1b[1;5B": "KEY_CTRLDOWN",
     b"\x1b[H": "KEY_HOME", b"\x1b[1~": "KEY_HOME", b"\x1bOH": "KEY_HOME",
     b"\x1b[4~": "KEY_END", b"\x1b[F": "KEY_END", b"\x1bOF": "KEY_END",
     b"\x1b[2~": "KEY_INSERT", b"\x1b[3~": "KEY_DELETE",
