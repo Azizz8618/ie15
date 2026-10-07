@@ -60,6 +60,7 @@ class TerminalSession:
         if layout is None and koi7:
             layout = DEFAULT_LAYOUT
         self.layout = layout
+        self.default_layout = layout     # раскладка, включаемая набором Н1
         self.koi7 = layout is not None
         self.buffer = bytearray()
         self.echo = True             # клавиша «ЭХО» (F6): вывод набираемого
@@ -87,6 +88,33 @@ class TerminalSession:
         self._update_service()
         return self.mode
 
+    # --- НАБОР: три режима терминала 15ИЭ (клавиша F8) -------------------
+    #   Н0 — знаки ASCII (ISO 646 IRV: ¤ ¬ ¯), команды — только УП;
+    #   Н1 — русские знаки верхнего и нижнего регистра (КОИ-7 Н1:
+    #        0x40…0x5F — заглавные, 0x60…0x7E — строчные), команды — УП;
+    #   Н2 — набор команд №2 (VT-52) — по умолчанию, с ним терминаль
+    #        и работает с БЭСМ-6; знаки — международная строка, русские
+    #        приходят кодами ЭВМ (как их отдаёт SIMH/ДКС).
+    NABORS = ("n0", "n1", "n2")
+    NABOR_LABELS = {"n0": "Н0", "n1": "Н1", "n2": "Н2"}   # кириллица на панель
+
+    @property
+    def nabor(self) -> str:
+        if self.parser.mode == 2:
+            return "n2"
+        return ("n1" if self.parser.screen.display_set == "n1" else "n0")
+
+    @nabor.setter
+    def nabor(self, value: str) -> None:
+        if value not in self.NABORS:
+            raise ValueError(f"неизвестный набор: {value!r}")
+        self.parser.mode = 2 if value == "n2" else 1
+        self.parser.screen.display_set = "n1" if value == "n1" else "n0"
+        # Н1 — национальный алфавит: русская раскладка включена;
+        # Н0/Н2 — ASCII/VT-52: клавиши печатают латиницу как есть
+        self.layout = self.default_layout if value == "n1" else None
+        self.koi7 = value == "n1"
+
     def _update_service(self) -> None:
         # Подвал: сегмент строк состояния — выше отделительной черты,
         # справочные ряды «ФУНКЦИЯ=клавиша» — ниже; последняя нажатая
@@ -103,8 +131,7 @@ class TerminalSession:
             return " | ".join(f.ljust(W) for f in fields).rstrip()
 
         state1 = row("СЕТЬ=" + ("С ЭВМ" if host else "АВТОНОМНО"),
-                     "НАБОР=" + ("2(VT52)" if self.parser.mode == 2
-                                 else "1(УП)"),
+                     "НАБОР=" + self.NABOR_LABELS[self.nabor],
                      LINE_LABELS.get(self.encoding,
                                      f"ЛИНИЯ={self.encoding}"),
                      "РАСК=" + lay)
@@ -114,8 +141,7 @@ class TerminalSession:
                                  else "ПУСТО"),
                      "УПР.СИМВ=" + ("ВКЛ" if self.parser.show_ctrl
                                     else "ВЫКЛ"))
-        state3 = row(f"ПОСЛ: {self.last_key}" if self.last_key else "ПОСЛ:",
-                     "ЗНАКИ=" + sc.display_set.upper())
+        state3 = row(f"ПОСЛ: {self.last_key}" if self.last_key else "ПОСЛ:")
         keys1 = row("ВК=Bksp", "ТАБ=Tab", "ЗВН=Ctrl-G", "ПРПС=Enter")
         keys2 = row("ESC=Esc", "КУРСОР=Стрелки", "ДОМ=Home", "СТЕРСТР=End")
         keys3 = row("СЛОВО=Ctrl+→", "СЛОВО=Ctrl+←", "НАЧСТР=Ctrl+↑",
@@ -185,7 +211,9 @@ class TerminalSession:
             self.toggle_mode()
             return None
         if key == "CMDSET":
-            self.parser.mode = 1 if self.parser.mode == 2 else 2
+            nxt = self.NABORS[(self.NABORS.index(self.nabor) + 1)
+                              % len(self.NABORS)]
+            self.nabor = nxt
             self._update_service()
             return None
         if key == "BLINK":
@@ -214,6 +242,11 @@ class TerminalSession:
         if self.echo:
             if not buffered:
                 self._echo_top = self.parser.screen.y
+            # Н0/Н2 (без русской раскладки): латинская строчная эхом —
+            # заглавной: коды 0x60… в ВЗУ заняты русскими строчными Н1.
+            if not self.layout:
+                data = bytes((b - 0x20) if 0x61 <= b <= 0x7A else b
+                             for b in data)
             self.parser.feed(koi7_display_upper(data))
         self._update_service()
         return None

@@ -34,8 +34,9 @@ def test_local_mode_buffers_and_echoes():
         assert out is None          # линия молчит
     assert session.pending() == b"hello"
     assert link.sent == []          # ничего не ушло
-    # КОИ7 Н1: 0x60..0x7E — русские строчные, «hello» показывается ими
-    assert decode_koi7(b"hello") in session.parser.screen.text()   # эхо
+    # Н2 (VT-52, по умолчанию) — ASCII: латинская строчная эхом
+    # заглавными (строчные коды 0x60.. отданы русским строчным Н1)
+    assert "HELLO" in session.parser.screen.text()   # эхо
 
 
 def test_send_key_transmits_buffer_then_clears():
@@ -117,13 +118,14 @@ def test_send_dks_replaces_local_echo():
     for ch in "abc":
         session.feed_key(ch)
     cells = session.parser.screen.cells
-    assert cells[0][:3] == [ord("a"), ord("b"), ord("c")]   # локальное эхо
+    # локальное эхо Н2/без раскладки — заглавная латиница (0x60.. — русские)
+    assert cells[0][:3] == [ord("A"), ord("B"), ord("C")]
     session.emit(session.feed_key("SEND"))
     # после SEND: строка чиста, курсор в её начало, режим — С ЭВМ
     assert cells[0][:3] == [0x20, 0x20, 0x20]
     assert (session.parser.screen.x, session.parser.screen.y) == (0, 0)
     assert session.mode == MODE_HOST
-    # эхо ЭВМ ложится единственной копией
+    # эхо ЭВМ ложится единственной копией (rx=utf8 — как есть)
     session.handle_line_reply(b"abc\r\n")
     assert cells[0][:3] == [ord("a"), ord("b"), ord("c")]
     assert cells[0][3] == 0x20
@@ -182,7 +184,7 @@ def test_service_panel_all_bits():
     def panel() -> str:
         return "\n".join(rows())
 
-    for lab in ("СЕТЬ=С ЭВМ", "НАБОР=2(VT52)", "ЛИНИЯ=UTF-8", "РАСК=ВЫКЛ",
+    for lab in ("СЕТЬ=С ЭВМ", "НАБОР=Н2", "ЛИНИЯ=UTF-8", "РАСК=ВЫКЛ",
                 "ВИДЕО=НОРМ", "БУФЕР=ПУСТО", "УПР.СИМВ=ВЫКЛ"):
         assert lab in panel(), lab
     assert "ЗВУК" not in panel()
@@ -243,16 +245,21 @@ def test_service_panel_all_bits():
 def test_default_rezhim2_vt52():
     session, _ = make_session(MODE_HOST)
     assert session.parser.mode == 2
-    assert "НАБОР=2(VT52)" in "".join(session.parser.screen.service)
+    assert session.nabor == "n2"
+    assert "НАБОР=Н2" in "".join(session.parser.screen.service)
 
 
 def test_cmdset_key_toggles_rezhim():
     session, _ = make_session(MODE_HOST)
-    session.feed_key("CMDSET")                 # F8 — клавиша «НАБОР»
-    assert session.parser.mode == 1
-    assert "НАБОР=1(УП)" in "".join(session.parser.screen.service)
-    session.feed_key("CMDSET")
-    assert session.parser.mode == 2
+    session.feed_key("CMDSET")                 # F8: Н2 → Н0 (ASCII)
+    assert session.nabor == "n0" and session.parser.mode == 1
+    assert session.parser.screen.display_set == "n0"
+    assert "НАБОР=Н0" in "".join(session.parser.screen.service)
+    session.feed_key("CMDSET")                 # Н0 → Н1 (русские верх+низ)
+    assert session.nabor == "n1" and session.parser.mode == 1
+    assert session.parser.screen.display_set == "n1"
+    session.feed_key("CMDSET")                 # Н1 → Н2 — полный цикл
+    assert session.nabor == "n2" and session.parser.mode == 2
 
 
 def test_raw_line_upper_letters():

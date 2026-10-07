@@ -123,8 +123,21 @@ def apply_conf(ns, cp: configparser.ConfigParser):
         ns.keyfile = kf if kf and Path(kf).is_file() else None
     if getattr(ns, "history", None) is None:
         ns.history = cp.get("terminal", "history", fallback="1000") or "1000"
-    if getattr(ns, "charset", None) is None:
-        ns.charset = cp.get("terminal", "charset", fallback="n0") or "n0"
+    if getattr(ns, "nabor", None) is None:
+        term = "terminal" if cp.has_section("terminal") else None
+        nb = cp.get(term, "nabor", fallback="") if term else ""
+        if not nb:                       # устаревшие ключи: charset > sets
+            ch = getattr(ns, "charset", None) or (
+                cp.get(term, "charset", fallback="") if term else "")
+            if ch == "n1":
+                nb = "n1"
+            elif ch == "n0":
+                nb = "n0" if ns.sets == "1" else "n2"
+            elif ns.sets == "1":
+                nb = "n0"
+            else:
+                nb = "n2"
+        ns.nabor = nb
     return ns
 
 
@@ -144,7 +157,7 @@ DEMO_SCRIPT = (
 
 def run_script(parser: Parser, png: str | None) -> None:
     sc = parser.screen
-    sc.set_service("СЕТЬ=АВТОНОМНО|НАБОР=2(VT52)|ЛИНИЯ=ДЕМО|РАСК=ВЫКЛ\n"
+    sc.set_service("СЕТЬ=АВТОНОМНО|НАБОР=Н2|ЛИНИЯ=ДЕМО|РАСК=ВЫКЛ\n"
                    "ВИДЕО=НОРМ|БУФЕР=ПУСТО")
     for chunk in DEMO_SCRIPT:
         parser.feed(chunk)
@@ -356,10 +369,13 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--history", default=None, type=str,
                     help="строк «истории» выдачи над экраном для PgUp "
                          "(по умолчанию 1000; 0 — не сохранять)")
+    ap.add_argument("--nabor", choices=["n0", "n1", "n2"], default=None,
+                    help="НАБОР терминала: Н0 — знаки ASCII, Н1 — русские "
+                         "верхний и нижний регистры (КОИ-7), Н2 — набор "
+                         "команд №2 (VT-52, по умолчанию)")
     ap.add_argument("--charset", choices=["n0", "n1"], default=None,
-                    help="набор знаков дисплея: n0 — международный "
-                         "(ISO 646 IRV: ¤ ¬ ¯), n1 — первый национальный "
-                         "КОИ-7 (0x40…0x5F — русские заглавные)")
+                    help="только набор знаков (без смены командного режима); "
+                         "устаревший — см. --nabor")
     ap.add_argument("--version", action="version", version=__version__)
     args = ap.parse_args(argv)
     args = apply_conf(args, load_conf(args.conf))
@@ -377,8 +393,10 @@ def main(argv: list[str] | None = None) -> None:
         layout = None
 
     charset = Charset(Path(args.roms) / "chargen-15ie.bin")
-    parser = Parser(mode=int(args.sets), history=int(args.history))
-    parser.screen.display_set = args.charset          # набор знаков Н0/Н1
+    parser = Parser(mode=2 if args.nabor == "n2" else 1,
+                    history=int(args.history))
+    parser.screen.display_set = ("n1" if args.nabor == "n1"
+                                 else (args.charset or "n0"))
     parser.charset = charset
 
     if args.line:

@@ -133,13 +133,16 @@ def test_keyfile_only_when_exists():
         assert apply_conf(ns(), cp2).keyfile == kf.name
 
 
-def test_charset_from_conf():
-    cp = cp_from(CONF + "\n[terminal]\ncharset = n1\n") if False else \
-        cp_from(CONF.replace("[terminal]", "[terminal]\ncharset = n1"))
-    got = apply_conf(ns(), cp)
-    assert got.charset == "n1"
-    got = apply_conf(ns(charset="n0"), cp)        # CLI важнее конфига
-    assert got.charset == "n0"
+def test_nabor_from_conf():
+    # устаревший charset=n1 в конфиге — это НАБОР Н1
+    cp = cp_from(CONF.replace("[terminal]", "[terminal]\ncharset = n1"))
+    assert apply_conf(ns(), cp).nabor == "n1"
+    # явный nabor важнее charset
+    cp2 = cp_from(CONF.replace("[terminal]",
+                               "[terminal]\ncharset = n1\nnabor = n2"))
+    assert apply_conf(ns(), cp2).nabor == "n2"
+    # CLI --nabor важнее конфига
+    assert apply_conf(ns(nabor="n0"), cp2).nabor == "n0"
 
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
