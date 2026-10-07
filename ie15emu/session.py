@@ -32,11 +32,12 @@ CONTROL_HINTS = {
     "\t": "TAB=09", "\x07": "BEL=07", "KEY_ESC": "ESC=1B", "\x1b": "ESC=1B",
     "KEY_UP": "UP=ESCA", "KEY_DOWN": "DOWN=ESCB", "KEY_RIGHT": "RGHT=ESCC",
     "KEY_LEFT": "LEFT=ESCD", "KEY_HOME": "HOME=ESCH", "KEY_END": "END=ESCK",
-    "KEY_PAGEUP": "PGUP=ESCJ", "KEY_PAGEDOWN": "PGDN=ESCE",
+    "KEY_PAGEUP": "ЭКРАН↑", "KEY_PAGEDOWN": "ЭКРАН↓",
     "KEY_INSERT": "INS=ESCb", "KEY_DELETE": "DEL=ESCc",
     "KEY_CTRLRIGHT": "СЛОВО=^→", "KEY_CTRLLEFT": "СЛОВО=^←",
     "KEY_CTRLUP": "СТРОКА=^↑", "KEY_CTRLDOWN": "СТРОКА=^↓",
     "SEND": "SEND", "MODE": "СЕАНС", "CMDSET": "НАБОР", "BLINK": "БЛИНК",
+    "ECHO": "ЭХО", "CLEAR": "ОЧИСТКА",
 }
 
 
@@ -61,6 +62,10 @@ class TerminalSession:
         self.layout = layout
         self.koi7 = layout is not None
         self.buffer = bytearray()
+        self.echo = True             # клавиша «ЭХО» (F6): вывод набираемого
+                                     # на экран; снята — пароли не печатаются
+        self._echo_pending = bytearray()   # эхо-ответ линии, ожидаемый при
+                                     # выключенном эхе (срезается с приёма)
         self._echo_top = None        # строка, с которой началось локальное эхо блока
         self.encoding = encoding     # «utf8» | «raw» | «dks» — передача
         self.rx_encoding = encoding  # приём (у ДКС-линии — raw без НУСов)
@@ -90,32 +95,36 @@ class TerminalSession:
         host = self.mode == MODE_HOST
         lay = ("ВЫКЛ" if not self.layout
                else LAYOUT_LABELS.get(self.layout, self.layout.upper()))
-        col = 15                         # единая ширина колонок (вмещает
-                                         # «СЕТЬ=АВТОНОМНО» — ряды равны)
-        def row(fields):
-            return " | ".join(f.ljust(col) for f in fields).rstrip()
-        state1 = row(["СЕТЬ=" + ("С ЭВМ" if host else "АВТОНОМНО"),
-                      "НАБОР=" + ("2(VT52)" if self.parser.mode == 2
-                                  else "1(УП)"),
-                      LINE_LABELS.get(self.encoding,
-                                      f"ЛИНИЯ={self.encoding}"),
-                      "РАСК=" + lay])
-        state2 = row(["ВИДЕО=" + ("ИНВ" if sc.inverse else "НОРМ"),
-                      "БУФЕР=" + (str(len(self.buffer)) if self.buffer
-                                  else "ПУСТО"),
-                      "БЛИНК=" + ("ВКЛ" if self.parser.show_ctrl
-                                  else "ВЫКЛ")]
-                     + ([f"ПОСЛ: {self.last_key}"] if self.last_key else []))
-        keys1 = row(["ВК=Bksp", "ТАБ=Tab", "ЗВН=Ctrl-G", "ПРПС=Enter"])
-        keys2 = row(["ESC=Esc", "КУРСОР=Стрелки", "ДОМ=Home",
-                     "СТЕРСТР=End"])
-        keys3 = row(["СТЕРЭКР=PgUp", "ОЧИСТКА=PgDn", "ИНВЕРС=Ins",
-                     "НОРМ=Del"])
-        keys4 = row(["БЛИНК=F7", "НАБОР=F8", "СЕТЬ=F9", "ПЕРЕДАЧА=F10"])
-        keys5 = row(["СЛОВО=Ctrl+→", "СЛОВО=Ctrl+←", "НАЧСТР=Ctrl+↑",
-                     "НИЖСТР=Ctrl+↓"])
-        sc.set_service("\n".join([state1, state2, "-" * COLS,
-                                  keys1, keys2, keys3, keys4, keys5]))
+        # все ряды подвала — по четыре колонки равной ширины (17 знаков):
+        # « | » стоят на одних позициях во всех рядах (4*17+3*3 = 77)
+        W = 17
+
+        def row(*fields):
+            return " | ".join(f.ljust(W) for f in fields).rstrip()
+
+        state1 = row("СЕТЬ=" + ("С ЭВМ" if host else "АВТОНОМНО"),
+                     "НАБОР=" + ("2(VT52)" if self.parser.mode == 2
+                                 else "1(УП)"),
+                     LINE_LABELS.get(self.encoding,
+                                     f"ЛИНИЯ={self.encoding}"),
+                     "РАСК=" + lay)
+        state2 = row("ЭХО=" + ("ВКЛ" if self.echo else "ВЫКЛ"),
+                     "ВИДЕО=" + ("ИНВ" if sc.inverse else "НОРМ"),
+                     "БУФЕР=" + (str(len(self.buffer)) if self.buffer
+                                 else "ПУСТО"),
+                     "БЛИНК=" + ("ВКЛ" if self.parser.show_ctrl
+                                 else "ВЫКЛ"))
+        state3 = row(f"ПОСЛ: {self.last_key}" if self.last_key else "ПОСЛ:")
+        keys1 = row("ВК=Bksp", "ТАБ=Tab", "ЗВН=Ctrl-G", "ПРПС=Enter")
+        keys2 = row("ESC=Esc", "КУРСОР=Стрелки", "ДОМ=Home", "СТЕРСТР=End")
+        keys3 = row("СЛОВО=Ctrl+→", "СЛОВО=Ctrl+←", "НАЧСТР=Ctrl+↑",
+                    "НИЖСТР=Ctrl+↓")
+        keys4 = row("ЭКРАН↑=PgUp", "ЭКРАН↓=PgDn", "ИНВЕРС=Ins", "НОРМ=Del")
+        keys5 = row("ЭХО=F6", "БЛИНК=F7", "НАБОР=F8", "СЕТЬ=F9")
+        keys6 = row("ПЕРЕДАЧА=F10", "ОЧИСТКА=F5")
+        sc.set_service("\n".join([state1, state2, state3, "-" * COLS,
+                                  keys1, keys2, keys3, keys4, keys5,
+                                  keys6]))
 
     # --- клавиатура -------------------------------------------------
     def feed_key(self, key: str) -> bytes | None:
@@ -129,6 +138,26 @@ class TerminalSession:
         if hint:
             self.last_key = hint
             self._update_service()
+        if key == "KEY_PAGEUP":
+            self.parser.screen.scroll_view(-self.parser.screen._view_h + 1)
+            self._update_service()
+            return None
+        if key == "KEY_PAGEDOWN":
+            self.parser.screen.scroll_view(self.parser.screen._view_h - 1)
+            self._update_service()
+            return None
+        if key == "ECHO":
+            self.echo = not self.echo
+            if not self.echo:
+                self._echo_pending = bytearray()
+            self._update_service()
+            return None
+        if key == "CLEAR":
+            # экран — в историю, кадр в начало; локальное эхо буфера там же
+            self.parser.screen.clear_screen_kept()
+            self._echo_top = None
+            self._update_service()
+            return None
         if key == "SEND":
             data = self.send()
             if data:
@@ -137,11 +166,16 @@ class TerminalSession:
                 # в незакрытую строку
                 if data[-1:] not in (b"\r", b"\n"):
                     data += b"\r\n"
-                # Э-60 (ДКС) всегда локально эхит отданный блок — стираем
-                # свою копию, чтобы эхо машины встала на её место
-                # одной строкой (на serial-линиях эха может не быть).
-                if self.encoding == "dks":
-                    self._erase_local_echo()
+                if self.echo:
+                    # Э-60 (ДКС) всегда локально эхит отданный блок —
+                    # стираем свою копию, чтобы эхо машины встала на её
+                    # место одной строкой (на serial-линиях эха может не быть)
+                    if self.encoding == "dks":
+                        self._erase_local_echo()
+                else:
+                    # эх подавлен: локального вывода не было, а эхо-ответ
+                    # линии срежется с приёма (_strip_pending_echo)
+                    self._queue_echo(data)
                 # как на настоящем терминале: отдав буфер, терминал
                 # переходит в режим С ЭВМ
                 self.set_mode(MODE_HOST)
@@ -169,17 +203,51 @@ class TerminalSession:
         if not data:
             return None
         if self.mode == MODE_HOST:
-            return data
+            return data        # очередь эхо-ответа ведёт emit()
         # АВТОНОМНО: накапливаем в буфере и печатаем на экране,
         # держим линию свободной (как на незаполненном PLAN-символ «Р»).
         # Эхо — заглавными (Н1 не различает регистр, так же отвечает ЭВМ);
         # в буфере код остаётся как дана раскладка.
-        if not self.buffer:
-            self._echo_top = self.parser.screen.y
+        buffered = bool(self.buffer)
         self.buffer += data
-        self.parser.feed(koi7_display_upper(data))
+        if self.echo:
+            if not buffered:
+                self._echo_top = self.parser.screen.y
+            self.parser.feed(koi7_display_upper(data))
         self._update_service()
         return None
+
+    def _queue_echo(self, data: bytes) -> None:
+        """Что вернёт линия в эхо на отданные байты (в форме приёма) —
+        при выключенном эхе это не печатается, а срезается с потока."""
+        stream, _ = normalize_incremental(to_line(bytes(data), self.encoding))
+        if self.rx_encoding == "raw":
+            stream = koi7_raw_upper(stream)
+        self._echo_pending += stream
+
+    def _strip_pending_echo(self, stream: bytes) -> bytes:
+        """Пока эхо выключено, съедает из потока эхо-ответ на посланные
+        знаки. Переводы строк (ПР/ПС) при этом отрабатываются как usual —
+        они двигают каретку, но не показывают; первый несовпавший печатный
+        байт — настоящий вывод ЭВМ, он показывается."""
+        if not self._echo_pending:
+            return stream
+        i = 0
+        pend = self._echo_pending
+        n = len(stream)
+        while i < n and pend:
+            b = stream[i]
+            if b in (0x0D, 0x0A):
+                i += 1                       # ПР/ПС — проводим парсеру
+                continue
+            if b == pend[0]:
+                pend.pop(0)
+                i += 1
+            else:
+                break                        # дальше — ответ ЭВМ, не эхо
+        while pend and pend[0] in (0x0D, 0x0A):
+            pend.pop(0)                      # переводы в очереди не «должны»
+        return stream[i:]
 
     def _erase_local_echo(self) -> None:
         """Стереть строки локального эха отдаваемого блока и вернуть
@@ -209,9 +277,27 @@ class TerminalSession:
         return bytes(self.buffer)
 
     def emit(self, data: bytes | None) -> None:
-        """Фактическая передача в линию: внутренний КОИ7-поток → байты линии."""
+        """Фактическая передача в линию: внутренний КОИ7-поток → байты линии.
+
+        При выключенном эхе (защита пароля) в очередь срезаемого эхо-ответа
+        попадают и знаки, ушедшие в режиме С ЭВМ нажатием клавиши.
+        """
+        if data:
+            self._note_sent(bytes(data))
         if data and self.link is not None:
             self.link.send(to_line(bytes(data), self.encoding))
+
+    def _note_sent(self, data: bytes) -> None:
+        """При выключенном эхе: записать в очередь ожидаемого эхо-ответа.
+        Клавишные байты режима С ЭВМ — внутренний поток (с алфавитным
+        битом), их перекладываем в форму линии; SEND отдаёт уже готовые
+        байты линии — перекодировка не нужна."""
+        if self.echo or not data:
+            return
+        if self.mode == MODE_HOST:
+            self._queue_echo(data)
+        else:
+            self._echo_pending += data
 
     def _detect_encoding(self, data: bytes) -> None:
         """Кодировки приёма/передачи по баннеру линии SIMH.
@@ -255,6 +341,8 @@ class TerminalSession:
         stream, self._carry = normalize_incremental(data, self._carry)
         if self.rx_encoding == "raw":
             stream = koi7_raw_upper(stream)
+        if not self.echo and stream:
+            stream = self._strip_pending_echo(stream)
         reply = self.parser.feed(stream)
         self._update_service()         # ИНВ/ЗВН могли измениться разбором
         if not reply:

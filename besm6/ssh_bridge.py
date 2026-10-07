@@ -152,6 +152,7 @@ class BridgeServer(paramiko.ServerInterface):
         self.user = user
         self.password = password
         self.event = threading.Event()
+        self.line_spec = None       # «terminal 4202-4223» от терминала
 
     def check_auth_password(self, username, password):
         if username == self.user and password == self.password:
@@ -168,7 +169,15 @@ class BridgeServer(paramiko.ServerInterface):
         # paramiko передаёт команду как bytes (Message.get_string)
         if isinstance(command, bytes):
             command = command.decode("utf-8", "replace")
-        if command.strip() in ("terminal", "ie15", ""):
+        # «terminal», «ie15», «» — цель по умолчанию; «terminal <порт>»
+        # (число, список или диапазон) — перебирать эти ДКС-линии
+        words = command.strip().split()
+        if words and words[0] in ("terminal", "ie15"):
+            self.line_spec = words[1] if len(words) > 1 else None
+            self.event.set()
+            return True
+        if command.strip() in ("", "terminal", "ie15"):
+            self.line_spec = None
             self.event.set()
             return True
         return False
@@ -194,6 +203,8 @@ def handle_client(client: socket.socket, args) -> None:
         return
     server.event.wait(30)
     host, _, port_spec = args.target.rpartition(":")
+    if server.line_spec:                   # терминал сам задал канал(ы)
+        port_spec = server.line_spec
     try:
         upstream, first = connect_free_target(host, port_spec)
     except OSError as e:
@@ -225,7 +236,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--listen", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=2222)
-    ap.add_argument("--target", default="127.0.0.1:4202",
+    ap.add_argument("--target", default="127.0.0.1:4202-4223",
                     help="telnet-линия БЭСМ-6 (host:port), порт — число, "
                          "список «4202,4210» или диапазон «4202-4223»; "
                          "на каждой сессии берётся первая свободная линия")

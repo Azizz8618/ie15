@@ -37,8 +37,14 @@ BRIDGE_PORT = 2222
 
 
 def besm6_alive() -> bool:
+    # PORT — спецификация («4202-4204»): проверяем через TCPLink, он сам
+    # обоймёт занятые линии; «connection refused» на всех — только тогда
+    # считается, что БЭСМ-6 нет
     try:
-        socket.create_connection((HOST, PORT), 2).close()
+        TCPLink(HOST, PORT, timeout=2.0, probe=1.0).close()
+        return True
+    except LinkError:
+        # занятая линия тоже означает живой эмулятор
         return True
     except OSError:
         return False
@@ -325,9 +331,12 @@ class TestSshRoundtrip(LineRoundtripMixin, unittest.TestCase):
                     break
                 except OSError:
                     time.sleep(0.25)
+            # line_spec передаём так же, как терминал с ?port= в URL:
+            # мост обязан перебрать ДКС-линии и взять первую свободную
             cls.link, cls.session = connect_logged_in(
                 lambda: SSHLink("127.0.0.1", BRIDGE_PORT, "ie15",
-                                password="ie15", timeout=10))
+                                password="ie15", timeout=10,
+                                line_spec=PORT))
         except Exception:
             cls.stop_bridge()
             raise

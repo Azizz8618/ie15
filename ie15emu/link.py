@@ -210,23 +210,34 @@ class TCPLink:
 
 
 class SSHLink:
-    """Линия терминала через SSH-сессию (нужен sshd или ssh_bridge.py)."""
+    """Линия терминала через SSH-сессию.
+
+    Два режима, выбираются сами:
+
+    * прямой туннель (direct-tcpip) к telnet-линиям SIMH на 127.0.0.1
+      сервера — работает на обычном sshd (OpenSSH), мост не нужен;
+      line_spec («4202-4223») — перебор линий, занятые пропускаются;
+    * exec «terminal [spec]» — к ssh_bridge.py (порт моста), когда
+      direct-tcpip запрещён сервером.
+    """
 
     def __init__(self, host: str, port, user: str,
                  password: str | None = None, keyfile: str | None = None,
-                 timeout: float = 10.0, probe: float = 3.0):
+                 timeout: float = 10.0, probe: float = 3.0,
+                 line_spec: str | None = None):
         try:
             import paramiko
         except ImportError as e:
             raise LinkError("SSH-линия требует paramiko (pip install paramiko)") from e
-        # port — число, список или спецификация («2222,2223» / «2222-2225»):
-        # перебор мостов; порт, где линия ЭВМ уже занята (мост прокидывает
-        # «Line connection busy»), тоже пропускаем и идём дальше
+        # port — число, список или спецификация («22», «2222,2223»):
+        # перебор SSH-портов сервера/моста
         ports = parse_port_spec(port)
         self.port = None
+        self.line_port = None
         self._pending = b""
         self._iac = IacStripper()
         busy, refused = [], []
+        last_err: Exception | None = None
         for p in ports:
             client = paramiko.SSHClient()
             client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -243,20 +254,73 @@ class SSHLink:
                 client.close()
                 refused.append(p)
                 continue
-            chan = client.get_transport().open_session()
-            chan.settimeout(probe)
-            # PTY не запрашивается: линия прозрачна для байтов (КОИ7/UTF-8), а
-            # pty-режим sshd переврал бы УП-коды (INLCR/IXON/ISTRIP).
-            chan.exec_command("terminal")
-            try:
-                first = chan.recv(4096)
-            except socket.timeout:
-                first = b""
-            if busy_reply(first):
-                chan.close()
-                client.close()
-                busy.append(p)
-                continue
+            chan = first = None
+            if line_spec:
+                # 1) прямой туннель sshd к линиям SIMH на хосте сервера;
+                # first — маркер «линия найдена и обстреляна баннером»
+                chan, first, last_err = self._forward_scan(
+                    paramiko, client, client.get_transport(), line_spec,
+                    timeout, probe, busy)
+                if chan is None and first == b"":
+                    # туннель не открылся ни на одну линию (занято/нет
+                    # слушателя) — мост тут не поможет, сообщаем причину
+                    client.close()
+                    continue
+            if chan is None:
+                # 2) exec на сервере: мост ssh_bridge.py («terminal …») или,
+                # если его нет, netcat/socat к линии — SSH-сервер может
+                # запрещать direct-tcpip.  PTY не запрашивается: линия
+                # прозрачна для байтов, pty-режим переврал бы УП-коды
+                # каждую линию сервера пробуем своими exec-каналами:
+                # мост «terminal», а на голом sshd — netcat к 127.0.0.1:порт
+                for lp in (parse_port_spec(line_spec) if line_spec else [None]):
+                    cmds = (["terminal"] if lp is None else
+                            [f"terminal {lp}", "terminal",
+                             f"nc -q1 127.0.0.1 {lp}", f"nc 127.0.0.1 {lp}"])
+                    for cmd in cmds:
+                        try:
+                            chan = client.get_transport().open_session(
+                                timeout=timeout)
+                            chan.settimeout(probe)
+                            chan.exec_command(cmd)
+                            try:
+                                first = chan.recv(4096)
+                            except socket.timeout:
+                                first = b""
+                        except (paramiko.SSHException, OSError) as e:
+                            client.close()
+                            refused.append(p)
+                            last_err = e
+                            chan = None
+                            cmds = []
+                            break
+                        if busy_reply(first):
+                            chan.close()
+                            chan = None
+                            busy.append(lp or p)
+                            last_err = LinkError("линия Э-60 занята")
+                            continue
+                        if (not first and chan.exit_status_ready()
+                                and chan.recv_exit_status() != 0):
+                            # команды нет в PATH — пробуем следующий вариант
+                            chan.close()
+                            chan = None
+                            last_err = LinkError(f"exec «{cmd}» не удалось")
+                            continue
+                        self.line_port = lp
+                        break
+                    if chan is not None:
+                        break
+                    if not cmds:        # транспорт/сессия умерли — этот
+                        break           # ssh-порт уже занесён в refused
+                if chan is None:
+                    client.close()
+                    if isinstance(last_err, LinkError) and "занята" in str(
+                            last_err):
+                        busy.append(p)
+                    else:
+                        refused.append(p)
+                    continue
             chan.settimeout(0.2)
             self.client, self.chan, self.port = client, chan, p
             if first:
@@ -264,10 +328,63 @@ class SSHLink:
             time.sleep(0.3)
             return
         if busy and not refused:
-            raise LinkError(f"все SSH-линии заняты ЭВМ ({spec_hint(ports)})")
+            raise LinkError(f"все линии заняты ЭВМ ({spec_hint(ports)})"
+                            + (f": {last_err}" if last_err else ""))
         raise LinkError(
             f"нет свободной SSH-линии на {host} ({spec_hint(ports)}): "
             f"заняты {spec_hint(busy)}, недоступны {spec_hint(refused)}")
+
+    def _forward_scan(self, paramiko, client, transport, line_spec,
+                      timeout, probe, busy):
+        """Перебор direct-tcpip каналов к 127.0.0.1:<порт> линии.
+
+        Возврат (chan, first, err): chan открыт; first — баннер; err —
+        причина. first == b"" — маркер «туннель разрешён, но свободных
+        линий нет» (на этот SSH-порт повторять бессмысленно); first is
+        None с err == None — туннель запрещён, нужен откат на exec."""
+        refused = opened_busy = opened_refused = False
+        for lp in parse_port_spec(line_spec):
+            try:
+                chan = transport.open_channel(
+                    "direct-tcpip", ("127.0.0.1", lp), ("127.0.0.1", 0),
+                    timeout=timeout)
+            except paramiko.SSHException as e:
+                # «administratively prohibited» — туннель запрещён сервером
+                # (или это ssh_bridge.py, принимающий только session) →
+                # откат на exec; «connect failed/refused» — на линии нет
+                # слушателя, пробуем следующую
+                low = str(e).lower()
+                if "prohib" in low or " refused)" in low:
+                    refused = True
+                    break
+                opened_refused = True
+                continue
+            except OSError:
+                opened_refused = True
+                continue
+            try:
+                chan.settimeout(probe)
+                first = chan.recv(4096)
+            except socket.timeout:
+                first = b""
+            except OSError as e:
+                chan.close()
+                opened_busy = True
+                continue
+            if busy_reply(first):
+                chan.close()
+                busy.append(lp)
+                opened_busy = True
+                continue
+            self.line_port = lp
+            return chan, first, None
+        if refused:                     # туннель запрещён — на мост через exec
+            return None, None, None
+        if opened_busy:
+            return None, None, LinkError("линии Э-60 заняты ЭВМ")
+        if opened_refused:
+            return None, b"", LinkError("нет слушателя на линиях")
+        return None, b"", LinkError("туннель не открылся ни на одну линию")
 
     def recv(self, size: int = 4096) -> bytes:
         if self._pending:
@@ -327,12 +444,20 @@ def open_link(url: str, **kw):
         return TCPLink(host or "127.0.0.1", port or 4202)
     if url.startswith("ssh://"):
         rest = url[6:]
+        line_spec = ""
+        if "?" in rest:
+            rest, _, query = rest.partition("?")
+            for kv in query.split("&"):
+                k, _, v = kv.partition("=")
+                if k == "port":
+                    line_spec = v
         auth, _, hostport = rest.rpartition("@")
         host, _, port = hostport.partition(":")
         return SSHLink(host or "127.0.0.1", port or 22,
                        user=auth or kw.get("user", "ie15"),
                        password=kw.get("password"),
-                       keyfile=kw.get("keyfile"))
+                       keyfile=kw.get("keyfile"),
+                       line_spec=line_spec or None)
     if url.startswith("stdio://"):
         return StdioLink()
     raise LinkError(f"неизвестная схема линии: {url}")

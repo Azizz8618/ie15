@@ -73,10 +73,10 @@ class Parser:
     строкой 0x60..0x7E, поэтому «кириллица» из УП-кодов невозможна.
     """
 
-    def __init__(self, mode: int = 2) -> None:
+    def __init__(self, mode: int = 2, history: int = 1000) -> None:
         if mode not in (1, 2):
             raise ValueError(f"неизвестный режим набора команд: {mode!r}")
-        self.screen = Screen()
+        self.screen = Screen(history=history)
         self.state = "raw"
         self._esc_args: list[int] = []
         self.mode = mode         # 1 — только УП; 2 — набор №2 (VT52), по умолчанию

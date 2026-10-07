@@ -41,26 +41,56 @@ def load_conf(path: str | None = None) -> configparser.ConfigParser:
 
 
 def line_url_from_conf(cp: configparser.ConfigParser) -> str | None:
-    """URL линии из секции [line]: ssh://user@server:ssh_port | tcp://server:port."""
+    """URL линии из секции [line]: ssh://user@server:ssh_port[?port=...] |
+    tcp://server:port.
+
+    Для ssh порт ДКС-линии из [line] port (один/список/диапазон) едет
+    параметром ?port= — мост по нему сам перебирает линии Э-60.
+    """
     server = cp.get("line", "server", fallback="") if cp.has_section("line") else ""
     if not server:
         return None
-    port = cp.get("line", "port", fallback="4202")
+    port = cp.get("line", "port", fallback="4202-4223")
     if cp.get("line", "type", fallback="tcp").lower() == "ssh":
         user = cp.get("ssh", "user", fallback="ie15")
         sport = cp.get("line", "ssh_port", fallback="2222")
-        return f"ssh://{user}@{server}:{sport}"
+        url = f"ssh://{user}@{server}:{sport}"
+        if str(port).strip() not in (sport, ""):
+            url += f"?port={str(port).strip()}"
+        return url
     return f"tcp://{server}:{port}"
+
+
+def say(msg: str) -> None:
+    """Сообщение пользователю: перенос по 80 знаков, слова не разрывать."""
+    import textwrap
+    for ln in textwrap.wrap(msg, width=COLS) or [""]:
+        print(ln)
 
 
 def apply_port(url: str | None, spec: str) -> str:
     """Спецификация портов (--port) становится портовой частью URL линии;
-    без URL —/tcp://127.0.0.1:<spec> (дефолт стоячего запуска)."""
+    без URL — tcp://127.0.0.1:<spec> (дефолт стоячего запуска).
+
+    У ssh:// спецификация линий Э-60 живёт в параметре ?port= (порт в URL
+    — это порт самого моста), --port заменяет именно его.
+    """
     if url and url.startswith("stdio"):
         return url                       # локальная линия — порта нет
     if not url or "://" not in url:
         return f"tcp://127.0.0.1:{spec}"
     head, _, rest = url.partition("://")
+    if "?" in rest:                       # «:port?param…» — порт в параметре
+        stem, _, tail = rest.partition("?")
+        kv = [p for p in tail.split("&") if p and not p.startswith("port=")]
+        kv.append("port=" + str(spec))
+        out = f"{head}://{stem}"
+        if kv:
+            out += "?" + "&".join(kv)
+        return out
+    if head == "ssh":
+        # у ssh:порт в URL — это мост; линии Э-60 кладём в ?port=
+        return f"{head}://{rest}?port={spec}"
     pre, colon, last = rest.rpartition(":")
     if colon and (not last or last[0].isdigit() or last[0] == "-"):
         return f"{head}://{pre}:{spec}"        # порт есть — заменяем
@@ -91,6 +121,8 @@ def apply_conf(ns, cp: configparser.ConfigParser):
         kf = str(Path(kf).expanduser()) if kf else ""
         # закрытый ключ по умолчанию — только если файл существует
         ns.keyfile = kf if kf and Path(kf).is_file() else None
+    if getattr(ns, "history", None) is None:
+        ns.history = cp.get("terminal", "history", fallback="1000") or "1000"
     return ns
 
 
@@ -157,12 +189,13 @@ def run_line(parser: Parser, url: str, png: str | None,
     try:
         link = open_link(url, **linkkw)
     except (LinkError, OSError) as e:
-        print(f"[линия] {url} — не удалось подключиться: {e}")
+        say(f"[линия] {url} — не удалось подключиться: {e}")
         return
     session = TerminalSession(parser, link=link, mode=mode, layout=layout)
-    print(f"[линия] {url} — подключено (режим: {mode})")
-    print("[клавиши] ввод — в линию/буфер; F8 — РЕЖИМ (набор №1↔№2), "
-          "F9 — АВТОНОМНО↔С ЭВМ, F10 — SEND, Ctrl-C — выход")
+    say(f"[линия] {url} — подключено (режим: {mode})")
+    say("[клавиши] ввод — в линию/буфер; F6 — ЭХО (пароль без вывода), "
+        "F8 — РЕЖИМ (набор №1↔№2), F9 — АВТОНОМНО↔С ЭВМ, F10 — SEND, "
+        "Ctrl-C — выход")
     # До отправки первого текста читаем баннер SIMH («Encoding is …»),
     # чтобы направление передачи совпало с кодировкой линии.
     if url.startswith(("tcp://", "ssh://")):
@@ -204,7 +237,7 @@ def run_line(parser: Parser, url: str, png: str | None,
         pass
     except LinkError as e:            # ЭВМ сбросила линию — не трейсбек, а выход
         sys.stdout.write("\x1b[0m\r\n")
-        print(f"[линия] {e} — сеанс завершён")
+        say(f"[линия] {e} — сеанс завершён")
     finally:
         if fd is not None:
             sys.stdout.write("\x1b[?25h")
@@ -228,10 +261,12 @@ def link_sock(link):
 
 
 def text_screen(parser: Parser) -> str:
-    """Псевдо-ЭЛТ: текстовый вывод содержимого 80×25 (коды КОИ7 → буквы).
+    """Псевдо-ЭЛТ: текстовый вывод 80×25 (коды КОИ7 → буквы) с историей.
 
-    Курсор — инверсный блок; образные знаки УП (блинк) мигают, как dim
-    на Видеотоне-340.
+    Над кадром — «история» сошедших наверх строк (глубина — [terminal]
+    history в конфиге, по умолчанию 1000); PgUp/PgDn листают окно вывода
+    до первой выданной строки и обратно. Курсор — инверсный блок; образные
+    знаки УП (блинк) мигают, как dim на Видеотоне-340.
     """
     from .charset import decode_koi7
     from .screen import ATTR_BLINK
@@ -241,28 +276,36 @@ def text_screen(parser: Parser) -> str:
         term_h = os.get_terminal_size().lines
     except OSError:
         term_h = 24
-    lines = []
-    for y, row in enumerate(sc.cells):
+
+    def row_line(cells, attr, y=None):
         toks = []
-        for x, code in enumerate(row):
+        for x, code in enumerate(cells):
             ch = decode_koi7(bytes([code]))
-            if sc.attr[y][x] & ATTR_BLINK:
+            if attr[x] & ATTR_BLINK:
                 # 5 мигающий, 7 инверсия: там, где мигание отключено
                 # (большинство современных терминалов), знак остаётся
                 # различим инверсным блоком
                 ch = f"\x1b[5;7m{ch}\x1b[0m"
-            if y == sc.y and x == sc.x:
+            if y is not None and y == sc.y and x == sc.x:
                 ch = f"\x1b[7m{ch}\x1b[27m"
             toks.append(ch)
-        lines.append("".join(toks))
+        return "".join(toks)
+
+    lines = [row_line(c, a) for c, a in sc.history]
+    lines += [row_line(row, sc.attr[y], y) for y, row in enumerate(sc.cells)]
     lines.append("-" * COLS)
     lines.append("".join(sc.service).rstrip())
     lines.extend(r.rstrip() for r in sc.service_more)
-    # рисуем абсолютной позицией (каждая строка на свою поз.1), без
-    # последовательного перевода строк: в коротком окне не скроллится и
-    # верх поля всегда виден; в конец влезает, что осталось
+    # окно просмотра (PgUp/PgDn): закреплённый сдвиг или авто-следование
+    # за курсором; рисуем абсолютной позицией — в коротком окне ничего
+    # не скроллится, верх поля всегда виден
+    sc._view_h = term_h
+    top = sc.view_top
+    if top is None:
+        top = sc._follow_top(term_h)
+    top = max(0, min(top, max(0, len(lines) - term_h)))
     out = "\x1b[H\x1b[2J"
-    for i, ln in enumerate(lines[:term_h]):
+    for i, ln in enumerate(lines[top:top + term_h]):
         out += f"\x1b[{i + 1};1H{ln}"
     return out
 
@@ -304,6 +347,9 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--sets", choices=["1", "2"], default=None, type=str,
                     help="набор команд терминала при запуске: №1 (только УП) "
                          "или №2 (VT52, по умолчанию — как на линии БЭСМ-6)")
+    ap.add_argument("--history", default=None, type=str,
+                    help="строк «истории» выдачи над экраном для PgUp "
+                         "(по умолчанию 1000; 0 — не сохранять)")
     ap.add_argument("--version", action="version", version=__version__)
     args = ap.parse_args(argv)
     args = apply_conf(args, load_conf(args.conf))
@@ -321,7 +367,7 @@ def main(argv: list[str] | None = None) -> None:
         layout = None
 
     charset = Charset(Path(args.roms) / "chargen-15ie.bin")
-    parser = Parser(mode=int(args.sets))
+    parser = Parser(mode=int(args.sets), history=int(args.history))
     parser.charset = charset
 
     if args.line:

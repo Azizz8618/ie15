@@ -39,7 +39,7 @@ from ie15emu.render import to_text
 HOST = "127.0.0.1"
 # перебор ДКС-линий (dispak.ini: 4199=tty2 … 4223=tty24): занятые линии
 # TCPLink пропускает сам — тесту не мешает чужая сессия на дефолтном 4202
-PORT = os.environ.get("IE15_TEST_PORT", "4202-4204")
+PORT = os.environ.get("IE15_TEST_PORT", "4202-4223")
 ROM = Path(__file__).resolve().parent.parent / "rom" / "chargen-15ie.bin"
 
 # «выд зад год» → внутренние КОИ7 линии (строка 0x60..)

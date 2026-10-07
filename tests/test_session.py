@@ -6,6 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from ie15emu import ROWS
 from ie15emu.charset import RUS7, decode_koi7
 from ie15emu.parser import Parser
 from ie15emu.session import MODE_HOST, MODE_LOCAL, TerminalSession
@@ -188,10 +189,17 @@ def test_service_panel_all_bits():
     session.feed_key("BLINK")
     assert "БЛИНК=ВКЛ" in panel() and session.parser.show_ctrl
     for legend in ("ВК=Bksp", "ТАБ=Tab", "ЗВН=Ctrl-G", "ПРПС=Enter",
+                   "ЭКРАН↑=PgUp", "ЭКРАН↓=PgDn",
                    "ESC=Esc", "КУРСОР=Стрелки", "ДОМ=Home", "СТЕРСТР=End",
-                   "СТЕРЭКР=PgUp", "ОЧИСТКА=PgDn", "ИНВЕРС=Ins",
-                   "НОРМ=Del", "НАБОР=F8", "СЕТЬ=F9", "ПЕРЕДАЧА=F10"):
+                   "СЛОВО=Ctrl+→", "СЛОВО=Ctrl+←", "НАЧСТР=Ctrl+↑",
+                   "НИЖСТР=Ctrl+↓", "ИНВЕРС=Ins",
+                   "НОРМ=Del", "ЭХО=F6", "БЛИНК=F7", "НАБОР=F8", "СЕТЬ=F9",
+                   "ПЕРЕДАЧА=F10"):
         assert legend in panel(), legend
+    assert "ЭХО=ВКЛ" in panel()                      # состояние в ряду состояний
+    session.feed_key("ECHO")
+    assert "ЭХО=ВЫКЛ" in panel()
+    session.feed_key("ECHO")
     # колонки ровные: разделители « | » стоят на одних и тех же позициях
     # во всех рядах легенды
     k_rows = [l for l in rows() if "Bksp" in l or "Home" in l or "PgUp" in l
@@ -300,6 +308,169 @@ def test_ctrl_arrows_on_host_mode_send_nothing():
     assert session.feed_key("KEY_CTRLLEFT") is None
     assert link.sent == []                     # в линию — ничего
     assert session.parser.screen.x == 0         # локальный курсор сдвинулся
+
+
+def test_pgup_pagedown_scroll_view():
+    # PgUp/PgDn — листание окна вывода (кадр до последней заполненной
+    # строки + подвал). Выше первой строки — стоп (без циклического
+    # показа пустоты); закрепленное окно приём не сбрасывает
+    session, link = make_session(MODE_HOST)
+    sc = session.parser.screen
+    sc._view_h = 24
+    for y in range(3):
+        session.handle_line_reply(bytes([0x80 | 1]) * 5 + b"\r\n")
+    # контент: 4 ряда с курсором + панель; окно 24 — всего видно
+    assert session.feed_key("KEY_PAGEUP") is None
+    assert sc.view_top is None                       # листать нечего: следим
+    session.feed_key("KEY_PAGEUP")                   # верх — стоп, не цикл
+    assert sc.view_top is None
+    session.feed_key("KEY_PAGEDOWN")                 # низ — тоже упор в контент
+    assert sc.view_top is None
+    # узкое окно: листание от первой строки кадра до последней строки
+    # подвала; выше первой строки и ниже последней — стоп, без цикла
+    sc._view_h = 6
+    session.feed_key("KEY_PAGEDOWN")                 # страница вниз
+    assert sc.view_top == 5
+    session.feed_key("KEY_PAGEDOWN")                 # упор в конец подвала
+    assert sc.view_top == sc.view_rows() - 6
+    session.feed_key("KEY_PAGEUP")
+    session.feed_key("KEY_PAGEUP")                   # до первой строки
+    session.feed_key("KEY_PAGEUP")
+    assert sc.view_top == 0
+    session.feed_key("KEY_PAGEUP")                   # выше — стоп, не цикл
+    assert sc.view_top == 0
+    session.handle_line_reply(b"y\r\n")              # приём: окно не прыгает
+    assert sc.view_top == 0
+    link.sent.clear()
+    session.feed_key("KEY_PAGEUP")
+    session.feed_key("KEY_PAGEDOWN")
+    assert link.sent == []                           # клавиши в линию не идут
+
+
+def test_history_keeps_scrolled_rows():
+    # сошедшие с верхнего края кадра строки сохраняются в «историю»
+    # (глубина настраивается), пустые — нет; PgUp доходит до первой
+    # выданной строки
+    session, link = make_session(MODE_HOST)
+    sc = session.parser.screen
+    sc._view_h = 8
+    for i in range(30):                              # 30 строк > кадра 25
+        session.handle_line_reply(bytes([0x80 | 1]) +
+                                  str(i % 10).encode() + b"\r\n")
+    assert len(sc.history) == 6                       # 30 - 24 строки кадра
+    from ie15emu.charset import decode_koi7
+    assert decode_koi7(bytes(sc.history[0][0])).strip() == "A0"
+    for _ in range(6):
+        session.feed_key("KEY_PAGEUP")
+    assert sc.view_top == 0                           # дошли до первой строки
+    session.feed_key("KEY_PAGEUP")
+    assert sc.view_top == 0                           # выше — стоп
+    session.feed_key("KEY_PAGEDOWN")                  # назад к курсору
+    assert sc.view_top > 0
+    # пустые строки в историю не пишутся: чистый кадр при скролле — без роста
+    session.handle_line_reply(b"\x1f")              # очистка + «дом»
+    sc.y = ROWS - 1
+    n0 = len(sc.history)
+    for _ in range(5):
+        session.handle_line_reply(b"\r\n")
+    assert len(sc.history) == n0
+
+
+def test_clear_key_moves_screen_to_history():
+    # F5 «ОЧИСТКА»: кадр ЭВМ уходит в «историю», экран — чист, курсор в
+    # начало первой строки; история не стирается, к ней возвращается PgUp
+    session, link = make_session(MODE_HOST)
+    sc = session.parser.screen
+    sc._view_h = 8
+    session.handle_line_reply(b"HELLO\r\nWORLD\r\n")
+    hist0 = len(sc.history)
+    assert session.feed_key("CLEAR") is None
+    assert (sc.x, sc.y) == (0, 0)
+    assert "HELLO" not in sc.text()                    # кадр пуст
+    assert len(sc.history) > hist0                     # экран — в историю
+    assert any(decode_koi7(bytes(c)).strip() == "HELLO"
+               for c, a in sc.history)
+    assert link.sent == []
+    session.feed_key("KEY_PAGEUP")                     # возврат к нему
+    assert sc.view_top == 0
+    top_hist = sc.view_top
+    session.feed_key("KEY_PAGEDOWN")
+    assert sc.view_top > 0 or top_hist is None
+
+
+def test_history_limit_from_conf():
+    from ie15emu.parser import Parser as P2
+    from ie15emu import ROWS
+    sc = P2(history=3).screen
+    for i in range(30):
+        sc.cells[sc.y] = [0x41 + (i % 26)] + [0x20] * (80 - 1)
+        sc.lf()
+    # ушли 6 строк (A..F), глубина 3 — остались последние (D, E, F)
+    assert len(sc.history) == 3
+    assert sc.history[0][0][0] == 0x44
+    assert sc.history[-1][0][0] == 0x46
+    sc0 = P2(history=0).screen
+    sc0.cells[ROWS - 1] = [0x41] + [0x20] * 79
+    sc0.y = ROWS - 1
+    sc0.lf()
+    assert sc0.history == []                          # 0 — не сохранять
+
+
+def test_pgup_sends_nothing_to_line():
+    session, link = make_session(MODE_HOST)
+    session.feed_key("KEY_PAGEUP")
+    session.feed_key("KEY_PAGEDOWN")
+    assert link.sent == []
+
+
+def test_echo_off_hides_password():
+    # F6 «ЭХО»: набранное уходит в линию, но не печатается; эхо-ответ
+    # линии срезается, настоящий вывод ЭВМ виден как обычно
+    session, link = make_session(MODE_HOST)
+    session.handle_line_reply("ПАРОЛЬ? ".encode("utf-8"))
+    assert "ПАРОЛЬ" in session.parser.screen.text()
+    session.feed_key("ECHO")
+    assert "ЭХО=ВЫКЛ" in "\n".join(["".join(session.parser.screen.service)]
+                                    + session.parser.screen.service_more)
+    for ch in "root":
+        session.emit(session.feed_key(ch))
+    assert link.sent                                  # в линию ушло
+    session.handle_line_reply(b"root\r\n")            # эхо-ответ линии
+    screen = session.parser.screen.text()
+    assert "root" not in screen and "ROOT" not in screen
+    session.handle_line_reply("ВХОД РАЗРЕШЁН\r\n".encode("utf-8"))
+    assert "ВХОД РАЗРЕШ" in session.parser.screen.text()
+    session.feed_key("ECHO")                          # эхо включили
+    session.handle_line_reply("ВИДНО".encode("utf-8"))
+    assert "ВИДНО" in session.parser.screen.text()
+
+
+def test_echo_off_line_feeds_still_work():
+    # при выключенном эхе переводы строки отрабатываются: ответ машины
+    # после пароля начинается с новой строки, а не липнет к приглашению
+    session, link = make_session(MODE_HOST)
+    sc = session.parser.screen
+    session.handle_line_reply(b"LOGIN: ")
+    session.feed_key("ECHO")
+    for ch in "abc":
+        session.emit(session.feed_key(ch))
+    session.handle_line_reply(b"abc\r\nOK\r\n")
+    assert sc.y == 2 and sc.x == 0
+    rows = sc.text().splitlines()
+    assert rows[0].startswith("LOGIN:") and "abc" not in rows[0]
+    assert rows[1].strip() == "OK"              # без эха, с новой строки
+
+
+def test_echo_off_autonomous_no_echo():
+    session, link = make_session(MODE_LOCAL)
+    session.feed_key("ECHO")
+    for ch in "пароль":
+        assert session.feed_key(ch) is None
+    assert session.pending()                          # буфер набирается
+    assert "ПАРОЛЬ" not in session.parser.screen.text()
+    session.feed_key("ECHO")
+    session.feed_key("п")                    # локальное эхо — заглавной Н1
+    assert "П" in session.parser.screen.text()
 
 
 if __name__ == "__main__":

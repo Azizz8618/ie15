@@ -18,10 +18,8 @@
 cd "$(dirname "$0")" || exit 1
 pause=0
 [ $# -eq 0 ] && pause=1
-case " $* " in
-  *--line*|*--script*|*--help*|*--port*) ;;
-  *) set -- --line tcp://127.0.0.1:4202-4223 "$@" ;;
-esac
+# без явной --line подключение берётся из ie15.conf (по умолчанию —
+# ssh://test@besm6.cs.msu.ru, ключ ~/.ssh/besm_test, линии 4202-4223)
 case " $* " in
   *" --seconds "*|*" --seconds="*) ;;
   *) set -- --seconds 0 "$@" ;;

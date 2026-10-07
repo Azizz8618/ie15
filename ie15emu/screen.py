@@ -13,7 +13,7 @@ ATTR_BLINK = 0x40  # «блинк», как на Видеотоне-340: обр�
 
 
 class Screen:
-    def __init__(self) -> None:
+    def __init__(self, history: int = 1000) -> None:
         self.cells = [[0x20] * COLS for _ in range(ROWS)]
         self.attr = [[0] * COLS for _ in range(ROWS)]
         self.service = [" "] * COLS   # служебная строка (ряд 25)
@@ -24,6 +24,53 @@ class Screen:
         self.inverse = False
         self.blink = False
         self.bell = False
+        # «история» выдачи: строки, сошедшие с верхнего края кадра при
+        # скролле; глубина — из конфига ([terminal] history, по умолчанию 1000)
+        self.history: list[tuple[list[int], list[int]]] = []
+        self.history_max = history
+        # представление (PgUp/PgDn): None — авто-следить за курсором;
+        # целое — закреплённая верхняя строка окна вывода
+        self.view_top: int | None = None
+        self._view_h = 24          # высота окна на момент последней отрисовки
+
+    def _push_history(self, row: list[int], attr: list[int]) -> None:
+        if self.history_max <= 0:
+            return
+        if all(c == 0x20 for c in row):
+            return                          # пустые строки в историю не пишем
+        self.history.append((row[:], attr[:]))
+        if len(self.history) > self.history_max:
+            del self.history[0]
+
+    def view_rows(self) -> int:
+        """Рядов в просмотре: история + кадр (до последней заполненной
+        строки) + подвал. Пустоты не листаются: прокрутка доходит до
+        первой выданной строки и до последней строки подвала и
+        останавливается — без «циклического» показа пустоты."""
+        last = -1
+        for y in range(ROWS - 1, -1, -1):
+            if any(c != 0x20 for c in self.cells[y]) or y == self.y:
+                last = y
+                break
+        panel = 2 + len(self.service_more)        # черта + ряды подвала
+        return len(self.history) + max(last + 1, self.y + 1) + panel
+
+    def _follow_top(self, h: int) -> int:
+        # следим за кадром: низ окна у курсора (или весь кадр с подвалом,
+        # если влезает); в историю автоматически не заглядываем
+        base = len(self.history)
+        return max(base, min(self.view_rows() - h, base + self.y - h + 1))
+
+    def scroll_view(self, delta: int, h: int | None = None) -> None:
+        """PgUp/PgDn: страница просмотра вверх/вниз (в историю и обратно).
+        Приём от ЭВМ закреплённого окна не сбрасывает."""
+        h = h or self._view_h
+        max_top = max(0, self.view_rows() - h)
+        if max_top == 0:
+            return                 # листать нечего: остаёмся следящими
+        top = (self._follow_top(h) if self.view_top is None
+               else self.view_top)
+        self.view_top = max(0, min(max_top, top + delta))
 
     # --- курсор -----------------------------------------------------
     def wrap_cursor(self) -> None:
@@ -55,8 +102,9 @@ class Screen:
         self.x = min((self.x // 8 + 1) * 8, COLS - 1)
 
     def scroll_up(self) -> None:
-        self.cells.pop(0)
-        self.attr.pop(0)
+        gone = self.cells.pop(0)
+        gone_attr = self.attr.pop(0)
+        self._push_history(gone, gone_attr)       # в «историю» просмотра
         self.cells.append([0x20] * COLS)
         self.attr.append([0] * COLS)
 
@@ -146,10 +194,20 @@ class Screen:
         self.attr = [[0] * COLS for _ in range(ROWS)]
         self.x = self.y = 0
 
+    def clear_screen_kept(self) -> None:
+        """Клавиша «ОЧИСТКА»: экран (кадр ЭВМ) очищается с возвратом в
+        начало первой строки, но сошедший экран целиком уходит в «историю»
+        — её очистка не трогает."""
+        for row, attr in zip(self.cells, self.attr):
+            self._push_history(row, attr)
+        self.clear_all()
+        self.view_top = None               # смотреть с начала нового экрана
+
     def set_service(self, text: str) -> None:
         # текст с переводом строк раскладывается на несколько рядов
         # подвала; каждый ряд — строго 80 знаков
-        rows = text.split("\n")[:8]
+        rows = text.split("\n")[:10]
+        self.service = [" "] * COLS
         first = (rows[0] if rows else "")[:COLS].ljust(COLS)
         for i, ch in enumerate(first):
             self.service[i] = ch

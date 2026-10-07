@@ -48,8 +48,17 @@ def cp_from(text: str):
 
 
 def test_ssh_url():
+    # ssh: порт моста остаётся в URL, а ДКС-линия из [line] port едет
+    # параметром ?port= (без него мост взял бы свою цель по умолчанию)
     cp = cp_from(CONF)
-    assert line_url_from_conf(cp) == "ssh://mashina@10.0.0.5:2222"
+    assert line_url_from_conf(cp) == "ssh://mashina@10.0.0.5:2222?port=4202"
+
+
+def test_ssh_url_passes_line_port_spec():
+    # диапазон из [line] port доезжает до URL как ?port= (мост по нему
+    # сам переберёт ДКС-линии)
+    cp = cp_from(CONF.replace("port = 4202", "port = 4202-4223"))
+    assert line_url_from_conf(cp) == "ssh://mashina@10.0.0.5:2222?port=4202-4223"
 
 
 def test_tcp_url():

@@ -79,8 +79,9 @@ def test_layout_off_passes_through():
 
 def test_control_keys_send_esc():
     assert key_to_bytes("KEY_END") == b"\x1bK"
-    assert key_to_bytes("KEY_PAGEUP") == b"\x1bJ"
-    assert key_to_bytes("KEY_PAGEDOWN") == b"\x1bE"
+    # PgUp/PgDn — локальное листание экрана, в линию ничего
+    assert key_to_bytes("KEY_PAGEUP") == b""
+    assert key_to_bytes("KEY_PAGEDOWN") == b""
     assert key_to_bytes("KEY_INSERT") == b"\x1bb"
     assert key_to_bytes("KEY_DELETE") == b"\x1bc"
     assert key_to_bytes("\t") == b"\x09"          # ТАБ
