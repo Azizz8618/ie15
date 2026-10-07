@@ -181,9 +181,7 @@ class TCPLink:
             return
         if busy and not refused:
             raise LinkError(f"все линии заняты ЭВМ ({spec_hint(ports)})")
-        raise LinkError(
-            f"нет свободной линии на {host} ({spec_hint(ports)}): "
-            f"заняты {spec_hint(busy)}, недоступны {spec_hint(refused)}")
+        raise _exhausted(host, ports, busy, refused, kind="линии")
 
     def recv(self, size: int = 4096) -> bytes:
         if self._pending:
@@ -207,6 +205,18 @@ class TCPLink:
 
     def close(self) -> None:
         self.sock.close()
+
+
+def _exhausted(host: str, ports, busy, refused, kind="SSH-линии") -> LinkError:
+    parts = []
+    if busy:
+        parts.append(f"заняты {spec_hint(busy)}")
+    if refused:
+        parts.append(f"нет соединения с {spec_hint(refused)}")
+    if not parts:
+        parts.append("каналы не отвечают")
+    return LinkError(f"нет свободной {kind} на {host} "
+                     f"({spec_hint(ports)}): {'; '.join(parts)}")
 
 
 class SSHLink:
@@ -239,8 +249,6 @@ class SSHLink:
         busy, refused = [], []
         last_err: Exception | None = None
         for p in ports:
-            client = paramiko.SSHClient()
-            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             kwargs: dict = {"hostname": host, "port": p, "username": user,
                             "timeout": timeout}
             if keyfile:
@@ -248,10 +256,26 @@ class SSHLink:
             else:
                 kwargs["password"] = password or ""
                 kwargs["look_for_keys"] = False
-            try:
-                client.connect(**kwargs)
-            except (paramiko.SSHException, OSError):
-                client.close()
+            client = None
+            # sshd на перегрузке бросает незавершённые рукопожатия
+            # (MaxStartups): «Error reading SSH protocol banner» — transient,
+            # пробуем несколько раз с нарастающей паузой
+            for attempt in range(4):
+                client = paramiko.SSHClient()
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                try:
+                    client.connect(**kwargs)
+                    break
+                except paramiko.SSHException:
+                    client.close()
+                    client = None
+                    if attempt < 3:
+                        time.sleep(1.0 + 1.5 * attempt)
+                except OSError:
+                    client.close()
+                    client = None
+                    break            # refused/сеть — повторять бессмысленно
+            if client is None:
                 refused.append(p)
                 continue
             chan = first = None
@@ -330,9 +354,7 @@ class SSHLink:
         if busy and not refused:
             raise LinkError(f"все линии заняты ЭВМ ({spec_hint(ports)})"
                             + (f": {last_err}" if last_err else ""))
-        raise LinkError(
-            f"нет свободной SSH-линии на {host} ({spec_hint(ports)}): "
-            f"заняты {spec_hint(busy)}, недоступны {spec_hint(refused)}")
+        raise _exhausted(host, ports, busy, refused)
 
     def _forward_scan(self, paramiko, client, transport, line_spec,
                       timeout, probe, busy):
