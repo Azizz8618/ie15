@@ -32,9 +32,11 @@ class Screen:
         self.history_max = history
         self.show_ctrl = False     # клавиша «УПР.СИМВ» (F7): показывать
                                    # управляющие знаки образом с миганием
-        self.display_set = "n0"    # набор знаков: 'n0' — международный
-                                   # (ISO 646 IRV: ¤ ¬ ¯), 'n1' — первый
-                                   # национальный КОИ-7 (русские в 0x40…0x5F)
+        self.display_set = "n2"    # набор знаков: 'n0' — ASCII (латиница
+                                   # целиком, кирилличных знаков нет),
+                                   # 'n1' — русские верх+низ (КОИ-7 Н1),
+                                   # 'n2' — международная строка + русские
+                                   # коды ЭВМ (VT-52, режим линии БЭСМ-6)
         # представление (PgUp/PgDn): None — авто-следить за курсором;
         # целое — закреплённая верхняя строка окна вывода
         self.view_top: int | None = None
@@ -231,22 +233,28 @@ class Screen:
 
     # --- выдача -----------------------------------------------------
     def display_code(self, code: int, attr: int) -> int:
-        """Код ВЗУ → код отображения: режим «УПР.СИМВ» и набор знаков."""
-        from .charset import apply_set
+        """Код ВЗУ → код отображения для рендеров: образ УП по «УПР.СИМВ»;
+        набор знаков применяется далее по display_set (rom_slot)."""
         if attr & ATTR_CTRL:
-            # УП показываются образом code|0x40 по международной таблице
             return (code | 0x40) if self.show_ctrl else 0x20
-        return apply_set(code, self.display_set)
+        return code
+
+    def char_at(self, y: int, x: int) -> str:
+        """Знак позиции как символ — с учётом «УПР.СИМВ» и набора."""
+        from .charset import display_char
+        a = self.attr[y][x]
+        code = self.cells[y][x]
+        if a & ATTR_CTRL:
+            return display_char(code | 0x40, "n0") if self.show_ctrl else " "
+        return display_char(code, self.display_set)
 
     def glyph(self, y: int, x: int) -> int:
-        """Знак в позиции с учётом «УПР.СИМВ» и набора знаков."""
+        """Знак в позиции для растровых/текстовых рендеров."""
         return self.display_code(self.cells[y][x], self.attr[y][x])
 
     def text(self) -> str:
-        from .charset import decode_koi7
-        return "\n".join(
-            decode_koi7(bytes(self.glyph(y, x) for x in range(COLS)))
-            for y in range(ROWS))
+        return "\n".join("".join(self.char_at(y, x) for x in range(COLS))
+                         for y in range(ROWS))
 
     def dump(self) -> str:
         out = ["+" + "-" * COLS + "+"]

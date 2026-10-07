@@ -31,7 +31,7 @@ def to_ansi(screen: Screen, charset: Charset,
                 a = 0
             inv = a & (ATTR_INV | ATTR_BLINK)
             is_cur = cursor and (x, y) == (screen.x, screen.y)
-            bits = charset.rows(code)
+            bits = charset.rows(code, screen.display_set)
             for r, row in enumerate(bits):
                 if r:
                     out.append(f"\x1b[{y * 8 + r + 1};{x * 7 + 1}H")
@@ -62,7 +62,7 @@ def to_png_bytes(screen: Screen, charset: Charset, path: str) -> None:
             if a & ATTR_CTRL and not screen.show_ctrl:
                 a = 0
             inv = bool(a & (ATTR_INV | ATTR_BLINK))
-            for r, row in enumerate(charset.rows(code)):
+            for r, row in enumerate(charset.rows(code, screen.display_set)):
                 for c in range(7):
                     on = ((row >> (6 - c)) & 1) ^ inv
                     glyph_rows[r] += bytes(GREEN if on else DARK) * SCALE

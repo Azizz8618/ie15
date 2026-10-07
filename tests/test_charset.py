@@ -157,6 +157,33 @@ def test_screen_display_set_toggle():
     assert p.screen.text().splitlines()[0][:3] == "KX-"
 
 
+def test_display_char_matrix():
+    from ie15emu.charset import display_char
+    # Н0 — ASCII целиком, кириллических знаков нет
+    assert display_char(0x41, "n0") == "A" and display_char(0x61, "n0") == "a"
+    assert display_char(0x01, "n0") == ""
+    # Н1 — русские два регистра: 0x40-я строка — верхний, 0x60-я — нижний
+    assert display_char(0x42, "n1") == "Б" and display_char(0x62, "n1") == "б"
+    assert display_char(0x02, "n1") == "Б"          # и внутренние коды ЭВМ
+    # Н2 — международная строка + кириллица кодов ЭВМ (два регистра строк
+    # 0x60.. — по-прежнему русские: так их отдаёт utf8/ДКС-приём)
+    assert display_char(0x42, "n2") == "B" and display_char(0x62, "n2") == "б"
+    assert display_char(0x02, "n2") == "Б"
+
+
+def test_nabor_h1_echo_two_cases():
+    from ie15emu.parser import Parser as P
+    from ie15emu.session import TerminalSession, MODE_LOCAL
+    class L:
+        sent = []
+        def send(self, d): pass
+    ses = TerminalSession(P(), link=L(), mode=MODE_LOCAL)
+    ses.nabor = "n1"
+    for ch in "пП":
+        ses.feed_key(ch)
+    txt = ses.parser.screen.text().splitlines()[0]
+    assert "п" in txt and "П" in txt        # Н1: оба регистра кириллицы живые
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

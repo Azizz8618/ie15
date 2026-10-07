@@ -46,9 +46,13 @@ class Charset:
             )
         self.rom = data
 
-    def rows(self, code: int) -> list[int]:
-        """8 байт-строк глифа (7 точек в старших разрядах 7…1)."""
-        base = rom_addr(code) * GLYPH_ROWS
+    def rows(self, code: int, set_name: str = "n2") -> list[int]:
+        """8 байт-строк глифа (7 точек в старших разрядах 7…1) для кода
+        ВЗУ в данном наборе знаков; пустое место — строки нулевые."""
+        slot = rom_slot(code, set_name)
+        if slot is None:
+            return [0] * GLYPH_ROWS
+        base = slot * GLYPH_ROWS
         return [self.rom[base + r] >> 1 for r in range(GLYPH_ROWS)]
 
     def bitmap(self, code: int) -> list[list[int]]:
@@ -125,7 +129,34 @@ def encode_koi7(text: str) -> bytes:
 # набор — режим отображения кодов 0x20…0x7F, как переключатель «набор»
 # на щитке терминала.
 
-N0_SPECIAL = {0x24: "¤", 0x5E: "¬", 0x7E: "¯"}
+N0_SPECIAL = {0x24: "¤", 0x5E: "¬"}
+
+
+def display_char(code: int, name: str) -> str:
+    """Знак кода ВЗУ в данном наборе: Н0 — ASCII целиком (латиница в
+    обоих регистрах, кириллических кодов нет), Н1 — русские верхний и
+    нижний регистры (+ съеденная Н1 латинская верхняя строка), Н2 —
+    международная строка + кириллица кодов ЭВМ (как отдаёт SIMH/ДКС)."""
+    code &= 0x7F
+    if name == "n0":
+        if code < 0x20:
+            return ""                      # в ASCII эти коды — УП, не знаки
+        if code == 0x7F:
+            return "█"
+        return N0_SPECIAL.get(code, chr(code))
+    if name == "n1" and 0x40 <= code <= 0x5F:
+        code -= 0x40                       # латинская строка → русские верх
+    return decode_koi7(bytes([code]))
+
+
+def rom_slot(code: int, name: str = "n2"):
+    """Физический слот ПЗУ для кода ВЗУ в наборе; None — пустое место."""
+    code &= 0x7F
+    if name == "n0":
+        return None if code < 0x20 else code    # 0x60.. — латинская строчная
+    if name == "n1" and 0x40 <= code <= 0x5F:
+        code -= 0x40
+    return rom_addr(code)
 
 
 def apply_set(code: int, name: str) -> int:

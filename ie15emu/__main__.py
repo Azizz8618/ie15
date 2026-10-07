@@ -293,13 +293,17 @@ def text_screen(parser: Parser) -> str:
         term_h = 24
 
     def row_line(cells, attr, y=None):
+        from .charset import display_char
         toks = []
         for x, code in enumerate(cells):
             a = attr[x]
-            code = sc.display_code(code, a)     # УПР.СИМВ + набор знаков
-            if a & ATTR_CTRL and not sc.show_ctrl:
-                a = 0                            # скрытый УП не мигает
-            ch = decode_koi7(bytes([code]))
+            if a & ATTR_CTRL:
+                ch = (display_char(code | 0x40, "n0") if sc.show_ctrl
+                      else " ")
+                if not sc.show_ctrl:
+                    a = 0                        # скрытый УП не мигает
+            else:
+                ch = display_char(code, sc.display_set)
             if a & ATTR_BLINK:
                 # 5 мигающий, 7 инверсия: там, где мигание отключено
                 # (большинство современных терминалов), знак остаётся
@@ -395,8 +399,7 @@ def main(argv: list[str] | None = None) -> None:
     charset = Charset(Path(args.roms) / "chargen-15ie.bin")
     parser = Parser(mode=2 if args.nabor == "n2" else 1,
                     history=int(args.history))
-    parser.screen.display_set = ("n1" if args.nabor == "n1"
-                                 else (args.charset or "n0"))
+    parser.screen.display_set = args.charset or args.nabor
     parser.charset = charset
 
     if args.line:

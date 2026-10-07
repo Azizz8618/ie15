@@ -100,16 +100,14 @@ class TerminalSession:
 
     @property
     def nabor(self) -> str:
-        if self.parser.mode == 2:
-            return "n2"
-        return ("n1" if self.parser.screen.display_set == "n1" else "n0")
+        return self.parser.screen.display_set
 
     @nabor.setter
     def nabor(self, value: str) -> None:
         if value not in self.NABORS:
             raise ValueError(f"неизвестный набор: {value!r}")
         self.parser.mode = 2 if value == "n2" else 1
-        self.parser.screen.display_set = "n1" if value == "n1" else "n0"
+        self.parser.screen.display_set = value
         # Н1 — национальный алфавит: русская раскладка включена;
         # Н0/Н2 — ASCII/VT-52: клавиши печатают латиницу как есть
         self.layout = self.default_layout if value == "n1" else None
@@ -242,12 +240,18 @@ class TerminalSession:
         if self.echo:
             if not buffered:
                 self._echo_top = self.parser.screen.y
-            # Н0/Н2 (без русской раскладки): латинская строчная эхом —
-            # заглавной: коды 0x60… в ВЗУ заняты русскими строчными Н1.
-            if not self.layout:
-                data = bytes((b - 0x20) if 0x61 <= b <= 0x7A else b
-                             for b in data)
-            self.parser.feed(koi7_display_upper(data))
+            if self.nabor in ("n0", "n1"):
+                # Н0: ASCII как есть; Н1: русские оба регистра как есть
+                # (строчные коды 0x60.. — русские строчные, верхние —
+                # 0x40..0x5F и внутренние 0x00..0x1E)
+                self.parser.feed(data)
+            else:
+                # Н2 (VT-52/линия ЭВМ): эхо заглавными — одно-регистная
+                # традиция кодов ЭВМ; латинскую строчную показываем верхним
+                # регистром, т.к. строчные коды 0x60.. заняты русскими
+                latin = bytes((b - 0x20) if 0x61 <= b <= 0x7A else b
+                              for b in data)
+                self.parser.feed(koi7_display_upper(latin))
         self._update_service()
         return None
 
