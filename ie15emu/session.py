@@ -17,7 +17,7 @@ from __future__ import annotations
 from . import COLS, ROWS
 from .charset import (koi7_display_upper, koi7_raw_upper,
                       normalize_incremental, to_line)
-from .keyboard import DEFAULT_LAYOUT, key_to_bytes
+from .keyboard import DEFAULT_LAYOUT, is_key_combo, key_to_bytes
 
 MODE_LOCAL = "local"      # «АВТОНОМНО»
 MODE_HOST = "host"        # «С ЭВМ»
@@ -172,6 +172,12 @@ class TerminalSession:
             if not key:
                 self._update_service()
                 return None
+        if is_key_combo(key):
+            # нажатие с Ctrl/Alt/Shift (CSI-u) без привязки: имя видно в
+            # подвале — его и пишут ключом в [keys]
+            self.last_key = key
+            self._update_service()
+            return None
         hint = CONTROL_HINTS.get(key)
         if hint:
             self.last_key = hint

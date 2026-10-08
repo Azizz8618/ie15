@@ -8,8 +8,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ie15emu.charset import encode_koi7
 from ie15emu.keyboard import (DEFAULT_LAYOUT, KEY_BLINK, KEY_CMDSET,
-                              KEY_MODE, KEY_SEND,
-                              decode_key_bytes, key_to_bytes)
+                              KEY_MODE, KEY_SEND, decode_key_bytes,
+                              is_key_combo, key_to_bytes, normalize_combo)
+
+
+def test_csi_u_modifiers():
+    # kitty/foot/wezterm: «ESC [ код;мод u»; xterm modifyOtherKeys:
+    # «ESC [ 27;мод;код ~» — нажатие с Ctrl/Alt именуется и не дублирует
+    # обычный знак; без модификаторов — тот же знак, что и раньше
+    from ie15emu.keyboard import is_key_combo, normalize_combo
+    assert decode_key_bytes(b"\x1b[1073;5u") == ["ctrl+б"]
+    assert decode_key_bytes(b"\x1b[1073;3u") == ["alt+б"]
+    assert decode_key_bytes(b"\x1b[27;5;91~") == ["ctrl+["]
+    assert decode_key_bytes(b"\x1b[1073u") == ["б"]
+    assert decode_key_bytes(b"a\x1b[1041;5uc") == ["a", "ctrl+Б", "c"]
+    # старые пути не тронуты; служебные keysym kitty (>=0xE000) — тоже
+    assert decode_key_bytes(b"\x1b[A\x1b[15~\x1b[3~") == ["KEY_UP", "CLEAR",
+                                                           "KEY_DELETE"]
+    assert not is_key_combo("KEY_UP") and not is_key_combo("1+1")
+    assert normalize_combo("Б+Ctrl") == normalize_combo("Ctrl+Б") == "ctrl+Б"
 
 
 def test_plain_chars():

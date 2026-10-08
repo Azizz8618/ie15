@@ -261,6 +261,77 @@ SEQ_KEYS = {
 _SEQ_LEN = sorted({len(seq) for seq in SEQ_KEYS}, reverse=True)
 
 
+# Имена модификаторов в привязках [keys] (канонический порядок имён)
+_COMBO_MODS = ("ctrl", "alt", "shift")
+
+
+def _combo_name(code: int, mask: int) -> str | None:
+    """Имя нажатия «модификаторы+знак» по кодовому знаку и маске
+    (kitty: shift=1 alt=2 ctrl=4; xterm modifyOtherKeys: shift=1 ctrl=4
+    alt=8 — маска уже приведена вызывающим). Без модификаторов — сам
+    знак; служебные коды (<0x20) не именуются (их ведут старые пути)."""
+    if code < 0x20 or 0xD800 <= code <= 0xDFFF or code >= 0xE000:
+        return None            # УП, суррогаты и служебные keysym kitty —
+                               # ведут старые пути (стрелки, клавиши редактора)
+    parts = [m for m, bit in (("ctrl", 4), ("alt", 2), ("shift", 1))
+             if mask & bit]
+    parts.append(chr(code))
+    return "+".join(parts) if len(parts) > 1 else chr(code)
+
+
+def _parse_csi_u(data: bytes, i: int):
+    """Разбор клавишных последовательностей с модификаторами:
+    kitty/foot/wezterm `ESC [ код[:доп] ; модификатор u` и
+    xterm modifyOtherKeys `ESC [ 27 ; модификатор ; код ~`.
+
+    Возвращает (имя,consumed) или (None, 0)."""
+    j = data.find(b"[", i)
+    if j != i + 1:
+        return None, 0
+    ends = [p for p in (data.find(b"u", j + 1), data.find(b"~", j + 1)) if p >= 0]
+    k = min(ends) if ends else -1
+    if k < 0 or k - j > 16:
+        return None, 0
+    term = data[k]
+    body = data[j + 1:k]
+    try:
+        toks = [t.split(b":")[0] for t in body.split(b";")]
+        nums = [int(t) if t else 1 for t in toks]
+    except ValueError:
+        return None, 0
+    if term == 0x7E:                       # '~': только форма xterm 27;м;код
+        if len(nums) != 3 or nums[0] != 27:
+            return None, 0
+        mask = (nums[1] - 1) & 0b1101        # xterm: shift=1 ctrl=4 alt=8
+        mask = (mask & 1) | (mask & 4) | ((mask & 8) >> 2)
+        return _combo_name(nums[2], mask), k + 1 - i
+    if len(nums) == 1:
+        return _combo_name(nums[0], 0), k + 1 - i
+    if len(nums) == 2:                     # kitty: код;модификаторы
+        return _combo_name(nums[0], (nums[1] - 1) & 7), k + 1 - i
+    return None, 0
+
+
+def is_key_combo(key: str) -> bool:
+    """Имя нажатия «ctrl/alt/shift+знак» (из _combo_name)."""
+    parts = key.split("+")
+    return len(parts) >= 2 and all(p in _COMBO_MODS for p in parts[:-1]) \
+        and len(parts[-1]) == 1
+
+
+def normalize_combo(s: str) -> str:
+    """Привязка из конфига к каноническому имени: модификаторы в любом
+    порядке и регистре («Б+Ctrl» и «Ctrl+Б» → «ctrl+Б»); сам знак
+    сохраняется как есть — терминал присылает сдвинутую клавишу своим
+    кодовым знаком, точное имя незакрытого нажатия видно в подвале."""
+    parts = s.split("+")
+    mods = {p.lower() for p in parts if p.lower() in _COMBO_MODS}
+    rest = "+".join(p for p in parts if p.lower() not in _COMBO_MODS)
+    if not mods or not rest:
+        return s
+    return "+".join([m for m in _COMBO_MODS if m in mods] + [rest])
+
+
 def decode_key_bytes(data: bytes) -> list[str]:
     """Распарсить байты нажатий в имена клавиш/символы для feed_key().
 
@@ -281,6 +352,11 @@ def decode_key_bytes(data: bytes) -> list[str]:
             i += 1
             continue
         if b == 0x1B:
+            name, adv = _parse_csi_u(data, i)
+            if name:                       # нажатие с модификаторами (CSI-u)
+                out.append(name)
+                i += adv
+                continue
             matched = False
             for ln in _SEQ_LEN:
                 seq = data[i:i + ln]

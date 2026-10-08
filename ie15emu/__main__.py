@@ -48,13 +48,15 @@ def load_conf(path: str | None = None) -> configparser.ConfigParser:
 def keymap_from_conf(cp: configparser.ConfigParser) -> dict[str, str]:
     """Переназначение клавиш из [keys]: «что прислал терминал = что
     набирать». Ключ/значение — знак, строка, KEY-имя или код «\\xNN»
-    (УП от Ctrl+клавиша); пустое значение гасит клавишу. Знак «=»
-    ключом не выразить (разделитель ini)."""
+    (УП от Ctrl+клавиша); пустое значение гасит клавишу. Если терминал
+    говорит по CSI-u (kitty/foot/wezterm/xterm modifyOtherKeys), ключом
+    бывает и нажатие с модификатором: «ctrl+Б = <» — тогда сочетания
+    не дублируют обычные знаки. Знак «=» ключом не выразить."""
     if not cp.has_section("keys"):
         return {}
-    from .keyboard import unescape_key
-    return {unescape_key(k): unescape_key(v)
-            for k, v in cp.items("keys") if k != "escape"}
+    from .keyboard import normalize_combo, unescape_key
+    return {normalize_combo(unescape_key(k)): unescape_key(v)
+            for k, v in cp.items("keys")}
 
 
 def line_url_from_conf(cp: configparser.ConfigParser) -> str | None:
@@ -240,10 +242,25 @@ def run_line(parser: Parser, url: str, png: str | None,
 
     fd = sys.stdin.fileno() if sys.stdin.isatty() else None
     old = termios.tcgetattr(fd) if fd is not None else None
+    csi_u = False
     if fd is not None:
         tty.setcbreak(fd)
         # экран собирается абсолютной позицией — настоящая каретка не нужен
         sys.stdout.write("\x1b[?25l")
+        # Опрос протокола CSI-u: kitty/foot/wezterm/alacritty отвечают
+        # «ESC [ ? флаги u» — тогда просим кодировать нажатия с
+        # модификаторами отдельно (ctrl+Б перестаёт дублировать знак)
+        try:
+            sys.stdout.buffer.write(b"\x1b[?u")
+            sys.stdout.buffer.flush()
+            if select.select([fd], [], [], 0.25)[0]:
+                probe = os.read(fd, 32)
+                if probe.startswith(b"\x1b[?") and probe.endswith(b"u"):
+                    sys.stdout.buffer.write(b"\x1b[>1u")
+                    sys.stdout.buffer.flush()
+                    csi_u = True
+        except OSError:
+            pass
     t0 = time.time()
     try:
         while seconds <= 0 or time.time() - t0 < seconds:
@@ -275,6 +292,8 @@ def run_line(parser: Parser, url: str, png: str | None,
         say(f"[линия] {e} — сеанс завершён")
     finally:
         if fd is not None:
+            if csi_u:
+                sys.stdout.write("\x1b[<1u")
             sys.stdout.write("\x1b[?25h")
         if old is not None and fd is not None:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)

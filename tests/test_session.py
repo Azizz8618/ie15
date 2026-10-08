@@ -69,6 +69,16 @@ def test_keymap_remaps_before_nabor_rules():
     # и служебные клавиши переназначаемы: SEND как знак
     session.keymap = {"SEND": "\x13"}
     assert session.feed_key("SEND") == b"\x13"
+    # CSI-u имена: привязка «ctrl+б = <» работает без дублей обычных
+    # знаков; незакрытое сочетание показывает своё имя в подвале —
+    # именно его пишут ключом в [keys]
+    session.keymap = {"ctrl+б": "<"}
+    assert session.feed_key("ctrl+б") == b"<"
+    assert session.feed_key("б") == bytes([0x82])   # та же клавиша без
+                                                    # Ctrl — русская Б
+    assert session.feed_key("ctrl+х") is None
+    sc = session.parser.screen
+    assert "ctrl+х" in "\n".join(["".join(sc.service)] + sc.service_more)
 
 
 def test_host_mode_sends_immediately():
