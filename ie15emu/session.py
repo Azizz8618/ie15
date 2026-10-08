@@ -60,6 +60,11 @@ class TerminalSession:
         # раскладку по умолчанию (позиционную).
         if layout is None and koi7:
             layout = DEFAULT_LAYOUT
+        # инвариант клавиатуры Н1 (тот же, что у сеттера nabor): раскладка
+        # живёт только в Н1 — в Н0/Н2 её нет, иначе позиционная таблица
+        # съедала бы знаки международной строки при старте с config
+        if getattr(parser.screen, "display_set", "n2") != "n1":
+            layout = None
         self.layout = layout
         # переназначение из [keys] конфига: клавиша → знак/строка/KEY_имя
         self.keymap = keymap or {}

@@ -219,7 +219,9 @@ def key_to_bytes(key: str, layout: str | None = None,
         # строчная латинская без Shift — верх международной строки:
         # на линии Н2 строка 0x60.. занята кириллицей ЭВМ, строчной
         # латиницы в одно-регистрном наборе нет
-        return ch.upper().encode("ascii")
+        if ch.upper().isascii():
+            return ch.upper().encode("ascii")
+        # не-ASCII вне кириллицы (AltGr-акценты и т.п.) — ниже в «?»
     return ch.encode("ascii", errors="replace")
 
 
