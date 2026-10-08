@@ -29,6 +29,23 @@ def test_csi_u_modifiers():
     assert normalize_combo("Б+Ctrl") == normalize_combo("Ctrl+Б") == "ctrl+Б"
 
 
+def test_alt_prefix():
+    # Alt+знак как ESC-префикс (VTE и другие без CSI-u): именуется
+    # «alt+…», привязывается в [keys]; Esc перед «[»/«O» и одиночный
+    # Esc остаются как раньше
+    assert decode_key_bytes(b"\x1b\xd0\xb1") == ["alt+б"]
+    assert decode_key_bytes(b"\x1bA") == ["alt+A"]
+    assert decode_key_bytes(b"\x1b[") == ["KEY_ESC", "["]
+    assert decode_key_bytes(b"\x1bO") == ["KEY_ESC", "O"]
+    assert decode_key_bytes(b"\x1b\x1b") == ["KEY_ESC"]
+    assert decode_key_bytes(b"\x1b") == ["KEY_ESC"]
+    assert decode_key_bytes(b"\x1bd") == ["alt+d"]
+    # экранные команды клавиатурой отдаёт ключами (KEY_HOME и т.п.),
+    # поэтому слияние ESC+знак в alt+… их не ломает
+    assert decode_key_bytes(b"\x1b[A\x1b[H\x1b[3~") == ["KEY_UP", "KEY_HOME",
+                                                         "KEY_DELETE"]
+
+
 def test_plain_chars():
     assert decode_key_bytes(b"abc") == ["a", "b", "c"]
 

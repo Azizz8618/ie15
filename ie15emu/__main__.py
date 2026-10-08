@@ -261,6 +261,14 @@ def run_line(parser: Parser, url: str, png: str | None,
                     csi_u = True
         except OSError:
             pass
+        say("[клавиши] " + (
+            "CSI-u включён — Ctrl/Alt+клавиша приходит своим именем, "
+            "привязки вида «ctrl+Б = <» работают без дублей"
+            if csi_u else
+            "терминал не ответил на запрос CSI-u — Ctrl+кириллица может "
+            "приходить обычным знаком (неотличимо), Alt читается как "
+            "ESC+знак и именуется «alt+…»; что прислала клавиша — видно "
+            "в подвале (ПОСЛ), этим и привязывают в [keys]"))
     t0 = time.time()
     try:
         while seconds <= 0 or time.time() - t0 < seconds:

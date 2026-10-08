@@ -81,6 +81,27 @@ def test_keymap_remaps_before_nabor_rules():
     assert "ctrl+х" in "\n".join(["".join(sc.service)] + sc.service_more)
 
 
+def test_key_diagnostics_in_footer():
+    # Диагностика: в подвале видно каждое нажатие — знак с кодом, имя с
+    # модификатором и результат переназначения («ctrl+б→< U+003C»)
+    session, _ = make_session(MODE_HOST)
+
+    def posl():
+        sc = session.parser.screen
+        return "\n".join(["".join(sc.service)] + sc.service_more)
+
+    session.feed_key("б")
+    assert "б U+0431" in posl()
+    session.feed_key("^")
+    assert "^ U+005E" in posl()
+    session.keymap = {"ctrl+б": "<"}
+    session.feed_key("ctrl+б")
+    assert "ctrl+б→< U+003C" in posl()
+    session.keymap = {"alt+х": ""}
+    session.feed_key("alt+х")
+    assert "alt+х→гашение" in posl()
+
+
 def test_host_mode_sends_immediately():
     session, link = make_session(MODE_HOST)
     out = session.feed_key("A")     # Н2 + латинская раскладка: Shift+A — «Ф»

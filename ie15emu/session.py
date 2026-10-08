@@ -164,26 +164,34 @@ class TerminalSession:
 
         keymap (секция [keys] конфига) применяется до правил набора:
         нажатие заменяется знаком/строкой/KEY-именем, пустое значение
-        гасит клавишу. Неизвестный УП показывается кодом в подвале
-        («ПОСЛ: УП 18») — по нему и пишут привязку в [keys].
+        гасит клавишу. В подвале показывается ВСЁ нажатие: знак с
+        кодом («б U+0431»), УП («УП 18»), имя с модификатором
+        («ctrl+б U+0431») и результат переназначения («ctrl+б→<») —
+        по этим строкам и пишут привязки в [keys].
         """
+        orig = key
         if key in self.keymap:
             key = self.keymap[key]
             if not key:
+                self.last_key = f"{orig}→гашение"
                 self._update_service()
                 return None
-        if is_key_combo(key):
-            # нажатие с Ctrl/Alt/Shift (CSI-u) без привязки: имя видно в
-            # подвале — его и пишут ключом в [keys]
-            self.last_key = key
-            self._update_service()
-            return None
+        arrow = "" if orig == key else f"{orig}→"
         hint = CONTROL_HINTS.get(key)
         if hint:
-            self.last_key = hint
+            self.last_key = arrow + hint
             self._update_service()
         elif len(key) == 1 and ord(key) < 0x20:
-            self.last_key = f"УП {ord(key):02X}"
+            self.last_key = arrow + f"УП {ord(key):02X}"
+            self._update_service()
+        elif is_key_combo(key):
+            # нажатие с Ctrl/Alt/Shift без привязки: точное имя — в
+            # подвал, его и пишут ключом в [keys]; в линию не уходит
+            self.last_key = f"{key} U+{ord(key.rsplit('+', 1)[-1]):04X}"
+            self._update_service()
+            return None
+        elif len(key) == 1:
+            self.last_key = arrow + f"{key} U+{ord(key):04X}"
             self._update_service()
         if key == "KEY_PAGEUP":
             self.parser.screen.scroll_view(-self.parser.screen._view_h + 1)

@@ -365,7 +365,32 @@ def decode_key_bytes(data: bytes) -> list[str]:
                     i += ln
                     matched = True
                     break
-            if not matched:                # одиночный ESC
+            if not matched:
+                # Alt+знак: терминалы (в т.ч. VTE без CSI-u) присылают
+                # Alt как ESC-префикс перед знаком; ESC перед «[»/«O»
+                # и одиночный ESC остаются клавишей Esc как раньше
+                nxt = data[i + 1:i + 2]
+                ln = 0
+                if nxt:
+                    c = nxt[0]
+                    if 0x20 <= c <= 0x7E and c not in (0x5B, 0x4F):
+                        ln = 1
+                    elif 0xC2 <= c < 0xE0:
+                        ln = 2
+                    elif 0xE0 <= c < 0xF0:
+                        ln = 3
+                    elif 0xF0 <= c < 0xF8:
+                        ln = 4
+                if ln and i + 1 + ln <= n:
+                    chunk = data[i + 1:i + 1 + ln]
+                    try:
+                        ch = chunk.decode("utf-8")
+                    except UnicodeDecodeError:
+                        ch = ""
+                    if len(ch) == 1 and ord(ch) >= 0x20:
+                        out.append("alt+" + ch)
+                        i += 1 + ln
+                        continue
                 out.append("KEY_ESC")
                 i += 1
             continue
