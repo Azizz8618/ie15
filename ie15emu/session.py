@@ -14,10 +14,14 @@
 """
 from __future__ import annotations
 
+import re
+import time
+
 from . import COLS, ROWS
 from .charset import (koi7_display_upper, koi7_raw_upper,
                       normalize_incremental, to_line)
 from .keyboard import DEFAULT_LAYOUT, is_key_combo, key_to_bytes
+from .screen import HELP, RULE, mk
 
 MODE_LOCAL = "local"      # «АВТОНОМНО»
 MODE_HOST = "host"        # «С ЭВМ»
@@ -45,6 +49,33 @@ CONTROL_HINTS = {
 LAYOUT_LABELS = {"phonetic": "ФОН", "positional": "ПОЗ"}
 
 WHEEL_STEP = 3       # рядов выдачи на щелчок колеса мыши
+
+
+# Баннер tmxr/telnet SIMH: «CONNECTED TO THE PDP-11/70 SIMULATOR TTY
+# DEVICE, LINE 3», «ENCODING IS RAW», «WRU …», дата-время, «From 10.0.0.1».
+# Он идёт в строку состояния над кадром, а не в кадр ЭВМ.
+BANNER_LINE = re.compile(
+    rb"simulator\s+tty\s+device"           # … TTY DEVICE, LINE N
+    rb"|encoding\s+is\s+\S+"               # … RAW / UTF-8 / KOI-7
+    rb"|connected\s+to\s+dks"              # тип линии ДКС
+    rb"|prompt\s+character"                # приглашение терминала
+    rb"|^\s*wru\b"                          # ответ на WRU
+    rb"|^\s*\w{3}\s+\w{3}\s+\d{1,2}\s+\d\d:\d\d:\d\d\s+\d{4}"   # дата
+    rb"|\bfrom\s+\d{1,3}(?:\.\d{1,3}){3}",                       # From IP
+    re.IGNORECASE)
+BANNER_LINE_NO = re.compile(rb"TTY\s+DEVICE,\s*LINE\s+(\d+)", re.IGNORECASE)
+BANNER_MODE = ((rb"raw", "RAW"), (rb"utf-?8", "UNICODE"),
+               (rb"koi-?7", "JCUKEN"), (rb"jcuken", "JCUKEN"))
+# начала служебных строк баннера: по ним решаем, стоит ли ждать перевода
+# строки (если не начинается на них — это уже выдача ЭВМ, отдаём сразу)
+BANNER_HEADS = (b"connected", b"encoding", b"wru", b"prompt", b"from",
+                b"sun", b"mon", b"tue", b"wed", b"thu", b"fri", b"sat")
+
+
+def _banner_open(line: bytes) -> bool:
+    """Похоже ли начало строки на начало строки баннера."""
+    low = line.strip().lower()
+    return not low or any(h.startswith(low) for h in BANNER_HEADS)
 
 
 class TerminalSession:
@@ -85,7 +116,17 @@ class TerminalSession:
         self.last_key = ""           # последняя управляющая клавиша (панель)
         self._carry = b""            # незавершённый хвост UTF-8 из линии
         self._sniff = b""            # окно поиска баннера
+        # строка состояния линии (над кадром, в кадр не входит)
+        self.line_type = ""          # КВУ | ДКС — по баннеру «Connected to DKS»
+        self.line_no: int | None = None      # «TTY DEVICE, LINE N»
+        self.line_mode = ""          # RAW | UNICODE | JCUKEN
+        self.machine = ""            # номер ЭВМ (из конфига, пусто — не показываем)
+        self.peer = ""               # адрес, с которого пришли («From …»)
+        self.banner_seen = False     # баннер линии («CONNECTED TO …») пришёл
+        self._banner_tail = b""      # недобранная строка баннера
+        self._banner_done = False    # баннер закончился (пошли данные ЭВМ)
         self._update_service()
+        self._update_status()
 
     # --- режим ------------------------------------------------------
     def set_mode(self, mode: str) -> None:
@@ -124,43 +165,60 @@ class TerminalSession:
         self.layout = self.default_layout if value == "n1" else None
         self.koi7 = value == "n1"
 
+    def _flag_style(self, value: str) -> str:
+        """Цвет значения состояния: включено — зелёный, выключено — красный."""
+        if value == "ВКЛ":
+            return "on"
+        if value == "ВЫКЛ":
+            return "off"
+        return "state"
+
     def _update_service(self) -> None:
-        # Подвал: сегмент строк состояния — выше отделительной черты,
-        # справочные ряды «ФУНКЦИЯ=клавиша» — ниже; последняя нажатая
-        # клавиша — в конце сегмента состояния.
+        # Подвал — ячейки «метка=значение» в ровных колонках; между группами
+        # пустая ячейка (конец группы → перенос и черта). Значения состояния
+        # выделены цветом (ВКЛ — зелёный, ВЫКЛ — красный), группы легенды —
+        # своим цветом: F-клавиши в верхнем ряду по порядку F5…F10, сочетания
+        # с Ctrl («УПР») и правка (ДОМ/КОНЕЦ/ВСТАВКА/УДАЛИТЬ) — отдельно.
+        # Подвал занимает минимум рядов, остальное место окна — кадру ЭВМ.
         sc = self.parser.screen
         host = self.mode == MODE_HOST
         lay = ("ВЫКЛ" if not self.layout
                else LAYOUT_LABELS.get(self.layout, self.layout.upper()))
-        # все ряды подвала — по четыре колонки равной ширины (17 знаков):
-        # « | » стоят на одних позициях во всех рядах (4*17+3*3 = 77)
-        W = 17
+        def st(label, value):              # «МЕТКА=значение» с цветом значения
+            return mk(label, (value, self._flag_style(value)))
 
-        def row(*fields):
-            return " | ".join(f.ljust(W) for f in fields).rstrip()
-
-        state1 = row("СЕТЬ=" + ("С ЭВМ" if host else "АВТОНОМНО"),
-                     "НАБОР=" + self.NABOR_LABELS[self.nabor],
-                     LINE_LABELS.get(self.encoding,
-                                     f"ЛИНИЯ={self.encoding}"),
-                     "РАСК=" + lay)
-        state2 = row("ЭХО=" + ("ВКЛ" if self.echo else "ВЫКЛ"),
-                     "ВИДЕО=" + ("ИНВ" if sc.inverse else "НОРМ"),
-                     "БУФЕР=" + (str(len(self.buffer)) if self.buffer
-                                 else "ПУСТО"),
-                     "УПР.СИМВ=" + ("ВКЛ" if self.parser.show_ctrl
-                                    else "ВЫКЛ"))
-        state3 = row(f"ПОСЛ: {self.last_key}" if self.last_key else "ПОСЛ:")
-        keys1 = row("ВК=Bksp", "ТАБ=Tab", "ЗВН=Ctrl-G", "ПРПС=Enter")
-        keys2 = row("ESC=Esc", "КУРСОР=Стрелки", "ДОМ=Home", "СТЕРСТР=End")
-        keys3 = row("СЛОВО=Ctrl+→", "СЛОВО=Ctrl+←", "НАЧСТР=Ctrl+↑",
-                    "НИЖСТР=Ctrl+↓")
-        keys4 = row("ЭКРАН↑=PgUp", "ЭКРАН↓=PgDn", "ИНВЕРС=Ins", "НОРМ=Del")
-        keys5 = row("ЭХО=F6", "УПР.СИМВ=F7", "НАБОР=F8", "СЕТЬ=F9")
-        keys6 = row("ПЕРЕДАЧА=F10", "ОЧИСТКА=F5")
-        sc.set_service("\n".join([state1, state2, state3, "-" * COLS,
-                                  keys1, keys2, keys3, keys4, keys5,
-                                  keys6]))
+        line = LINE_LABELS.get(self.encoding, f"ЛИНИЯ={self.encoding}")
+        state = [
+            st("СЕТЬ=", "С ЭВМ" if host else "АВТОНОМНО"),
+            st("НАБОР=", self.NABOR_LABELS[self.nabor]),
+            st("ЛИНИЯ=", line.split("=", 1)[-1]),
+            st("РАСК=", lay),
+            st("ЭХО=", "ВКЛ" if self.echo else "ВЫКЛ"),
+            st("ВИДЕО=", "ИНВ" if sc.inverse else "НОРМ"),
+            st("БУФЕР=", str(len(self.buffer)) if self.buffer else "ПУСТО"),
+            st("УПР.СИМВ=", "ВКЛ" if self.parser.show_ctrl else "ВЫКЛ"),
+            mk("ПОСЛ: ", (self.last_key, "last")),
+            RULE,                                 # состояние от справки
+            HELP,                                 # дальше — справка (можно убрать)
+            # F-клавиши — верхним рядом справки, по порядку F5…F10
+            mk(("ОЧИСТКА=F5", "fkey")), mk(("ЭХО=F6", "fkey")),
+            mk(("УПР.СИМВ=F7", "fkey")), mk(("НАБОР=F8", "fkey")),
+            mk(("СЕТЬ=F9", "fkey")), mk(("ПЕРЕДАЧА=F10", "fkey")),
+            "",                                   # конец группы F-клавиш
+            # прочая клавиатура терминала
+            mk("ВК=Bksp"), mk("ТАБ=Tab"), mk("ЗВН=Ctrl-G"), mk("ПРПС=Enter"),
+            mk("ESC=Esc"), mk("КУРСОР=Стрелки"),
+            mk("ЭКРАН↑=PgUp"), mk("ЭКРАН↓=PgDn"),
+            "",                                   # конец группы клавиатуры
+            # сочетания с Ctrl («УПР») — отдельной группой
+            mk(("СЛОВО=Ctrl+→", "ctrl")), mk(("СЛОВО=Ctrl+←", "ctrl")),
+            mk(("НАЧСТР=Ctrl+↑", "ctrl")), mk(("НИЖСТР=Ctrl+↓", "ctrl")),
+            "",                                   # конец группы Ctrl
+            # правка текста — отдельной группой
+            mk(("ДОМ=Home", "edit")), mk(("СТЕРСТР=End", "edit")),
+            mk(("ИНВЕРС=Ins", "edit")), mk(("НОРМ=Del", "edit")),
+        ]
+        sc.set_panel(state, wide=[state[-9]])   # «ПОСЛ» — длинная, свой ряд
 
     # --- клавиатура -------------------------------------------------
     def feed_key(self, key: str) -> bytes | None:
@@ -344,7 +402,7 @@ class TerminalSession:
         текст заново — без дублирования внахлёст."""
         if self._echo_top is None:
             return
-        y_end = min(self.parser.screen.y, ROWS - 1)
+        y_end = min(self.parser.screen.y, self.parser.screen.rows - 1)
         top = min(self._echo_top, y_end)   # блок мог убежать при скролле
         cmd = bytearray()
         for y in range(top, y_end + 1):
@@ -388,6 +446,113 @@ class TerminalSession:
         else:
             self._echo_pending += data
 
+    def _strip_banner(self, data: bytes) -> bytes:
+        """Убрать служебные строки баннера из приёма линии.
+
+        Баннер tmxr/telnet («CONNECTED TO … TTY DEVICE, LINE 3»,
+        «ENCODING IS RAW», «WRU …», дата-время, «From …») показывается
+        в строке состояния над кадром, а в кадре ЭВМ занимал бы строки и
+        сбивал бы «чистый» первый экран.
+
+        Фильтр живёт только в начале сеанса: целые строки проверяются по
+        образцам баннера, а недобранная строка ждёт продолжения, только
+        если её начало похоже на начало служебной строки. Первая же
+        строка выдачи ЭВМ («Cmd> …», ответ ОС и т. п.) выключает фильтр —
+        дальше в кадр идёт всё как есть.
+        """
+        buf = self._banner_tail + data
+        self._banner_tail = b""
+        head, sep, tail = buf.rpartition(b"\n")
+        parts: list[bytes] = []
+        if sep:
+            kept = []
+            for raw in head.split(b"\n"):
+                if not raw.rstrip(b"\r"):
+                    continue          # пустая строка баннера — не «конец фазы»
+                if BANNER_LINE.search(raw.rstrip(b"\r")):
+                    continue
+                self._banner_done = True
+                kept.append(raw)
+            if kept:
+                parts.append(b"\n".join(kept) + b"\n")
+        if tail and (self._banner_done or not _banner_open(tail)):
+            parts.append(tail.rstrip(b"\r"))   # началось не «с баннера» — мимо
+            self._banner_done = True
+        elif tail:
+            self._banner_tail = tail            # дописываем следующим куском
+        return b"".join(parts)
+
+    def _parse_banner(self, data: bytes) -> None:
+        """Разобрать баннер линии: тип линии, номер терминала, режим."""
+        buf = self._sniff + data
+        self._sniff = buf[-200:]
+        changed = False
+        if not self.banner_seen and (
+                BANNER_LINE_NO.search(buf)
+                or re.search(rb"encoding\s+is\s+\S+", buf, re.IGNORECASE)
+                or b"Connected to DKS" in buf):
+            self.banner_seen = True
+            changed = True
+        if b"Connected to DKS" in buf:
+            if self.line_type != "ДКС":
+                self.line_type = "ДКС"
+                changed = True
+        m = BANNER_LINE_NO.search(buf)
+        if m:
+            no = int(m.group(1))
+            if no != self.line_no:
+                self.line_no = no
+                changed = True
+        for pat, label in BANNER_MODE:
+            if re.search(rb"encoding\s+is\s+" + pat, buf, re.IGNORECASE):
+                if self.line_mode != label:
+                    self.line_mode = label
+                    changed = True
+                break
+        m = re.search(rb"From\s+(\d{1,3}(?:\.\d{1,3}){3})", buf,
+                      re.IGNORECASE)
+        if m:
+            peer = m.group(1).decode("ascii")
+            if peer != self.peer:
+                self.peer = peer
+                changed = True
+        if not self.line_type:
+            self.line_type = "КВУ"        # tty без «Connected to DKS» — КВУ
+        if changed:
+            self._update_service()
+            self._update_status()
+
+    def _update_status(self) -> None:
+        """Собрать строку состояния линии над кадром.
+
+        Тип линии (КВУ/ДКС) и номер терминала — из баннера SIMH, канал —
+        фактический telnet-порт подключения, номер ЭВМ — из конфига
+        ([line] machine, пусто — не показываем), режим — объявленный
+        линией (raw / unicode / jcuken), справа — дата и время.
+        """
+        link = self.link
+        port = getattr(link, "line_port", None) or getattr(link, "port", None)
+        when = time.localtime()
+        cells = []
+        if getattr(link, "banner", False) and not self.banner_seen:
+            # сообщение о подключении так и не пришло — линия не «отошла»:
+            # показываем прямо в строке состоянии, в кадр не пишем
+            cells.append(mk(("ПРОВЕРЬ ЛИНИЮ!", "off")))
+        else:
+            cells.append(mk((self.line_type or "КВУ", "state")))
+        if self.machine:
+            cells.append(mk("ЭВМ=", (self.machine, "state")))
+        if self.line_no is not None:
+            cells.append(mk("ТЕРМ=", (str(self.line_no), "state")))
+        if port:
+            cells.append(mk("КАНАЛ=", (str(port), "state")))
+        if self.line_mode:
+            cells.append(mk("РЕЖИМ=", (self.line_mode, "state")))
+        cells.append(mk(f"{when.tm_mday:02d}.{when.tm_mon:02d}.{when.tm_year} "
+                        f"{when.tm_hour:02d}:{when.tm_min:02d}:"
+                        f"{when.tm_sec:02d}"))
+        self.parser.screen.set_status(cells)
+
     def _detect_encoding(self, data: bytes) -> None:
         """Кодировки приёма/передачи по баннеру линии SIMH.
 
@@ -428,6 +593,11 @@ class TerminalSession:
         if not data:
             return None
         self._detect_encoding(data)
+        self._parse_banner(data)
+        if not self._banner_done:          # баннер — в строку состояния
+            data = self._strip_banner(data)
+            if not data:
+                return None
         if self.rx_encoding == "raw":
             # RAW/ДКС-линия — байтовый канал ВТ-340: коды Н1 приходят как
             # есть (русская буква — 0x60.. или уже с битом алфавита 0x80..);

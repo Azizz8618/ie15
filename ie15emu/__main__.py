@@ -162,6 +162,17 @@ def apply_conf(ns, cp: configparser.ConfigParser):
         # мышь терминала отдана эмулятору: колесо листает «историю» выдачи
         # (циклической прокрутки нет); mouse = off — листает сам терминал
         ns.mouse = cp.getboolean("terminal", "mouse", fallback=True)
+    if not getattr(ns, "no_help", None):
+        # справка подвала (легенда клавиш) по умолчанию видна
+        ns.no_help = cp.getboolean("terminal", "help", fallback=True)
+    if not getattr(ns, "machine", None):
+        # номер ЭВМ в строке состояния над кадром (пусто — не показываем)
+        ns.machine = (cp.get("line", "machine", fallback="") or "").strip()
+    if not getattr(ns, "fit", None):
+        # fit = off (по умолчанию): окно не трогаем — кадр ЭВМ дотягивается
+        # до низа окна, подвал занимает минимум рядов; fit = on — эмулятор
+        # подгоняет окно ровно на «25 рядов кадра + подвал»
+        ns.fit = cp.getboolean("terminal", "fit", fallback=False)
     return ns
 
 
@@ -223,12 +234,15 @@ def _esc(data: bytes) -> None:
 
 
 def fit_rows(parser: Parser) -> int:
-    """Рядов «правильного масштаба»: кадр 25 + черта + ряды подвала.
+    """Рядов, на которые подгоняем окно при включённом «fit»: строка
+    состояния, черта и пустая строка над кадром, сам кадр 25 рядов, черта
+    и ряды подвала.
 
-    Именно столько окно терминала должно вмещать, чтобы кадр ЭВМ и подвал
-    занимали его целиком, без «запаса» рядов, куда выползает история.
+    По умолчанию окно не трогаем: кадр ЭВМ дотягивается до низа окна сам
+    (`Screen.set_rows`), а подвал занимает минимум рядов. «fit» нужен
+    только тем, кто хочет окно ровно под «железные» 25 рядов кадра.
     """
-    return ROWS + 2 + len(parser.screen.service_more)
+    return ROWS + 5 + len(parser.screen.service_more)
 
 
 class WindowFit:
@@ -311,7 +325,9 @@ def _install_winch(fit: WindowFit) -> None:
 def run_line(parser: Parser, url: str, png: str | None,
              seconds: float, feed: str | None, mode: str = "host",
              layout: str | None = None, keymap: dict[str, str] | None = None,
-             take_mouse: bool = True, **linkkw) -> None:
+             take_mouse: bool = True, take_fit: bool = False,
+             machine: str = "", show_help: bool = True,
+             **linkkw) -> None:
     import os
     import select
     import termios
@@ -326,6 +342,12 @@ def run_line(parser: Parser, url: str, png: str | None,
         return
     session = TerminalSession(parser, link=link, mode=mode, layout=layout,
                               keymap=keymap)
+    if machine:
+        session.machine = str(machine)   # номер ЭВМ — в строке состояния
+        session._update_status()
+    # справка (ряды-легенды подвала) — по желанию; нижняя строка
+    # состояния с полями сеанса остаётся в любом случае
+    parser.screen.set_help(show_help)
     say(f"[линия] {url} — подключено (режим: {mode})")
     say("[клавиши] ввод — в линию/буфер; F6 — ЭХО (пароль без вывода), "
         "F8 — РЕЖИМ (набор №1↔№2), F9 — АВТОНОМНО↔С ЭВМ, F10 — SEND, "
@@ -374,8 +396,10 @@ def run_line(parser: Parser, url: str, png: str | None,
             "ESC+знак и именуется «alt+…»; что прислала клавиша — видно "
             "в подвале (ПОСЛ), этим и привязывают в [keys]"))
     t0 = time.time()
+    last_stamp = 0.0
     fit = WindowFit()
-    _install_winch(fit)
+    if take_fit:                      # по умолчанию окно не трогаем:
+        _install_winch(fit)         # кадр сам дотягивается до низа окна
     dirty = True                         # первый кадр рисуем сразу
     try:
         while seconds <= 0 or time.time() - t0 < seconds:
@@ -397,11 +421,16 @@ def run_line(parser: Parser, url: str, png: str | None,
             if data:
                 session.handle_line_reply(data)
                 dirty = True
+            now = time.time()
+            if now - last_stamp >= 60:  # часы в строке состояния — раз в минуту
+                session._update_status()
+                last_stamp = now
+                dirty = True
             if dirty:
                 # «правильный масштаб»: окно ровно на кадр 25 + подвал;
                 # проверяем по символу от ЭВМ (и по нажатию) — сбитый
                 # масштаб шрифта возвращается сам
-                dirty = fit.restore(parser)
+                dirty = fit.restore(parser) if take_fit else False
                 sys.stdout.write(text_screen(parser))
                 sys.stdout.flush()
     except KeyboardInterrupt:
@@ -410,7 +439,8 @@ def run_line(parser: Parser, url: str, png: str | None,
         sys.stdout.write("\x1b[0m\r\n")
         say(f"[линия] {e} — сеанс завершён")
     finally:
-        fit.restore_saved()
+        if take_fit:
+            fit.restore_saved()
         if fd is not None:
             if mouse:
                 _esc(b"\x1b[?1006l\x1b[?1000l")
@@ -449,9 +479,16 @@ def text_screen(parser: Parser) -> str:
 
     sc = parser.screen
     try:
-        term_h = os.get_terminal_size().lines
+        term_w, term_h = os.get_terminal_size()
     except OSError:
-        term_h = 24
+        term_w, term_h = COLS, 24
+    # подвал тянется на всю ширину окна: ячеек в ряду больше — панель ниже
+    sc.set_panel_cols(term_w)
+    # верх окна: строка состояния линии, под ней черта и пустая строка —
+    # обе вне кадра ЭВМ; дальше кадр на всю оставшуюся высоту, внизу
+    # подвал с чертой: пустот не остаётся ни при каком размере окна
+    view_h = max(1, term_h - 3)
+    sc.set_rows(view_h - sc.panel_rows() - 1)
 
     def row_line(cells, attr, y=None):
         from .charset import display_char
@@ -477,21 +514,35 @@ def text_screen(parser: Parser) -> str:
 
     lines = [row_line(c, a) for c, a in sc.history]
     lines += [row_line(row, sc.attr[y], y) for y, row in enumerate(sc.cells)]
-    lines.append("-" * COLS)
-    lines.append("".join(sc.service).rstrip())
-    lines.extend(r.rstrip() for r in sc.service_more)
+    panel_n = sc.panel_rows() + 1       # ряды подвала + черта над ним
+    lines.append("-" * sc.panel_cols)     # черта подвала — на всю ширину окна
+    lines.extend(sc.panel_styled_rows())   # подвал с цветом значений и групп
     # окно просмотра (PgUp/PgDn): закреплённый сдвиг или авто-следование
     # за курсором; рисуем абсолютной позицией — в коротком окне ничего
     # не скроллится, верх поля всегда виден
-    sc._view_h = term_h
+    sc._view_h = view_h
     # верх окна — по sync_view_top: в следящем режиме кадр всегда с первого
-    # ряда (история над ним не выползает, даже если окно выше «25 строк +
-    # подвал»: иначе F5 «ОЧИСТКА» выглядел бы как «текст не стёрт, а уехал
-    # вверх»), в закреплённом (PgUp/PgDn) — по контенту, подвал внизу
-    top = sc.sync_view_top(term_h)
+    # ряда (история над ним не выползает), в закреплённом (PgUp/PgDn) — по
+    # контенту; остаток окна добираем пустыми рядами перед подвалом,
+    # чтобы подвал всегда стоял по нижней кромке экрана
+    top = sc.sync_view_top(view_h)
+    # окно меньше содержимого (кадр не может быть ниже 25 рядов) — в
+    # следящем режиме режем верх кадра, но не подвал: строку состояния и
+    # легенду резать нельзя; в закреплённом (PgUp/колесо) — как листали
+    if sc.view_top is None:
+        top = max(top, len(lines) - view_h)
+    view = lines[top:top + view_h]
+    if len(view) < view_h:
+        pad = view_h - len(view)
+        view = (view[:len(view) - panel_n] + [""] * pad +
+                view[len(view) - panel_n:])
     out = "\x1b[H\x1b[2J"
-    for i, ln in enumerate(lines[top:top + term_h]):
-        out += f"\x1b[{i + 1};1H{ln}"
+    # строка состояния линии, черта и пустая строка — вне кадра ЭВМ, в
+    # листание (PgUp/колесо) они не попадают
+    out += f"\x1b[1;1H{sc.status_line()}"
+    out += f"\x1b[2;1H{'-' * sc.panel_cols}\x1b[3;1H"
+    for i, ln in enumerate(view):
+        out += f"\x1b[{i + 4};1H{ln}"
     return out
 
 
@@ -547,6 +598,16 @@ def main(argv: list[str] | None = None) -> None:
                          "«историю» выдачи (циклической прокрутки нет); без "
                          "флага мышь остаётся терминалу (mouse = off в "
                          "конфиге)")
+    ap.add_argument("--machine", default=None,
+                    help="номер ЭВМ для строки состояния над кадром "
+                         "(в конфиге: [line] machine)")
+    ap.add_argument("--no-help", action="store_true", default=None,
+                    help="убрать из подвала ряды-справку (легенду клавиш); "
+                         "нижняя строка состояния остаётся")
+    ap.add_argument("--fit", action="store_true", default=None,
+                    help="подогнать окно терминала ровно на «25 рядов кадра + "
+                         "подвал» (по умолчанию окно не трогаем: кадр ЭВМ "
+                         "дотягивается до низа окна)")
     ap.add_argument("--version", action="version", version=__version__)
     args = ap.parse_args(argv)
     args = apply_conf(args, load_conf(args.conf))
@@ -573,6 +634,8 @@ def main(argv: list[str] | None = None) -> None:
         run_line(parser, args.line, args.png, args.seconds,
                  args.feed, mode=args.mode, layout=layout,
                  keymap=args.keymap, take_mouse=bool(args.mouse),
+                 take_fit=bool(args.fit), machine=args.machine or "",
+                 show_help=not bool(args.no_help),
                  password=args.password, keyfile=args.keyfile)
     else:
         run_script(parser, args.png)

@@ -19,7 +19,7 @@
 """
 from __future__ import annotations
 
-from . import COLS, ROWS
+from . import COLS
 from .charset import ALPHA_BIT
 from .screen import Screen
 
@@ -122,7 +122,7 @@ class Parser:
         if s == "esc_y2":
             row, col = self._esc_args[0] - 0x20, b - 0x20
             sc = self.screen
-            sc.y = max(0, min(row, ROWS - 1))
+            sc.y = max(0, min(row, sc.rows - 1))
             sc.x = max(0, min(col, COLS - 1))
             self.state = "raw"
             self._esc_args = []
@@ -152,7 +152,8 @@ class Parser:
         elif b == VT_RIGHT:              # 0x18 — курсор вправо
             self.screen.x = min(COLS - 1, self.screen.x + 1)
         elif b == VT_DOWN:               # 0x1A — курсор вниз (как ESC [ B)
-            self.screen.y = min(ROWS - 1, self.screen.y + 1)
+            self.screen.y = min(self.screen.rows - 1,
+                                   self.screen.y + 1)
         elif b == VT_ERASE:              # 0x1F — стирание экрана + «дом»
             self.screen.clear_all()
         elif b == VT_HOME:               # 0x0C — ДОМ: курсор в (0,0), не стирая
@@ -186,7 +187,7 @@ class Parser:
         elif b == ord("A"):
             sc.y = max(0, sc.y - 1)
         elif b == ord("B"):
-            sc.y = min(ROWS - 1, sc.y + 1)
+            sc.y = min(sc.rows - 1, sc.y + 1)
         elif b == ord("C"):
             sc.x = min(COLS - 1, sc.x + 1)
         elif b == ord("D"):

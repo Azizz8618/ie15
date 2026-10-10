@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -10,11 +11,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from ie15emu import ROWS
 from ie15emu.charset import RUS7, decode_koi7
 from ie15emu.parser import Parser
+from ie15emu.screen import RULE
 from ie15emu.session import MODE_HOST, MODE_LOCAL, TerminalSession
 from ie15emu.keyboard import KEY_MODE, KEY_SEND
 
 
 class FakeLink:
+    banner = True      # как у реальной линии: ждём баннер tmxr
+    port = 4202
+
     def __init__(self) -> None:
         self.sent: list[bytes] = []
 
@@ -26,6 +31,11 @@ def make_session(mode=MODE_LOCAL):
     link = FakeLink()
     session = TerminalSession(Parser(), link=link, mode=mode)
     return session, link
+
+
+def panel_text(sc) -> str:
+    """Весь подвал текстом: ряды состояний и легенды."""
+    return "\n".join(["".join(sc.service)] + sc.service_more)
 
 
 def test_local_mode_buffers_and_echoes():
@@ -62,7 +72,7 @@ def test_keymap_remaps_before_nabor_rules():
     out = session.feed_key("\x1c")          # пока без карты — уходит УП
     assert out == b"\x1c"
     sc = session.parser.screen
-    assert "УП 1C" in "\n".join(["".join(sc.service)] + sc.service_more)
+    assert "УП 1C" in panel_text(sc)
     session.keymap = {"\x1c": "[", "Б": "<", "\x02": ""}
     assert session.feed_key("\x1c") == b"["       # Н2: ASCII-знак как есть
     assert session.feed_key("Б") == b"<"
@@ -79,7 +89,7 @@ def test_keymap_remaps_before_nabor_rules():
                                                     # Ctrl — русская Б
     assert session.feed_key("ctrl+х") is None
     sc = session.parser.screen
-    assert "ctrl+х" in "\n".join(["".join(sc.service)] + sc.service_more)
+    assert "ctrl+х" in panel_text(sc)
 
 
 def test_key_diagnostics_in_footer():
@@ -89,7 +99,7 @@ def test_key_diagnostics_in_footer():
 
     def posl():
         sc = session.parser.screen
-        return "\n".join(["".join(sc.service)] + sc.service_more)
+        return panel_text(sc)
 
     session.feed_key("б")
     assert "б U+0431" in posl()
@@ -269,14 +279,17 @@ def test_service_panel_all_bits():
     session.feed_key("ECHO")
     assert "ЭХО=ВЫКЛ" in panel()
     session.feed_key("ECHO")
-    # колонки ровные: разделители « | » стоят на одних и тех же позициях
-    # во всех рядах легенды
-    k_rows = [l for l in rows() if "Bksp" in l or "Home" in l or "PgUp" in l
-              or "F8" in l]
-    cols = [l.index("|") for l in k_rows]
-    assert all(c == cols[0] for c in cols), cols
+    # подвал «растянут» по ширине окна, ячейки не рвутся, ряд не шире
+    # окна; колонки ровные: разделители « | » стоят на одних позициях
     for i, line in enumerate(rows()):
         assert len(line) <= 80, f"ряд {i} шире 80 ({len(line)})"
+    assert len(rows()) <= 10, rows()
+    cells = session.parser.screen.panel_cells()
+    for cell in cells:
+        if cell and cell not in panel():          # ячейка не разорвана
+            raise AssertionError(cell)
+    seps = [l.index("|") for l in rows() if "|" in l]
+    assert seps and all(p == seps[0] for p in seps), seps
     session.feed_key("KEY_END")                        # подсветка нажатия
     assert "ПОСЛ: END=ESCK" in panel()
     session.handle_line_reply(b"\x1bb")                # ESC b — инверсное
@@ -311,7 +324,7 @@ def test_default_rezhim2_vt52():
     session, _ = make_session(MODE_HOST)
     assert session.parser.mode == 2
     assert session.nabor == "n2"
-    assert "НАБОР=Н2" in "".join(session.parser.screen.service)
+    assert "НАБОР=Н2" in panel_text(session.parser.screen)
 
 
 def test_cmdset_key_toggles_rezhim():
@@ -319,7 +332,7 @@ def test_cmdset_key_toggles_rezhim():
     session.feed_key("CMDSET")                 # F8: Н2 → Н0 (ASCII)
     assert session.nabor == "n0" and session.parser.mode == 1
     assert session.parser.screen.display_set == "n0"
-    assert "НАБОР=Н0" in "".join(session.parser.screen.service)
+    assert "НАБОР=Н0" in panel_text(session.parser.screen)
     session.feed_key("CMDSET")                 # Н0 → Н1 (русские верх+низ)
     assert session.nabor == "n1" and session.parser.mode == 1
     assert session.parser.screen.display_set == "n1"
@@ -482,6 +495,169 @@ def test_mouse_wheel_scrolls_history_without_cycle():
     assert link.sent == []                           # в линию не уходит
 
 
+def test_panel_stretches_and_stays_compact():
+    # подвал тянется на всю ширину окна: шире — ниже панель, и окно
+    # терминала можно сделать ниже (больше места оператору)
+    sc = Parser().screen
+    cells = [f"ПОЛЕ{i}=значение" for i in range(12)]
+    sc.set_panel(cells)
+    assert sc.panel_cols == 80
+    narrow = sc.panel_rows()
+    sc.set_panel_cols(200)
+    assert sc.panel_cols == 200
+    assert sc.panel_rows() <= narrow
+    assert len(sc.service) == 200
+    text = "\n".join(["".join(sc.service)] + sc.service_more)
+    for c in cells:                       # ячейки не рвутся
+        assert c in text
+    assert all(len(r) == 200 for r in sc.service_more)
+    with sc.panel_width(80):              # PNG/дамп всегда шириной кадра
+        assert sc.panel_cols == 80
+    assert sc.panel_cols == 200
+    # группа, влезающая в остаток ряда, дописывается в него
+    sc.set_panel(["СЕТЬ=С ЭВМ", "", "ВК=Bksp", "ТАБ=Tab"])
+    assert sc.panel_rows() == 1
+    assert "ВК=Bksp" in "".join(sc.service)
+    # не влезает в остаток — группа начинает новый ряд (сетка 80 знаков)
+    sc.set_panel_cols(80)
+    many = [f"ПОЛЕ{i}=значение" for i in range(13)]
+    sc.set_panel(many + [""] + ["Х=1", "Х=2", "Х=3"])
+    assert sc.panel_rows() == 4, sc.panel_rows()
+    # RULE — отбивка чертой: ряд состояний всегда отдельно от справки
+    sc.set_panel(["СЕТЬ=С ЭВМ", RULE, "ВК=Bksp", "ТАБ=Tab"])
+    assert sc.panel_rows() == 3
+    assert sc.service_more[0] == "-" * sc.panel_cols
+
+
+def test_panel_colors_and_groups():
+    # значения состояния — цветом (ВКЛ зелёный, ВЫКЛ красный), группы
+    # справки — своими цветами и в своём порядке: F-клавиши (F5…F10) в
+    # верхнем ряду, сочетания с Ctrl и правка — отдельными группами
+    session, link = make_session(MODE_HOST)
+    sc = session.parser.screen
+    styled = sc.panel_styled_rows()
+    plain = [l.rstrip() for l in ["".join(sc.service)] + sc.service_more]
+
+    # значения: включено — зелёное, выключено — красное
+    all_styled = "\n".join(styled)
+    assert "\x1b[32mВКЛ\x1b[0m" in all_styled              # ЭХО=ВКЛ
+    session.feed_key("ECHO")
+    styled = sc.panel_styled_rows()
+    plain = [l.rstrip() for l in ["".join(sc.service)] + sc.service_more]
+    all_styled = "\n".join(styled)
+    assert "\x1b[31mВЫКЛ\x1b[0m" in all_styled             # ЭХО=ВЫКЛ
+    assert all_styled.count("\x1b[31mВЫКЛ\x1b[0m") >= 2    # ЭХО и УПР.СИМВ
+    assert "\x1b[96m" in all_styled                       # прочие значения
+
+    # группы справки: F-клавиши в верхнем ряду по порядку F5…F10
+    fkeys = [l for l in plain if "=F" in l]
+    assert "ОЧИСТКА=F5" in fkeys[0] and "ЭХО=F6" in fkeys[0]
+    order = []                          # F-клавиши в порядке чтения панели
+    off = 0
+    for l in plain:
+        for n in range(5, 11):
+            p = l.find(f"F{n}")
+            if p >= 0:
+                order.append((off + p, n))
+        off += len(l) + 1
+    assert [n for _, n in sorted(order)] == [5, 6, 7, 8, 9, 10], order
+    assert all("\x1b[93m" in l for l in
+               styled[plain.index(fkeys[0])].split("|")[:5])  # группа F
+    # группа Ctrl и группа правки — отдельными рядами и своими цветами
+    ctrl = [i for i, l in enumerate(plain) if "Ctrl+" in l]
+    edit = [i for i, l in enumerate(plain) if "Home" in l or "СТЕРСТР" in l]
+    assert ctrl and edit and max(ctrl) < min(edit)
+    assert all("\x1b[95m" in styled[i] for i in ctrl)     # Ctrl — маджента
+    assert all("\x1b[94m" in styled[i] for i in edit)     # правка — синий
+    # в текстовых дампах и PNG цветов нет
+    assert all("\x1b" not in l for l in plain)
+    assert all("\x1b[" not in l for l in
+               ["".join(sc.service)] + sc.service_more)
+    # …и цветные ряды дают ту же сетку: видимый текст совпадает с дампом,
+    # разделители « | » стоят на одних позициях (регрессия: при выводе с
+    # цветами ячейка не добивалась пробелами — колонки «плыли»)
+    import re
+    visible = [re.sub(r"\x1b\[[0-9;]*m", "", l).rstrip()
+               for l in sc.panel_styled_rows()]
+    assert visible == plain, [v for v, p in zip(visible, plain) if v != p]
+    seps = {i for l in visible for i, ch in enumerate(l) if ch == "|"}
+    assert len(seps) == 3, seps
+    assert all(l.index("|") in seps for l in visible if "|" in l)
+
+
+def test_banner_goes_to_status_line_not_frame():
+    # баннер tmxr/telnet уходит в строку состояния над кадром, в кадре его
+    # нет; строка состояния вне кадра ЭВМ (в листание не попадает)
+    session, link = make_session(MODE_HOST)
+    link.banner = True
+    link.port = 4203
+    session.machine = "6"
+    session.handle_line_reply(
+        b"Connected to the PDP-11/70 simulator TTY device, line 3\r\n"
+        b"\r\nEncoding is RAW\r\n"
+        b"WRU \xd0\x92\xd0\x90\r\n"
+        b"Sun Oct 11 02:03:04 2026 From 127.0.0.1\r\n"
+        b"Cmd> ready\r\n")
+    frame = session.parser.screen.text().strip()
+    assert "READY" in frame or "ЕАДЫ" in frame       # выдача ЭВМ на месте
+    for junk in ("SIMULATOR", "WRU", "From", "10203"):
+        assert junk not in frame, junk
+    sc = session.parser.screen
+    status = re.sub(r"\x1b\[[0-9;]*m", "", sc.status_line()).rstrip()
+    assert session.line_type == "КВУ" and session.line_no == 3
+    assert session.line_mode == "RAW" and session.banner_seen is True
+    assert "ЭВМ=6" in status and "ТЕРМ=3" in status and "КАНАЛ=4203" in status
+    assert "РЕЖИМ=RAW" in status and status[:4] == "КВУ "
+    # дата-время в конце строки состояния: ДД.ММ.ГГГГ ЧЧ:ММ:СС
+    assert re.search(r"\d\d\.\d\d\.\d{4} \d\d:\d\d:\d\d$", status)
+    # баннер может прийти двумя кусками — фильтр не должен потерять выдачу
+    session2, link2 = make_session(MODE_HOST)
+    link2.banner, link2.port = True, 4202
+    for part in (b"Encoding is UTF-8\r\n", b"Cmd> go\r\n"):
+        session2.handle_line_reply(part)
+    assert "go" in session2.parser.screen.text().lower()
+    assert session2.line_mode == "UNICODE"
+
+
+def test_status_line_warns_when_no_banner():
+    # линия не «отошла» — сообщения о подключении нет: ПРОВЕРЬ ЛИНИЮ!
+    session, link = make_session(MODE_HOST)
+    link.banner = True
+    link.port = 4202
+    status = re.sub(r"\x1b\[[0-9;]*m", "",
+                    session.parser.screen.status_line()).rstrip()
+    assert status.startswith("ПРОВЕРЬ ЛИНИЮ!")
+    assert "КАНАЛ=4202" in status                      # канал известен сразу
+    session.handle_line_reply(b"Connected to DKS\r\n")
+    status = re.sub(r"\x1b\[[0-9;]*m", "",
+                    session.parser.screen.status_line()).rstrip()
+    assert status.startswith("ДКС") and "ПРОВЕРЬ ЛИНИЮ!" not in status
+    # у линии без баннера (stdio — отладка) предупреждения нет
+    session3, link3 = make_session(MODE_HOST)
+    link3.banner = False
+    session3._update_status()
+    st3 = session3.parser.screen.status_line()
+    assert "ПРОВЕРЬ ЛИНИЮ" not in re.sub(r"\x1b\[[0-9;]*m", "", st3)
+
+
+def test_help_rows_can_be_hidden():
+    # справку (ряды-легенды) можно убрать — нижняя строка состояния с
+    # полями сеанса остаётся в любом случае
+    session, _ = make_session(MODE_HOST)
+    sc = session.parser.screen
+    assert sc.show_help is True
+    assert "ОЧИСТКА=F5" in panel_text(sc) and "ДОМ=Home" in panel_text(sc)
+    sc.set_help(False)
+    panel = panel_text(sc)
+    for legend in ("ОЧИСТКА=F5", "ДОМ=Home", "СЛОВО=Ctrl+→", "ВК=Bksp"):
+        assert legend not in panel, legend
+    for state in ("СЕТЬ=", "НАБОР=", "ЭХО=", "УПР.СИМВ=", "ПОСЛ:"):
+        assert state in panel, state              # нижняя строка состояния
+    assert "-" * sc.panel_cols not in panel       # черта справки убрана
+    sc.set_help(True)                             # и возвращается обратно
+    assert "ОЧИСТКА=F5" in panel_text(sc)
+
+
 def test_history_keeps_scrolled_rows():
     # сошедшие с верхнего края кадра строки сохраняются в «историю»
     # (глубина настраивается), пустые — нет; PgUp доходит до первой
@@ -571,8 +747,7 @@ def test_echo_off_hides_password():
     session.handle_line_reply("ПАРОЛЬ? ".encode("utf-8"))
     assert "ПАРОЛЬ" in session.parser.screen.text()
     session.feed_key("ECHO")
-    assert "ЭХО=ВЫКЛ" in "\n".join(["".join(session.parser.screen.service)]
-                                    + session.parser.screen.service_more)
+    assert "ЭХО=ВЫКЛ" in panel_text(session.parser.screen)
     for ch in "root":
         session.emit(session.feed_key(ch))
     assert link.sent                                  # в линию ушло
@@ -622,12 +797,43 @@ def test_fit_rows_is_frame_plus_panel():
     from ie15emu.__main__ import fit_rows
     parser = Parser()
     parser.screen.set_service("СЕТЬ=АВТОНОМНО")
-    assert fit_rows(parser) == ROWS + 2               # черта + 1 ряд подвала
+    assert fit_rows(parser) == ROWS + 5       # статус+черта+пусто, черта, подвал
     parser.screen.set_service("СЕТЬ=АВТОНОМНО\nЭХО=ВКЛ\nВИДЕО=НОРМ")
-    assert fit_rows(parser) == ROWS + 2 + 2
-    # подвал сеанса: черта, 3 ряда состояния, черта, 6 рядов клавиш = 11
+    assert fit_rows(parser) == ROWS + 5 + 2
+    # подвал сеанса: ячейки в ровных колонках, рядов — минимум
     session, _ = make_session(MODE_HOST)
-    assert fit_rows(session.parser) == ROWS + 11
+    sc = session.parser.screen
+    assert fit_rows(session.parser) == ROWS + 5 + (sc.panel_rows() - 1)
+    assert sc.panel_rows() <= 12                     # 80 знаков
+    sc.set_panel_cols(120)                           # шире окно — ниже панель
+    assert sc.panel_rows() <= 9
+    assert fit_rows(session.parser) == ROWS + 5 + (sc.panel_rows() - 1)
+
+
+def test_frame_grows_to_window_and_panel_sits_at_bottom(monkeypatch):
+    # кадр ЭВМ дотягивается до низа окна: подвал занимает минимум рядов,
+    # остальное место окна — кадру; пустоты под подвалом не остаётся
+    import re
+    import ie15emu.__main__ as m
+    for width, height in ((80, 40), (80, 60), (120, 40)):
+        monkeypatch.setattr(m.os, "get_terminal_size",
+                            lambda w=width, h=height: os.terminal_size((w, h)))
+        session, _ = make_session(MODE_HOST)
+        sc = session.parser.screen
+        session.handle_line_reply(b"DKS 6: READY\r\n")
+        out = m.text_screen(session.parser)
+        # сверху — строка состояния линии (вне кадра), внизу — подвал
+        assert sc.rows == max(ROWS, height - sc.panel_rows() - 4), \
+            (width, height, sc.rows)
+        assert sc.rows + 3 + 1 + sc.panel_rows() == height  # окно занято целиком
+        # последняя отрисованная строка — последний ряд подвала
+        last = max(int(n) for n in re.findall(r"\x1b\[(\d+);1H", out))
+        assert last == height
+        last_row = out.split(f"\x1b[{height};1H", 1)[1]
+        assert "ДОМ=Home" in last_row          # последняя строка — конец справки
+        # строка состояния — первый ряд окна, в кадр ЭВМ не входит
+        first_row = out.split("\x1b[1;1H", 1)[1].split("\x1b[2;1H", 1)[0]
+        assert sc.status_line().strip() in first_row
 
 
 def test_window_fit_sends_resize_and_returns_after_data(monkeypatch):
@@ -642,7 +848,7 @@ def test_window_fit_sends_resize_and_returns_after_data(monkeypatch):
     fit = m.WindowFit()
     parser = Parser()
     assert fit.restore(parser) is True                # 1-я попытка
-    assert sent[-1] == b"\x1b[8;%d;%dt" % (ROWS + 2, 100)
+    assert sent[-1] == b"\x1b[8;%d;%dt" % (ROWS + 5, 100)
     # терминал размер не держит — после трёх попыток больше не просим
     for _ in range(2):
         fit.last = 0.0
@@ -655,7 +861,7 @@ def test_window_fit_sends_resize_and_returns_after_data(monkeypatch):
     # терминал держит размер: сброс масштаба (Ctrl-/+ или граница окна)
     # и приход символа от ЭВМ возвращают окно к правильному размеру
     sent.clear()
-    size[0] = os.terminal_size((100, 27))             # уже 25 + подвал
+    size[0] = os.terminal_size((100, ROWS + 5))      # уже 25 + шапка + подвал
     fit2 = m.WindowFit()
     fit2.saved = (100, 50)
     assert fit2.restore(parser) is False              # просить нечего
@@ -663,7 +869,7 @@ def test_window_fit_sends_resize_and_returns_after_data(monkeypatch):
     size[0] = os.terminal_size((100, 50))             # масштаб сбили вручную
     fit2.pending = True
     assert fit2.restore(parser) is True               # возврат к масштабу
-    assert sent[-1] == b"\x1b[8;%d;%dt" % (ROWS + 2, 100)
+    assert sent[-1] == b"\x1b[8;%d;%dt" % (ROWS + 5, 100)
 
 
 def test_restore_saved_window_on_exit(monkeypatch):

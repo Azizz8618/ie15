@@ -145,6 +145,8 @@ class TCPLink:
     закрывает сокет) и недоступный порт пропускаются, берётся следующий.
     """
 
+    banner = True       # ждём баннер tmxr («CONNECTED TO …»)
+
     def __init__(self, host: str, port, timeout: float = 5.0,
                  probe: float = 2.0):
         ports = parse_port_spec(port)
@@ -231,6 +233,8 @@ class SSHLink:
       direct-tcpip запрещён сервером.
     """
 
+    banner = True       # ждём баннер tmxr («CONNECTED TO …»)
+
     def __init__(self, host: str, port, user: str,
                  password: str | None = None, keyfile: str | None = None,
                  timeout: float = 10.0, probe: float = 3.0,
@@ -241,7 +245,6 @@ class SSHLink:
             raise LinkError("SSH-линия требует paramiko (pip install paramiko)") from e
         # port — число, список или спецификация («22», «2222,2223»):
         # перебор SSH-портов сервера/моста
-        ports = parse_port_spec(port)
         self.port = None
         self.line_port = None
         self._pending = b""
@@ -437,6 +440,8 @@ class SSHLink:
 
 class StdioLink:
     """Локальная линия: поток stdin/stdout (для отладки без сети)."""
+
+    banner = False      # баннера tmxr тут нет — «ПРОВЕРЬ ЛИНИЮ!» не показываем
 
     def __init__(self):
         import sys

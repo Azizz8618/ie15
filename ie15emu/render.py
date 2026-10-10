@@ -23,7 +23,7 @@ def to_ansi(screen: Screen, charset: Charset,
     out = []
     if green:
         out.append("\x1b[32;40m\x1b[2J\x1b[H")
-    for y in range(ROWS):
+    for y in range(screen.rows):
         for x in range(COLS):
             code = screen.glyph(y, x)
             a = screen.attr[y][x]
@@ -52,9 +52,9 @@ def _png_chunk(tag: bytes, data: bytes) -> bytes:
 
 
 def to_png_bytes(screen: Screen, charset: Charset, path: str) -> None:
-    w, h = COLS * 7 * SCALE, ROWS * 8 * SCALE
+    w, h = COLS * 7 * SCALE, screen.rows * 8 * SCALE
     rows = []
-    for y in range(ROWS):
+    for y in range(screen.rows):
         glyph_rows = [b"" for _ in range(8)]
         for x in range(COLS):
             code = screen.glyph(y, x)
@@ -86,15 +86,16 @@ def to_text(screen: Screen, charset: Charset | None = None) -> str:
         return screen.dump()
     sc = screen
     lines = []
-    for y in range(ROWS):
+    for y in range(sc.rows):
         lines.append("".join(charset.label(c) for c in sc.cells[y]))
     out = ["+" + "-" * COLS + "+"]
     for i, line in enumerate(lines):
         marker = "*" if i == sc.y else " "
         out.append(f"|{line}|{marker}")
     out.append("+" + "-" * COLS + "+")
-    out.append("|" + "".join(sc.service) + f"|  (служебная, стр. 25)")
-    for extra in sc.service_more:
-        out.append("|" + extra + "|")
+    with sc.panel_width(COLS):            # дамп всегда шириной кадра
+        out.append("|" + "".join(sc.service) + f"|  (служебная, стр. 25)")
+        for extra in sc.service_more:
+            out.append("|" + extra + "|")
     out.append(f"курсор: x={sc.x} y={sc.y} inverse={sc.inverse} bell={sc.bell}")
     return "\n".join(out)
