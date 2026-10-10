@@ -245,6 +245,7 @@ class SSHLink:
             raise LinkError("SSH-линия требует paramiko (pip install paramiko)") from e
         # port — число, список или спецификация («22», «2222,2223»):
         # перебор SSH-портов сервера/моста
+        ports = parse_port_spec(port)
         self.port = None
         self.line_port = None
         self._pending = b""

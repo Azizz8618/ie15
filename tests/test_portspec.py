@@ -10,7 +10,30 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from ie15emu.link import LinkError, TCPLink, parse_port_spec, spec_hint
+from ie15emu.link import (LinkError, SSHLink, StdioLink, TCPLink,
+                           open_link, parse_port_spec, spec_hint)
+
+
+def test_sshlink_parses_ports_like_tcp():
+    # регрессия: разбор портов в SSHLink потерялся — конструктор падал с
+    # NameError до первой попытки подключения. Проверяем, что перебор
+    # портов идёт и неудача честно объявляется LinkError.
+    pytest = __import__("pytest")
+    if pytest.importorskip("paramiko", reason="нужен paramiko") is None:
+        return
+    try:
+        SSHLink("127.0.0.1", "1,2-3", user="test", timeout=0.3)
+        raise AssertionError("ожидалась ошибка подключения")
+    except LinkError as e:
+        assert "1-3" in str(e)
+
+
+def test_link_banner_flags():
+    # баннер ждут у сетевых линий (нужен для «ПРОВЕРЬ ЛИНИЮ!»), у stdio —
+    # нет: там предупреждение не показывается
+    assert TCPLink.banner is True and SSHLink.banner is True
+    assert StdioLink.banner is False
+    assert open_link("stdio://").banner is False
 
 
 def test_parse():
