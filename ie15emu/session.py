@@ -188,6 +188,7 @@ class TerminalSession:
             return mk(label, (value, self._flag_style(value)))
 
         line = LINE_LABELS.get(self.encoding, f"ЛИНИЯ={self.encoding}")
+        last = mk("ПОСЛ: ", (self.last_key, "last"))
         state = [
             st("СЕТЬ=", "С ЭВМ" if host else "АВТОНОМНО"),
             st("НАБОР=", self.NABOR_LABELS[self.nabor]),
@@ -197,7 +198,7 @@ class TerminalSession:
             st("ВИДЕО=", "ИНВ" if sc.inverse else "НОРМ"),
             st("БУФЕР=", str(len(self.buffer)) if self.buffer else "ПУСТО"),
             st("УПР.СИМВ=", "ВКЛ" if self.parser.show_ctrl else "ВЫКЛ"),
-            mk("ПОСЛ: ", (self.last_key, "last")),
+            last,                                   # «ПОСЛ» — свой ряд
             RULE,                                 # состояние от справки
             HELP,                                 # дальше — справка (можно убрать)
             # F-клавиши — верхним рядом справки, по порядку F5…F10
@@ -218,7 +219,9 @@ class TerminalSession:
             mk(("ДОМ=Home", "edit")), mk(("СТЕРСТР=End", "edit")),
             mk(("ИНВЕРС=Ins", "edit")), mk(("НОРМ=Del", "edit")),
         ]
-        sc.set_panel(state, wide=[state[-9]])   # «ПОСЛ» — длинная, свой ряд
+        # «ПОСЛ» — длинная ячейка: всегда свой ряд и не влияет на ширину
+        # колонок, иначе сетка подвала скачет на каждом нажатии
+        sc.set_panel(state, wide=[last])
 
     # --- клавиатура -------------------------------------------------
     def feed_key(self, key: str) -> bytes | None:

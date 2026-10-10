@@ -432,7 +432,11 @@ class Screen:
 
         for rule, group in groups:
             if group:
-                fits = row and all(len(cell_text(c)) <= colw for c in group) \
+                # группа с широкой ячейкой («ПОСЛ») в остаток ряда не
+                # вписывается: она всегда идёт своим рядом, иначе высота
+                # подвала (а с ней и высота кадра) скачет от нажатия
+                fits = row and all(c not in wide for c in group) \
+                    and all(len(cell_text(c)) <= colw for c in group) \
                     and len(row) + len(group) <= cols
                 if fits:                     # дописываем в остаток ряда
                     row.extend(group)
@@ -441,7 +445,7 @@ class Screen:
                 else:
                     flush()
                     for c in group:
-                        if len(cell_text(c)) > colw:   # не влезла — ряд сам
+                        if c in wide or len(cell_text(c)) > colw:  # ряд сам
                             flush()
                             rows.append([c])
                             continue

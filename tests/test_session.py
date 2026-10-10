@@ -658,6 +658,36 @@ def test_help_rows_can_be_hidden():
     assert "ОЧИСТКА=F5" in panel_text(sc)
 
 
+def test_panel_grid_stable_while_values_change():
+    # сетка подвала (ширина колонки, число рядов, позиции « | ») не должна
+    # скакать из-за меняющихся значений — в первую очередь «ПОСЛ: …»
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+
+    def sig():
+        rows = ["".join(sc.service)] + sc.service_more
+        seps = {i for l in rows for i, ch in enumerate(l) if ch == "|"}
+        return sc._panel_colw, len(rows), tuple(sorted(seps))
+
+    base = sig()
+    for key in ("a", "KEY_CTRLLEFT", "KEY_PAGEDOWN", "Б", "KEY_END",
+                "KEY_WHEELUP", "F6", "F7", "F8"):
+        session.feed_key(key)
+        assert sig() == base, (key, sig(), base)
+    for _ in range(40):                      # буфер набора растёт
+        session.feed_key("x")
+    assert sig() == base, sig()
+    # длинное имя нажатия (переназначение клавиши видно в подвале) — тоже
+    session.last_key = "ctrl+б→< U+003C"
+    session._update_service()
+    assert sig() == base, sig()
+    assert "ПОСЛ: ctrl+б→< U+003C" in panel_text(sc)
+    assert panel_text(sc).splitlines()[2].strip() == "ПОСЛ: ctrl+б→< U+003C"
+    # смена ширины окна пересобирает сетку — это ожидаемо
+    sc.set_panel_cols(120)
+    assert sig() != base and sig()[1] < base[1]     # панель ниже
+
+
 def test_history_keeps_scrolled_rows():
     # сошедшие с верхнего края кадра строки сохраняются в «историю»
     # (глубина настраивается), пустые — нет; PgUp доходит до первой
