@@ -8,8 +8,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ie15emu.charset import encode_koi7
 from ie15emu.keyboard import (DEFAULT_LAYOUT, KEY_BLINK, KEY_CMDSET,
-                              KEY_MODE, KEY_SEND, decode_key_bytes,
-                              is_key_combo, key_to_bytes, normalize_combo)
+                              KEY_MODE, KEY_SEND, KEY_WHEELDOWN, KEY_WHEELUP,
+                              decode_key_bytes, is_key_combo, key_to_bytes,
+                              normalize_combo)
+
+
+def test_mouse_sgr_wheel():
+    # мышь отдана приложению (SGR 1006): колесо — листание «истории»,
+    # клики и движение молча съедаются, в линию мусор не идёт
+    assert decode_key_bytes(b"\x1b[<64;10;5M") == [KEY_WHEELUP]
+    assert decode_key_bytes(b"\x1b[<65;10;5M") == [KEY_WHEELDOWN]
+    assert decode_key_bytes(b"\x1b[<64;10;5m") == []        # отпускание
+    assert decode_key_bytes(b"\x1b[<68;1;1M") == [KEY_WHEELUP]   # +shift
+    assert decode_key_bytes(b"\x1b[<81;1;1M") == [KEY_WHEELDOWN]  # +ctrl
+    assert decode_key_bytes(b"\x1b[<0;3;4M\x1b[<0;3;4m") == []    # клик
+    assert decode_key_bytes(b"\x1b[<32;1;1M") == []          # движение
+    assert decode_key_bytes(b"a\x1b[<64;1;1Mb") == ["a", KEY_WHEELUP, "b"]
+    # стрелки/функциональные после мышиных событий не пострадали
+    assert decode_key_bytes(b"\x1b[<64;1;1M\x1b[A") == [KEY_WHEELUP, "KEY_UP"]
 
 
 def test_csi_u_modifiers():

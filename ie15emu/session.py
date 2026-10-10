@@ -33,6 +33,7 @@ CONTROL_HINTS = {
     "KEY_UP": "UP=ESCA", "KEY_DOWN": "DOWN=ESCB", "KEY_RIGHT": "RGHT=ESCC",
     "KEY_LEFT": "LEFT=ESCD", "KEY_HOME": "HOME=ESCH", "KEY_END": "END=ESCK",
     "KEY_PAGEUP": "ЭКРАН↑", "KEY_PAGEDOWN": "ЭКРАН↓",
+    "KEY_WHEELUP": "КОЛЕСО↑", "KEY_WHEELDOWN": "КОЛЕСО↓",
     "KEY_INSERT": "INS=ESCb", "KEY_DELETE": "DEL=ESCc",
     "KEY_CTRLRIGHT": "СЛОВО=^→", "KEY_CTRLLEFT": "СЛОВО=^←",
     "KEY_CTRLUP": "СТРОКА=^↑", "KEY_CTRLDOWN": "СТРОКА=^↓",
@@ -42,6 +43,8 @@ CONTROL_HINTS = {
 
 
 LAYOUT_LABELS = {"phonetic": "ФОН", "positional": "ПОЗ"}
+
+WHEEL_STEP = 3       # рядов выдачи на щелчок колеса мыши
 
 
 class TerminalSession:
@@ -204,6 +207,14 @@ class TerminalSession:
             return None
         if key == "KEY_PAGEDOWN":
             self.parser.screen.scroll_view(self.parser.screen._view_h - 1)
+            self._update_service()
+            return None
+        if key in ("KEY_WHEELUP", "KEY_WHEELDOWN"):
+            # колесо мыши — то же листание «истории» выдачи, по три ряда
+            # за щелчок; вверх так же запрещено, пока не выдано больше
+            # одной страницы кадра (циклической прокрутки нет)
+            step = WHEEL_STEP * (-1 if key == "KEY_WHEELUP" else 1)
+            self.parser.screen.scroll_view(step)
             self._update_service()
             return None
         if key == "ECHO":

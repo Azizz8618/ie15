@@ -158,6 +158,10 @@ def apply_conf(ns, cp: configparser.ConfigParser):
                 nb = "n2"
         ns.nabor = nb
     ns.keymap = keymap_from_conf(cp)
+    if not getattr(ns, "mouse", None):
+        # мышь терминала отдана эмулятору: колесо листает «историю» выдачи
+        # (циклической прокрутки нет); mouse = off — листает сам терминал
+        ns.mouse = cp.getboolean("terminal", "mouse", fallback=True)
     return ns
 
 
@@ -211,10 +215,103 @@ def _drain_banner(session, timeout: float = 2.0) -> None:
             time.sleep(0.05)
 
 
+def _esc(data: bytes) -> None:
+    """Управляющая последовательность мимо текстового буфера stdout."""
+    sys.stdout.flush()
+    sys.stdout.buffer.write(data)
+    sys.stdout.buffer.flush()
+
+
+def fit_rows(parser: Parser) -> int:
+    """Рядов «правильного масштаба»: кадр 25 + черта + ряды подвала.
+
+    Именно столько окно терминала должно вмещать, чтобы кадр ЭВМ и подвал
+    занимали его целиком, без «запаса» рядов, куда выползает история.
+    """
+    return ROWS + 2 + len(parser.screen.service_more)
+
+
+class WindowFit:
+    """«Правильный масштаб» окна терминала: кадр 25 рядов + подвал.
+
+    Эмулятор просит у терминала размер текстового поля
+    (``CSI 8 ; высота ; ширина t`` — размер окна в знаках) и сверяет
+    результат по ioctl: терминал без этой последовательности запрос
+    проигнорирует — тогда перестаём просить (попытки считаются) и просто
+    рисуем кадр с подвалом от верхнего ряда окна.
+
+    К нужному размеру возвращаемся сами: как только от ЭВМ (или по
+    нажатию клавиши) пришёл символ, окно подгоняется заново — сбитый
+    масштаб шрифта («Ctrl-»/«Ctrl+», перетаскивание границы окна) сам
+    собой возвращается к правильному.
+    """
+
+    TRIES = 3         # столько попыток подгонки на один «сбой» размера
+    RETRY = 0.5       # с, между попытками (окно переезжает не мгновенно)
+
+    def __init__(self) -> None:
+        self.pending = True       # размер окна ещё не подогнан
+        self.unsupported = False  # терминал размер не держит — не мучаем
+        self.tries = 0
+        self.last = 0.0
+        self.saved: tuple[int, int] | None = None   # размер до подгонки
+
+    def restore(self, parser: Parser) -> bool:
+        """Подогнать окно под кадр с подвалом. True — отправили запрос."""
+        if self.unsupported:
+            return False
+        need = fit_rows(parser)
+        try:
+            cols, rows = os.get_terminal_size()
+        except OSError:
+            return False
+        if rows == need and cols >= COLS:
+            self.pending = False
+            self.tries = 0
+            return False
+        if not self.pending:       # окно сбили (масштаб/граница) — начинаем сначала
+            self.pending = True
+            self.tries = 0
+            self.last = 0.0
+        if self.tries >= self.TRIES or time.time() - self.last < self.RETRY:
+            if self.tries >= self.TRIES:
+                self.unsupported = True      # терминал запрос не выполняет
+            return False
+        self.tries += 1
+        self.last = time.time()
+        if self.saved is None:
+            self.saved = (cols, rows)         # вернём окно по выходе
+        _esc(f"\x1b[8;{need};{max(cols, COLS)}t".encode())
+        return True
+
+    def restore_saved(self) -> None:
+        """Вернуть окно терминала к размеру, какой был до подгонки."""
+        if not self.saved:
+            return
+        cols, rows = self.saved
+        self.saved = None
+        try:
+            cur = os.get_terminal_size()
+            if (cur.columns, cur.lines) != (cols, rows):
+                _esc(f"\x1b[8;{rows};{cols}t".encode())
+        except OSError:
+            pass
+
+
+def _install_winch(fit: WindowFit) -> None:
+    """SIGWINCH: окно терминала переехало — масштаб помечаем «сбитым»."""
+    try:
+        import signal
+        signal.signal(signal.SIGWINCH,
+                      lambda *_a: setattr(fit, "pending", True))
+    except (AttributeError, ImportError, OSError, ValueError):
+        pass                              # не POSIX/нет сигнала — не страшно
+
+
 def run_line(parser: Parser, url: str, png: str | None,
              seconds: float, feed: str | None, mode: str = "host",
              layout: str | None = None, keymap: dict[str, str] | None = None,
-             **linkkw) -> None:
+             take_mouse: bool = True, **linkkw) -> None:
     import os
     import select
     import termios
@@ -243,10 +340,17 @@ def run_line(parser: Parser, url: str, png: str | None,
     fd = sys.stdin.fileno() if sys.stdin.isatty() else None
     old = termios.tcgetattr(fd) if fd is not None else None
     csi_u = False
+    mouse = False
     if fd is not None:
         tty.setcbreak(fd)
         # экран собирается абсолютной позицией — настоящая каретка не нужен
         sys.stdout.write("\x1b[?25l")
+        # Мышь — приложению: колесо листает «историю» выдачи, а не экран
+        # самого терминала (циклической прокрутки нет). Клики приложению
+        # не нужны — снимаем отчётность о них, SGR-форма (1006).
+        if take_mouse:
+            _esc(b"\x1b[?1000h\x1b[?1006h")
+            mouse = True
         # Опрос протокола CSI-u: kitty/foot/wezterm/alacritty отвечают
         # «ESC [ ? флаги u» — тогда просим кодировать нажатия с
         # модификаторами отдельно (ctrl+Б перестаёт дублировать знак)
@@ -270,6 +374,9 @@ def run_line(parser: Parser, url: str, png: str | None,
             "ESC+знак и именуется «alt+…»; что прислала клавиша — видно "
             "в подвале (ПОСЛ), этим и привязывают в [keys]"))
     t0 = time.time()
+    fit = WindowFit()
+    _install_winch(fit)
+    dirty = True                         # первый кадр рисуем сразу
     try:
         while seconds <= 0 or time.time() - t0 < seconds:
             fds = [link_sock(link)] if link_sock(link) is not None else []
@@ -291,6 +398,10 @@ def run_line(parser: Parser, url: str, png: str | None,
                 session.handle_line_reply(data)
                 dirty = True
             if dirty:
+                # «правильный масштаб»: окно ровно на кадр 25 + подвал;
+                # проверяем по символу от ЭВМ (и по нажатию) — сбитый
+                # масштаб шрифта возвращается сам
+                dirty = fit.restore(parser)
                 sys.stdout.write(text_screen(parser))
                 sys.stdout.flush()
     except KeyboardInterrupt:
@@ -299,7 +410,10 @@ def run_line(parser: Parser, url: str, png: str | None,
         sys.stdout.write("\x1b[0m\r\n")
         say(f"[линия] {e} — сеанс завершён")
     finally:
+        fit.restore_saved()
         if fd is not None:
+            if mouse:
+                _esc(b"\x1b[?1006l\x1b[?1000l")
             if csi_u:
                 sys.stdout.write("\x1b[<1u")
             sys.stdout.write("\x1b[?25h")
@@ -370,10 +484,11 @@ def text_screen(parser: Parser) -> str:
     # за курсором; рисуем абсолютной позицией — в коротком окне ничего
     # не скроллится, верх поля всегда виден
     sc._view_h = term_h
-    top = sc.view_top
-    if top is None:
-        top = sc._follow_top(term_h)
-    top = max(0, min(top, max(0, len(lines) - term_h)))
+    # верх окна — по sync_view_top: в следящем режиме кадр всегда с первого
+    # ряда (история над ним не выползает, даже если окно выше «25 строк +
+    # подвал»: иначе F5 «ОЧИСТКА» выглядел бы как «текст не стёрт, а уехал
+    # вверх»), в закреплённом (PgUp/PgDn) — по контенту, подвал внизу
+    top = sc.sync_view_top(term_h)
     out = "\x1b[H\x1b[2J"
     for i, ln in enumerate(lines[top:top + term_h]):
         out += f"\x1b[{i + 1};1H{ln}"
@@ -427,6 +542,11 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--charset", choices=["n0", "n1"], default=None,
                     help="только набор знаков (без смены командного режима); "
                          "устаревший — см. --nabor")
+    ap.add_argument("--mouse", action="store_true", default=None,
+                    help="отдать мышь терминала эмулятору: колесо листает "
+                         "«историю» выдачи (циклической прокрутки нет); без "
+                         "флага мышь остаётся терминалу (mouse = off в "
+                         "конфиге)")
     ap.add_argument("--version", action="version", version=__version__)
     args = ap.parse_args(argv)
     args = apply_conf(args, load_conf(args.conf))
@@ -452,7 +572,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.line:
         run_line(parser, args.line, args.png, args.seconds,
                  args.feed, mode=args.mode, layout=layout,
-                 keymap=args.keymap,
+                 keymap=args.keymap, take_mouse=bool(args.mouse),
                  password=args.password, keyfile=args.keyfile)
     else:
         run_script(parser, args.png)

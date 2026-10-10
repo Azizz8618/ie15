@@ -56,13 +56,27 @@ class Screen:
         строки) + подвал. Пустоты не листаются: прокрутка доходит до
         первой выданной строки и до последней строки подвала и
         останавливается — без «циклического» показа пустоты."""
-        last = -1
+        panel = 2 + len(self.service_more)        # черта + ряды подвала
+        used = max(self.last_used() + 1, self.y + 1)
+        return len(self.history) + used + panel
+
+    def last_used(self) -> int:
+        """Последний заполненный ряд кадра (или ряд курсора), -1 — пусто."""
         for y in range(ROWS - 1, -1, -1):
             if any(c != 0x20 for c in self.cells[y]) or y == self.y:
-                last = y
-                break
-        panel = 2 + len(self.service_more)        # черта + ряды подвала
-        return len(self.history) + max(last + 1, self.y + 1) + panel
+                return y
+        return -1
+
+    def page_printed(self) -> bool:
+        """Выдано больше одной страницы кадра.
+
+        Пока выведено не больше страницы, листать вверх нельзя: PgUp
+        «циклил» бы по пустым рядам кадра вместо истории выдачи. Вверх
+        листаем, когда есть что показывать — когда сошло больше одной
+        страницы.
+        """
+        used = max(self.last_used() + 1, self.y + 1)
+        return len(self.history) + used > ROWS
 
     def _follow_top(self, h: int) -> int:
         # следим за кадром: низ окна у курсора (или весь кадр с подвалом,
@@ -72,14 +86,34 @@ class Screen:
 
     def scroll_view(self, delta: int, h: int | None = None) -> None:
         """PgUp/PgDn: страница просмотра вверх/вниз (в историю и обратно).
-        Приём от ЭВМ закреплённого окна не сбрасывает."""
+        Вверх — только когда выдано больше одной страницы кадра
+        (`page_printed`), иначе листать нечего и окно остаётся следящим;
+        вниз — всегда. Приём от ЭВМ закреплённого окна не сбрасывает."""
         h = h or self._view_h
+        if delta < 0 and not self.page_printed():
+            return                 # выдано не больше страницы: вверх нельзя
         max_top = max(0, self.view_rows() - h)
         if max_top == 0:
             return                 # листать нечего: остаёмся следящими
         top = (self._follow_top(h) if self.view_top is None
                else self.view_top)
         self.view_top = max(0, min(max_top, top + delta))
+
+    def sync_view_top(self, h: int) -> int:
+        """Верх окна просмотра под текущую высоту окна терминала.
+
+        Окно могло подрасти (масштаб шрифта уменьшили — в терминал влезло
+        больше рядов): закреплённое окно сдвигаем вниз, к началу контента,
+        чтобы подвал остался внизу экрана. Следящий режим (view_top is None)
+        ведёт себя как _follow_top: кадр — с верхнего ряда окна, история в
+        поле зрения не выползает — иначе «ОЧИСТКА» (F5) выглядит как
+        «текст не стёрт, а уехал вверх».
+        """
+        if self.view_top is None:
+            return self._follow_top(h)
+        max_top = max(0, self.view_rows() - h)
+        self.view_top = min(self.view_top, max_top)
+        return self.view_top
 
     # --- курсор -----------------------------------------------------
     def wrap_cursor(self) -> None:

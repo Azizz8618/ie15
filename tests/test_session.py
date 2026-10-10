@@ -1,6 +1,7 @@
 """Запуск: python3 -m pytest tests/  или  python3 tests/test_session.py"""
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -393,31 +394,34 @@ def test_ctrl_arrows_on_host_mode_send_nothing():
 
 
 def test_pgup_pagedown_scroll_view():
-    # PgUp/PgDn — листание окна вывода (кадр до последней заполненной
-    # строки + подвал). Выше первой строки — стоп (без циклического
-    # показа пустоты); закрепленное окно приём не сбрасывает
+    # PgUp/PgDn — листание окна вывода (история + кадр до последней
+    # заполненной строки + подвал). Вверх листаем, только когда выдано
+    # больше одной страницы; выше первой строки — стоп (без цикла);
+    # закрепленное окно приём не сбрасывает
     session, link = make_session(MODE_HOST)
     sc = session.parser.screen
+    for i in range(30):                              # 30 рядов > страницы 25
+        session.handle_line_reply(bytes([0x80 | 1]) +
+                                  str(i % 10).encode() + b"\r\n")
+    assert len(sc.history) == 6                       # 30 - 24 строки кадра
+    assert sc.page_printed() is True                  # выдано больше страницы
     sc._view_h = 24
-    for y in range(3):
-        session.handle_line_reply(bytes([0x80 | 1]) * 5 + b"\r\n")
-    # контент: 4 ряда с курсором + панель; окно 24 — всего видно
     assert session.feed_key("KEY_PAGEUP") is None
-    assert sc.view_top is None                       # листать нечего: следим
-    session.feed_key("KEY_PAGEUP")                   # верх — стоп, не цикл
-    assert sc.view_top is None
-    session.feed_key("KEY_PAGEDOWN")                 # низ — тоже упор в контент
-    assert sc.view_top is None
+    assert sc.view_top == 0                           # к первой строке выдачи
+    session.feed_key("KEY_PAGEUP")
+    assert sc.view_top == 0                           # выше — стоп, не цикл
+    session.feed_key("KEY_PAGEDOWN")                 # страница вниз
+    assert sc.view_top == sc.view_rows() - 24
     # узкое окно: листание от первой строки кадра до последней строки
     # подвала; выше первой строки и ниже последней — стоп, без цикла
     sc._view_h = 6
+    top = sc.view_top
     session.feed_key("KEY_PAGEDOWN")                 # страница вниз
-    assert sc.view_top == 5
-    session.feed_key("KEY_PAGEDOWN")                 # упор в конец подвала
-    assert sc.view_top == sc.view_rows() - 6
-    session.feed_key("KEY_PAGEUP")
-    session.feed_key("KEY_PAGEUP")                   # до первой строки
-    session.feed_key("KEY_PAGEUP")
+    assert sc.view_top == top + 5
+    session.feed_key("KEY_PAGEUP")                   # страница вверх
+    assert sc.view_top == top
+    while sc.view_top > 0:                           # вверх до первой строки
+        session.feed_key("KEY_PAGEUP")
     assert sc.view_top == 0
     session.feed_key("KEY_PAGEUP")                   # выше — стоп, не цикл
     assert sc.view_top == 0
@@ -427,6 +431,55 @@ def test_pgup_pagedown_scroll_view():
     session.feed_key("KEY_PAGEUP")
     session.feed_key("KEY_PAGEDOWN")
     assert link.sent == []                           # клавиши в линию не идут
+
+
+def test_pageup_blocked_until_more_than_one_screen():
+    # циклической прокрутки вверх нет: пока выдано не больше страницы
+    # кадра, PgUp ничего не листает (окно остаётся следящим), вниз — можно
+    session, link = make_session(MODE_HOST)
+    sc = session.parser.screen
+    sc._view_h = 6
+    for i in range(20):                              # одна страница, без истории
+        session.handle_line_reply(bytes([0x80 | 1]) + b"A" + b"\r\n")
+    assert len(sc.history) == 0
+    assert sc.page_printed() is False
+    for _ in range(3):
+        assert session.feed_key("KEY_PAGEUP") is None
+        assert sc.view_top is None                    # следящий режим
+    session.feed_key("KEY_PAGEDOWN")                 # вниз — можно
+    top = sc.view_top
+    assert top is not None
+    session.feed_key("KEY_PAGEUP")                   # вверх — по-прежнему нет
+    assert sc.view_top == top                        # окно не прыгает
+    assert link.sent == []
+    for i in range(10):                              # выдали вторую страницу
+        session.handle_line_reply(bytes([0x80 | 1]) + b"B" + b"\r\n")
+    assert sc.page_printed() is True
+    session.feed_key("KEY_PAGEUP")                   # вверх — можно
+    assert sc.view_top == top - 5                   # страница вверх
+
+
+def test_mouse_wheel_scrolls_history_without_cycle():
+    # колесо мыши листает «историю» выдачи (по 3 ряда) и упирается в упор:
+    # циклической прокрутки нет — вверх только при выданном >1 страницы
+    session, link = make_session(MODE_HOST)
+    sc = session.parser.screen
+    sc._view_h = 12
+    for i in range(40):
+        session.handle_line_reply(bytes([0x80 | 1]) + b"A" + b"\r\n")
+    assert sc.page_printed() is True
+    follow = sc._follow_top(sc._view_h)
+    for _ in range(4):
+        assert session.feed_key("KEY_WHEELUP") is None
+    top = sc.view_top
+    assert top is not None and top < follow          # колесо подняло окно
+    for _ in range(50):                              # упор, без цикла
+        session.feed_key("KEY_WHEELUP")
+    assert sc.view_top == 0
+    assert sc.view_top <= len(sc.history)            # первая выданная строка
+    session.feed_key("KEY_WHEELDOWN")
+    assert sc.view_top == 3                          # вниз — те же 3 ряда
+    assert link.sent == []                           # в линию не уходит
 
 
 def test_history_keeps_scrolled_rows():
@@ -464,7 +517,9 @@ def test_clear_key_moves_screen_to_history():
     session, link = make_session(MODE_HOST)
     sc = session.parser.screen
     sc._view_h = 8
-    session.handle_line_reply(b"HELLO\r\nWORLD\r\n")
+    for i in range(60):                              # выдано больше страницы
+        session.handle_line_reply(bytes([0x80 | 1]) * 2 + b"\r\n")
+    session.handle_line_reply(b"HELLO\r\nWORLD\r\n")  # последние строки кадра
     hist0 = len(sc.history)
     assert session.feed_key("CLEAR") is None
     assert (sc.x, sc.y) == (0, 0)
@@ -472,9 +527,13 @@ def test_clear_key_moves_screen_to_history():
     assert len(sc.history) > hist0                     # экран — в историю
     assert any(decode_koi7(bytes(c)).strip() == "HELLO"
                for c, a in sc.history)
+    assert any(decode_koi7(bytes(c)).strip() == "WORLD"
+               for c, a in sc.history)
     assert link.sent == []
+    assert sc.page_printed() is True                   # истории — больше страницы
     session.feed_key("KEY_PAGEUP")                     # возврат к нему
-    assert sc.view_top == 0
+    assert sc.view_top is not None
+    assert sc.view_top <= len(sc.history)
     top_hist = sc.view_top
     session.feed_key("KEY_PAGEDOWN")
     assert sc.view_top > 0 or top_hist is None
@@ -554,6 +613,104 @@ def test_echo_off_autonomous_no_echo():
     session.feed_key("ECHO")
     session.feed_key("п")                    # локальное эхо — заглавной Н1
     assert "П" in session.parser.screen.text()
+
+
+# --- «правильный масштаб»: окно терминала = кадр 25 рядов + подвал ------
+
+def test_fit_rows_is_frame_plus_panel():
+    # столько рядов должно вмещать окно: 25 кадра + черта + ряды подвала
+    from ie15emu.__main__ import fit_rows
+    parser = Parser()
+    parser.screen.set_service("СЕТЬ=АВТОНОМНО")
+    assert fit_rows(parser) == ROWS + 2               # черта + 1 ряд подвала
+    parser.screen.set_service("СЕТЬ=АВТОНОМНО\nЭХО=ВКЛ\nВИДЕО=НОРМ")
+    assert fit_rows(parser) == ROWS + 2 + 2
+    # подвал сеанса: черта, 3 ряда состояния, черта, 6 рядов клавиш = 11
+    session, _ = make_session(MODE_HOST)
+    assert fit_rows(session.parser) == ROWS + 11
+
+
+def test_window_fit_sends_resize_and_returns_after_data(monkeypatch):
+    # окно шире «25 + подвал» (мелкий масштаб шрифта) — эмулятор просит
+    # у терминала нужный размер (CSI 8;h;w t) и проверяет результат
+    import ie15emu.__main__ as m
+    size = [os.terminal_size((100, 50))]              # (столбцы, ряды)
+    monkeypatch.setattr(m.os, "get_terminal_size", lambda: size[0])
+    sent: list[bytes] = []
+    monkeypatch.setattr(m, "_esc", lambda data: sent.append(data))
+
+    fit = m.WindowFit()
+    parser = Parser()
+    assert fit.restore(parser) is True                # 1-я попытка
+    assert sent[-1] == b"\x1b[8;%d;%dt" % (ROWS + 2, 100)
+    # терминал размер не держит — после трёх попыток больше не просим
+    for _ in range(2):
+        fit.last = 0.0
+        assert fit.restore(parser) is True
+    fit.last = 0.0
+    assert fit.restore(parser) is False               # сдались
+    assert fit.unsupported is True
+    assert len(sent) == 3
+
+    # терминал держит размер: сброс масштаба (Ctrl-/+ или граница окна)
+    # и приход символа от ЭВМ возвращают окно к правильному размеру
+    sent.clear()
+    size[0] = os.terminal_size((100, 27))             # уже 25 + подвал
+    fit2 = m.WindowFit()
+    fit2.saved = (100, 50)
+    assert fit2.restore(parser) is False              # просить нечего
+    assert sent == []
+    size[0] = os.terminal_size((100, 50))             # масштаб сбили вручную
+    fit2.pending = True
+    assert fit2.restore(parser) is True               # возврат к масштабу
+    assert sent[-1] == b"\x1b[8;%d;%dt" % (ROWS + 2, 100)
+
+
+def test_restore_saved_window_on_exit(monkeypatch):
+    import ie15emu.__main__ as m
+    cur = os.terminal_size((100, 50))
+    monkeypatch.setattr(m.os, "get_terminal_size", lambda: cur)
+    sent: list[bytes] = []
+    monkeypatch.setattr(m, "_esc", lambda data: sent.append(data))
+    fit = m.WindowFit()
+    fit.saved = (100, 50)
+    fit.restore_saved()                              # окно не трогали
+    assert sent == []
+    fit.saved = (120, 60)                             # эмулятор окно двигал
+    fit.restore_saved()
+    assert sent == [b"\x1b[8;60;120t"]
+
+
+def test_clear_key_clears_visible_page_in_wide_window(monkeypatch):
+    # F5 «ОЧИСТКА» в широком окне (>25 рядов + подвал): видны пустой кадр
+    # и подвал, а ушедший в историю текст — не выползает над кадром
+    import ie15emu.__main__ as m
+    monkeypatch.setattr(m.os, "get_terminal_size",
+                        lambda: os.terminal_size((100, 50)))
+    session, link = make_session(MODE_HOST)
+    sc = session.parser.screen
+    for i in range(40):                              # выдано больше страницы
+        session.handle_line_reply(bytes([0x80 | 1]) + b"A" + b"\r\n")
+    session.handle_line_reply(b"HELLO\r\nWORLD\r\n")
+    out = m.text_screen(session.parser)
+    assert "HELLO" in out
+    session.feed_key("CLEAR")
+    out = m.text_screen(session.parser)
+    assert "HELLO" not in out and "WORLD" not in out    # страница очищена
+    assert "\x1b[1;1H" in out                          # курсор в видимой области
+    assert sc.x == 0 and sc.y == 0
+    # история на месте: сошедший экран в ней лежит целиком
+    assert any(decode_koi7(bytes(c)).strip() == "HELLO"
+               for c, a in sc.history)
+    assert any(decode_koi7(bytes(c)).strip() == "WORLD"
+               for c, a in sc.history)
+    # в узком окне страница листается и сошедший экран виден (PgUp)
+    monkeypatch.setattr(m.os, "get_terminal_size",
+                        lambda: os.terminal_size((100, 10)))
+    m.text_screen(session.parser)                 # окно просмотра — 10 рядов
+    session.feed_key("KEY_PAGEUP")
+    assert sc.view_top is not None and sc.view_top > 0
+    assert "HELLO" in m.text_screen(session.parser)
 
 
 if __name__ == "__main__":

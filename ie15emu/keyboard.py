@@ -232,6 +232,8 @@ KEY_CMDSET = "CMDSET"   # клавиша «НАБОР»: набор №1 ↔ н�
 KEY_BLINK = "BLINK"     # клавиша «УПР.СИМВ»: показ/скрытие знаков УП
 KEY_ECHO = "ECHO"       # клавиша «ЭХО»: подавить вывод набора на экран
 KEY_CLEAR = "CLEAR"     # «ОЧИСТКА»: экран в историю, кадр — в начало
+KEY_WHEELUP = "KEY_WHEELUP"       # колесо мыши вверх: листание «истории»
+KEY_WHEELDOWN = "KEY_WHEELDOWN"   # колесо мыши вниз: к кадру ЭВМ
 
 SPECIAL_KEYS = {"KEY_SEND": KEY_SEND, "KEY_MODE": KEY_MODE,
                 "KEY_CMDSET": KEY_CMDSET, "KEY_BLINK": KEY_BLINK,
@@ -314,6 +316,37 @@ def _parse_csi_u(data: bytes, i: int):
     return None, 0
 
 
+def _parse_mouse(data: bytes, i: int):
+    """Мышь терминала в режиме SGR (мышь отдана приложению).
+
+    Возвращает (имя клавиши или «», сколько байт съели). Колесо вверх/вниз
+    (кнопки 64/65) — листание «истории» выдачи, остальные события (клики,
+    движение) эмулятору не нужны: съедаем молча, чтобы они не попали в
+    линию как мусор.
+    """
+    j = data.find(b"<", i)
+    if j != i + 2:
+        return None, 0
+    k = data.find(b"M", j)
+    m = data.find(b"m", j)                      # отпускание — без колеба
+    ends = [p for p in (k, m) if p >= 0 and p - j < 24]
+    if not ends:
+        return None, 0
+    k = min(ends)
+    try:
+        btn = int(data[j + 1:k].split(b";")[0])
+    except ValueError:
+        return None, 0
+    if data[k:k + 1] != b"M":                  # отпускание колеса — тихо
+        return "", k + 1 - i
+    base = btn & ~0b10100                     # без shift/meta/ctrl (4|8|16)
+    if base == 64:
+        return KEY_WHEELUP, k + 1 - i
+    if base == 65:
+        return KEY_WHEELDOWN, k + 1 - i
+    return "", k + 1 - i
+
+
 def is_key_combo(key: str) -> bool:
     """Имя нажатия «ctrl/alt/shift+знак» (из _combo_name)."""
     parts = key.split("+")
@@ -354,6 +387,12 @@ def decode_key_bytes(data: bytes) -> list[str]:
             i += 1
             continue
         if b == 0x1B:
+            name, adv = _parse_mouse(data, i)
+            if name is not None:               # событие мыши (SGR)
+                if name:
+                    out.append(name)
+                i += adv
+                continue
             name, adv = _parse_csi_u(data, i)
             if name:                       # нажатие с модификаторами (CSI-u)
                 out.append(name)
