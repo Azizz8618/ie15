@@ -10,6 +10,28 @@ set -eu
 DIR=$(cd "$(dirname "$0")" && pwd)
 chmod +x "$DIR/ie15"
 
+# Короткая команда запуска терминала: alias «ie15» для bash и функция для fish.
+add_aliases() {
+    BASH_RC="$HOME/.bashrc"
+    ADD_BASH="alias ie15='$DIR/ie15'"
+    if [ -f "$BASH_RC" ] && ! grep -qF "$ADD_BASH" "$BASH_RC" 2>/dev/null; then
+        printf '\n# терминал 15ИЭ (установлено install.sh)\n%s\n' "$ADD_BASH" >> "$BASH_RC"
+        echo "bash: добавлен alias ie15 в $BASH_RC"
+    else
+        echo "bash: alias ie15 уже есть в $BASH_RC"
+    fi
+    FISH_DIR="$HOME/.config/fish/functions"
+    mkdir -p "$FISH_DIR"
+    cat > "$FISH_DIR/ie15.fish" <<EOF
+# терминал 15ИЭ (установлено install.sh)
+function ie15
+    $DIR/ie15 \$argv
+end
+EOF
+    echo "fish: создана функция ie15 ($FISH_DIR/ie15.fish)"
+}
+add_aliases
+
 # Выбор эмулятора терминала и способа передать команду
 pick_term() {
     for t in x-terminal-emulator xfce4-terminal mate-terminal qterminal \
