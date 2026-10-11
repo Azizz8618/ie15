@@ -3,13 +3,13 @@
 ПЕРВОЕ ДЕЛО при неисправности или при необходимости выполнить приказ ОС —
 прочитать справочники, а не гадать на живой машине:
 
-* `re-dispak/docs/Dispak-operator-guide.md` — «Руководство оператора» ОС
+* `re_dispak/re-dispak/docs/Dispak-operator-guide.md` — «Руководство оператора» ОС
   ДИСПАК: раздел 4.x — директивы (в т.ч. 4.5 управление устройствами
   вывода), раздел 5.x — сообщения ОС и действия оператора;
 * `simh/BESM6/doc/ДКС.md` — протокол линии ДКС;
 * `re_dispak/re-dispak/ai/` — справочники модулей ОС (СВЯЗЬ7, МОТТ,
   БОНБОТ, ДИСП70, ВЗУ, ТЕРМ);
-* `docs/DISPAK_AGENT.md` (этот проект) — как работать с машиной из кода.
+* `re_dispak/re-dispak/docs/DISPAK_AGENT.md` (проект re_dispak/re-dispak) — как работать с машиной из кода.
 
 Приказы ОС (`DIRECTIVES`) — только с операторского терминала; на этой
 машине это tty1, подключённый к консоли SIMH (`dispak.ini: attach tty1
@@ -47,6 +47,7 @@ console`), то есть окно besm6 в tmux.
 """
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import time
@@ -133,6 +134,68 @@ def history_text(parser: Parser, limit: int | None = None) -> str:
     return "\n".join((sc.row_text("hist", i) or "").rstrip()
                      for i in range(len(sc.history) - len(rows),
                                     len(sc.history)))
+
+
+class AcpuWatch:
+    """Слежение за выдачей на АЦПУ по файлу принтера SIMH.
+
+    ОС печатает сводки и отчёты на АЦПУ отдельным каналом: даже когда на
+    терминале тихо, принтер может ещё печатать — и наоборот, буфер вывода
+    переполняется именно там («ОСВОБОДИ БУФЕР ВЫВОДА», руководство
+    оператора, 5.40). Поэтому агент смотрит и файл принтера: выдача
+    идёт — ждём, файл перестал расти — можно читать терминал.
+
+    Путь берётся из `IE15_ACPU` либо из конфига этой машины
+    (`dispak.ini: attach prn0 …/ACPU/output.txt`).
+    """
+
+    DEFAULT = os.environ.get(
+        "IE15_ACPU", "~/Yandex.Disk/simh/BESM6/ACPU/output.txt")
+
+    def __init__(self, path: str | None = None) -> None:
+        self.path = os.path.expanduser(path or self.DEFAULT)
+
+    def exists(self) -> bool:
+        return os.path.isfile(self.path)
+
+    def size(self) -> int:
+        try:
+            return os.path.getsize(self.path)
+        except OSError:
+            return -1                      # файла нет — принтер не подключён
+
+    def mark(self) -> int:
+        """Отметка «здесь»: размер файла на сейчас."""
+        return self.size()
+
+    def grew(self, mark: int) -> bool:
+        """Принтер печатал после отметки?"""
+        now = self.size()
+        return now != mark
+
+    def tail(self, size: int = 400) -> str:
+        """Хвост выдачи текстом (КОИ-7, как печатает ОС)."""
+        try:
+            with open(self.path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                f.seek(max(0, f.tell() - size))
+                return f.read().decode("koi8-r", "replace")
+        except OSError:
+            return ""
+
+    def wait_output(self, quiet: float = 2.0, timeout: float = 60.0,
+                    poll: float = 0.5) -> bool:
+        """Ждать, пока принтер закончит печать (рост файла прекратился)."""
+        deadline = time.monotonic() + timeout
+        last, since = self.size(), time.monotonic()
+        while time.monotonic() < deadline:
+            time.sleep(poll)
+            now = self.size()
+            if now != last:
+                last, since = now, time.monotonic()
+            elif now >= 0 and time.monotonic() - since >= quiet:
+                return True
+        return False
 
 
 class Terminal:
@@ -233,6 +296,29 @@ class Terminal:
             raise LinkError(str(val))
         return True
 
+    def acpu(self, path: str | None = None) -> AcpuWatch:
+        """Слежение за выдачей на АЦПУ (файл принтера)."""
+        return AcpuWatch(path)
+
+    def health(self, acpu: AcpuWatch | None = None) -> dict:
+        """Срез состояния машины для агента и для разбора неисправностей.
+
+        Три источника, которые надо смотреть вместе: терминал агента,
+        терминал оператора (приказы ОС уходят туда) и АЦПУ — на принтере
+        своя очередь вывода, и переполнение буфера вывода видно там, а не
+        на экране.
+        """
+        w = acpu or AcpuWatch()
+        return {
+            "строка": self.status(),
+            "экран": self.screen(),
+            "ревизия": self.screen_.rev,
+            "ацпу_файл": w.path,
+            "ацпу_байт": w.size(),
+            "ацпу_хвост": w.tail(240),
+            "линия_жива": self.link_error is None,
+        }
+
     def drain(self, quiet: float = 0.4, timeout: float = 10.0) -> bool:
         """Забрать всё, что машина уже выдала, и дождаться тишины.
 
@@ -241,17 +327,30 @@ class Terminal:
         """
         return self.wait_quiet(quiet=quiet, timeout=timeout)
 
-    def wait_quiet(self, quiet: float = 0.5, timeout: float = 60.0) -> bool:
+    def wait_quiet(self, quiet: float = 0.5, timeout: float = 60.0,
+                    acpu: AcpuWatch | None = None) -> bool:
         """Ждать, пока выдача кончится (счётчик изменений экрана перестал
-        расти `quiet` секунд). False — не кончилась за `timeout`."""
+        расти `quiet` секунд). False — не кончилась за `timeout`.
+
+        С переданным `acpu` ждём и принтер: у АЦПУ своя очередь вывода,
+        и «на экране тихо» ещё не значит «машина всё выдала» — именно на
+        принтере всплывает переполнение буфера вывода.
+        """
         deadline = time.monotonic() + timeout
         last, since = self.screen_.rev, time.monotonic()
+        pmark = acpu.mark() if acpu is not None else None
         while time.monotonic() < deadline:
             if self.pump(timeout=0.05):
                 if self.screen_.rev != last:
                     last, since = self.screen_.rev, time.monotonic()
+                if acpu is not None:
+                    pmark = acpu.mark()
                 continue
             now = time.monotonic()
+            if acpu is not None and acpu.grew(pmark):
+                pmark = acpu.mark()
+                since = now            # принтер ещё печатает
+                continue
             if now - since >= quiet:
                 return True
             time.sleep(0.02)
