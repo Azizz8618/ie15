@@ -762,6 +762,33 @@ def test_view_uses_only_used_frame_rows(monkeypatch):
     assert "-" * sc.panel_cols in r.values()        # подвал всё ещё в окне
 
 
+def test_shift_arrow_is_swallowed_not_typed():
+    # Shift+↑ и прочие стрелки с модификатором у 15ИЭ нет: раньше они
+    # разбирались как ESC + «[1;2A» и уходили в линию — эхо ЭВМ забивало
+    # кадр («циклическая прокрутка»). Теперь нажатие гасится целиком.
+    from ie15emu.keyboard import decode_key_bytes
+    for seq in (b"\x1b[1;2A", b"\x1b[1;2B", b"\x1b[1;2C", b"\x1b[1;2D",
+                b"\x1b[1;3A", b"\x1b[1;4C", b"\x1b[1;6A", b"\x1b[1;8D",
+                b"\x1b[5;2~", b"\x1b[3;3~"):
+        assert decode_key_bytes(seq) == [], seq
+    assert decode_key_bytes(b"a\x1b[1;2Ab") == ["a", "b"]     # текст не теряется
+    # без модификаторов и Ctrl-стрелки работают как прежде
+    assert decode_key_bytes(b"\x1b[A") == ["KEY_UP"]
+    assert decode_key_bytes(b"\x1b[1;5A") == ["KEY_CTRLUP"]
+    assert decode_key_bytes(b"\x1b[1;5C") == ["KEY_CTRLRIGHT"]
+    # и в сеансе такое нажатие не уходит в линию и не двигает экран
+    session, link = make_session(MODE_HOST)
+    sc = session.parser.screen
+    for _ in range(40):
+        session.handle_line_reply(b"line\r\n")
+    before = sc.text()
+    for seq in (b"\x1b[1;2A", b"\x1b[1;2B", b"\x1b[1;5~"):
+        for key in decode_key_bytes(seq):
+            session.emit(session.feed_key(key))
+    assert link.sent == []
+    assert sc.text() == before
+
+
 def test_history_keeps_scrolled_rows():
     # сошедшие с верхнего края кадра строки сохраняются в «историю»
     # (глубина настраивается), пустые — нет; PgUp доходит до первой

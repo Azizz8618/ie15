@@ -46,6 +46,7 @@
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from .charset import ALPHA_BIT, RUS7, encode_koi7
@@ -316,6 +317,30 @@ def _parse_csi_u(data: bytes, i: int):
     return None, 0
 
 
+# Стрелки и функциональные клавиши с модификатором (xterm):
+# ESC [ 1 ; mod A…D, ESC [ n ; mod ~, где mod = 1+shift(1)+alt(2)+ctrl(4).
+# Клавиши 15ИЭ (стрелки ВКДа и Ф1–Ф10) без модификаторов, поэтому такие
+# нажатия в линию ничего не отправляют: иначе escape-мусор ушёл бы в
+# ЭВМ («ESC [ 1 ; 2 A»), а её эхо забивало бы кадр — «циклическая прокрутка».
+_MOD_KEY = re.compile(rb"\x1b\[(?:1;(\d+)([A-D])|(\d+);(\d+)~)")
+
+
+def _parse_mod_key(data: bytes, i: int):
+    """Нажатие клавиши с модификатором (Shift+↑, Alt+Home и т. п.).
+
+    Возвращает (имя клавиши или «», сколько байт съели) либо (None, 0),
+    если это не такая последовательность. Имя пустое — нажатие гасится:
+    в линию оно не идёт и экран не листает.
+    """
+    m = _MOD_KEY.match(data, i)
+    if not m:
+        return None, 0
+    mod = int(m.group(1) or m.group(4))
+    if mod < 2:                       # без модификаторов — разбирают ниже
+        return None, 0
+    return "", m.end() - i
+
+
 def _parse_mouse(data: bytes, i: int):
     """Мышь терминала в режиме SGR (мышь отдана приложению).
 
@@ -407,6 +432,15 @@ def decode_key_bytes(data: bytes) -> list[str]:
                     matched = True
                     break
             if not matched:
+                # Стрелка/функциональная с Shift или Alt: гасим нажатие —
+                # таких клавиш на 15ВВВ нет, в линию мусор не идёт
+                # (иначе Shift+↑ уезжал бы в ЭВМ как «ESC [ 1 ; 2 A»)
+                name, adv = _parse_mod_key(data, i)
+                if name is not None:
+                    if name:
+                        out.append(name)
+                    i += adv
+                    continue
                 # Alt+знак: терминалы (в т.ч. VTE без CSI-u) присылают
                 # Alt как ESC-префикс перед знаком; ESC перед «[»/«O»
                 # и одиночный ESC остаются клавишей Esc как раньше
