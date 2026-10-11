@@ -367,12 +367,16 @@ def run_line(parser: Parser, url: str, png: str | None,
         tty.setcbreak(fd)
         # экран собирается абсолютной позицией — настоящая каретка не нужен
         sys.stdout.write("\x1b[?25l")
-        # Мышь — приложению: колесо листает «историю» выдачи, а не экран
-        # самого терминала (циклической прокрутки нет). Клики приложению
-        # не нужны — снимаем отчётность о них, SGR-форма (1006).
+        # Мышь — приложению: 1000 (кнопки) + 1002 (движение при нажатой
+        # кнопке — без него протяжку для выделения не пришлют) + 1006
+        # (SGR, координаты не ограничены 223). Терминалы без 1006
+        # отвечают старой формой — разбирается тоже (см. keyboard).
         if take_mouse:
-            _esc(b"\x1b[?1000h\x1b[?1006h")
+            _esc(b"\x1b[?1000h\x1b[?1002h\x1b[?1006h")
             mouse = True
+            session.mouse_on = True
+            session._update_service()
+            session._update_status()      # «МЫШЬ=ВКЛ» в строке состояния
         # Опрос протокола CSI-u: kitty/foot/wezterm/alacritty отвечают
         # «ESC [ ? флаги u» — тогда просим кодировать нажатия с
         # модификаторами отдельно (ctrl+Б перестаёт дублировать знак)
@@ -443,7 +447,7 @@ def run_line(parser: Parser, url: str, png: str | None,
             fit.restore_saved()
         if fd is not None:
             if mouse:
-                _esc(b"\x1b[?1006l\x1b[?1000l")
+                _esc(b"\x1b[?1006l\x1b[?1002l\x1b[?1000l")
             if csi_u:
                 sys.stdout.write("\x1b[<1u")
             sys.stdout.write("\x1b[?25h")

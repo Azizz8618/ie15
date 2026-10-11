@@ -123,6 +123,7 @@ class TerminalSession:
         self.machine = ""            # номер ЭВМ (из конфига, пусто — не показываем)
         self.peer = ""               # адрес, с которого пришли («From …»)
         self.banner_seen = False     # баннер линии («CONNECTED TO …») пришёл
+        self.mouse_on = False   # мышь терминала отдана эмулятору (F-подвал)
         self._banner_tail = b""      # недобранная строка баннера
         self._banner_done = False    # баннер закончился (пошли данные ЭВМ)
         self._update_service()
@@ -602,6 +603,10 @@ class TerminalSession:
             cells.append(mk("КАНАЛ=", (str(port), "state")))
         if self.line_mode:
             cells.append(mk("РЕЖИМ=", (self.line_mode, "state")))
+        # мышь терминала отдана эмулятору? (выделение текста, колесо)
+        cells.append(mk(("МЫШЬ=", "label"),
+                        ("ВКЛ" if self.mouse_on else "ВЫКЛ",
+                         "on" if self.mouse_on else "off")))
         cells.append(mk(f"{when.tm_mday:02d}.{when.tm_mon:02d}.{when.tm_year} "
                         f"{when.tm_hour:02d}:{when.tm_min:02d}:"
                         f"{when.tm_sec:02d}"))

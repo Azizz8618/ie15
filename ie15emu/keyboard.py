@@ -348,43 +348,60 @@ def _parse_mod_key(data: bytes, i: int):
 
 
 def _parse_mouse(data: bytes, i: int):
-    """Мышь терминала в режиме SGR (мышь отдана приложению).
+    """Мышь терминала, отданная приложению.
 
-    Возвращает (имя нажатия или «», сколько байт съели). Колесо влево-вниз
-    — листание «истории», левая кнопка — выделение текста (нажатие,
+    Понимает три кодировки, чтобы работать на любом терминале:
+    SGR (1006) — `ESC [ < b ; x ; y M/m`, urxvt (1015) — `ESC [ b ; x ; y M`
+    и старую X10 — `ESC [ M` + три байта (код+32).
+
+    Возвращает (имя нажатия или «», сколько байт съели). Колесо —
+    листание «истории», левая кнопка — выделение текста (нажатие,
     протягивание, отпускание; координаты окна в знаках после «@»).
     Остальные события (правая кнопка, движение без кнопки) съедаются
     молча, чтобы они не попали в линию как мусор.
     """
-    j = data.find(b"<", i)
-    if j != i + 2:
-        return None, 0
-    k = data.find(b"M", j)
-    m = data.find(b"m", j)                      # отпускание
-    ends = [p for p in (k, m) if p >= 0 and p - j < 24]
-    if not ends:
-        return None, 0
-    k = min(ends)
-    try:
-        btn, x, y = (int(v) for v in data[j + 1:k].split(b";"))
-    except ValueError:
-        return None, 0
-    base = btn & ~0b10100                       # без shift/meta/ctrl (4|8|16)
-    if data[k:k + 1] != b"M":                   # отпускание
-        if base == 0:                           # левой кнопки — конец фрагмента
-            return f"MOUSEUP@{x},{y}", k + 1 - i
-        return "", k + 1 - i                   # колесо — тихо
-    if base == 64:                              # колесо вверх
-        return KEY_WHEELUP, k + 1 - i
-    if base == 65:                              # колесо вниз
-        return KEY_WHEELDOWN, k + 1 - i
-    if base == 0:                               # нажатие левой кнопки
-        kind = "MOUSEDOWN"
-    elif base in (32, 33, 64):                 # протягивание с кнопкой
-        kind = "MOUSEDRAG"
-    else:                                       # правая/средняя — тихо
-        return "", k + 1 - i
-    return f"{kind}@{x},{y}", k + 1 - i
+    if data[i + 2:i + 3] == b"M":                 # X10: три байта кода
+        if len(data) < i + 6:
+            return None, 0
+        btn, x, y = (b - 32 for b in data[i + 3:i + 6])
+        press, end = True, i + 6
+    else:
+        j = i + 2
+        body = data[j:j + 24]
+        sgr = body[:1] == b"<"                    # SGR
+        k = body.find(b"M")
+        m = body.find(b"m")
+        ends = [p for p in (k, m) if p >= 0]
+        if not ends:
+            return None, 0
+        k = min(ends)
+        try:
+            if sgr:
+                btn, x, y = (int(v) for v in body[1:k].split(b";"))
+                press = body[k:k + 1] == b"M"
+            else:                                  # urxvt: без '<' и 'm'
+                btn, x, y = (int(v) for v in body[:k].split(b";"))
+                btn -= 32
+                press = True
+        except ValueError:
+            return None, 0
+        end = j + k + 1
+    btn &= ~0b10100                              # без shift/meta/ctrl
+    moving = bool(btn & 0b110000)                # 32 — движение, 64 — drag
+    btn &= ~0b110000
+    if not press:                                 # отпускание
+        if btn == 0 and not moving:
+            return f"MOUSEUP@{x},{y}", end - i
+        return "", end - i                       # колесо/движение — тихо
+    if btn == 64:                                 # колесо вверх
+        return KEY_WHEELUP, end - i
+    if btn == 65:                                 # колесо вниз
+        return KEY_WHEELDOWN, end - i
+    if btn == 0:                                  # левая кнопка
+        kind = "MOUSEDRAG" if moving else "MOUSEDOWN"
+    else:                                         # правая/средняя — тихо
+        return "", end - i
+    return f"{kind}@{x},{y}", end - i
 
 
 def is_key_combo(key: str) -> bool:

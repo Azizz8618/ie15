@@ -27,6 +27,14 @@ def test_mouse_sgr_wheel():
     assert decode_key_bytes(b"\x1b[<0;9;4m") == ["MOUSEUP@9,4"]
     assert decode_key_bytes(b"\x1b[<2;5;5M") == []          # правая
     assert decode_key_bytes(b"\x1b[<32;1;1m") == []          # движение без кнопки
+    # терминалы без SGR (1006) отвечают urxvt (1015) и старой формой X10 —
+    # без их разбора мышь у пользователя не работает вовсе
+    assert decode_key_bytes(b"\x1b[32;3;4M") == ["MOUSEDOWN@3,4"]
+    assert decode_key_bytes(b"\x1b[64;9;6M") == ["MOUSEDRAG@9,6"]
+    assert decode_key_bytes(b"\x1b[M\x20\x23\x24") == ["MOUSEDOWN@3,4"]
+    assert decode_key_bytes(b"\x1b[M\x40\x29\x26") == ["MOUSEDRAG@9,6"]
+    assert decode_key_bytes(b"\x1b[M\x60\x21\x21") == [KEY_WHEELUP]
+    assert decode_key_bytes(b"\x1b[M\x61\x21\x21") == [KEY_WHEELDOWN]
     assert decode_key_bytes(b"a\x1b[<64;1;1Mb") == ["a", KEY_WHEELUP, "b"]
     # стрелки/функциональные после мышиных событий не пострадали
     assert decode_key_bytes(b"\x1b[<64;1;1M\x1b[A") == [KEY_WHEELUP, "KEY_UP"]
