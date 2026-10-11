@@ -658,6 +658,23 @@ def test_help_rows_can_be_hidden():
     assert "ОЧИСТКА=F5" in panel_text(sc)
 
 
+def test_panel_marks_local_mode():
+    # «АВТОНОМНО» — красным и подчёркнутым: набор идёт в буфер терминала,
+    # а не в ЭВМ, и потерять его легко. В режиме «С ЭВМ» — обычный цвет
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    sc.set_panel_cols(96)
+    row = next(r for r in sc.panel_styled_rows() if "АВТОНОМНО" in r)
+    assert "\x1b[31;4mАВТОНОМНО\x1b[0m" in row     # красный + подчёркнутый
+    session.toggle_mode()                          # F9 — С ЭВМ
+    sc.set_panel_cols(96)
+    rows = sc.panel_styled_rows()
+    row = next(r for r in rows if "СЕТЬ=" in r)
+    assert "АВТОНОМНО" not in row
+    assert "\x1b[31;4m" not in row
+    assert "С ЭВМ" in row
+
+
 def test_panel_grid_stable_while_values_change():
     # сетка подвала (ширина колонки, число рядов, позиции « | ») не должна
     # скакать из-за меняющихся значений — в первую очередь «ПОСЛ: …»

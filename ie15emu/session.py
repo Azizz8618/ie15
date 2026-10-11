@@ -185,13 +185,16 @@ class TerminalSession:
         host = self.mode == MODE_HOST
         lay = ("ВЫКЛ" if not self.layout
                else LAYOUT_LABELS.get(self.layout, self.layout.upper()))
-        def st(label, value):              # «МЕТКА=значение» с цветом значения
-            return mk(label, (value, self._flag_style(value)))
+        def st(label, value, style=None):  # «МЕТКА=значение» с цветом значения
+            return mk(label, (value, style or self._flag_style(value)))
 
         line = LINE_LABELS.get(self.encoding, f"ЛИНИЯ={self.encoding}")
         last = mk("ПОСЛ: ", (self.last_key, "last"))
         state = [
-            st("СЕТЬ=", "С ЭВМ" if host else "АВТОНОМНО"),
+            # «АВТОНОМНО» — красным и подчёркнутым: набор идёт в буфер
+            # терминала, а не в ЭВМ, и потерять его легко
+            st("СЕТЬ=", "С ЭВМ" if host else "АВТОНОМНО",
+               "state" if host else "local"),
             st("НАБОР=", self.NABOR_LABELS[self.nabor]),
             st("ЛИНИЯ=", line.split("=", 1)[-1]),
             st("РАСК=", lay),
