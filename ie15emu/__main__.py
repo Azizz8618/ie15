@@ -609,6 +609,56 @@ def text_screen(parser: Parser) -> str:
     return out
 
 
+def run_headless(parser: Parser, url: str, feed: str | None, dump: str | None,
+                 wait: float, seconds: float, want_status: bool = False,
+                 mode: str = "host", layout: str | None = None,
+                 keymap: dict[str, str] | None = None, machine: str = "",
+                 **linkkw) -> None:
+    """Работа без окна терминала: ни панели, ни справки, ни мыши.
+
+    `--dump` — вывести кадр текстом и выйти (после `--wait` секунд ожидания
+    выдачи). Без `--dump` линия просто держится открытой `--seconds` — так
+    эмулятор ставят в конвейер или рядом с другой программой.
+    """
+    from .agent import Terminal, frame_lines, history_text
+
+    try:
+        term = Terminal(url, mode=mode, layout=layout, keymap=keymap,
+                        machine=machine, **linkkw)
+    except (LinkError, OSError) as e:
+        say(f"[линия] {url} — не удалось подключиться: {e}")
+        return
+    try:
+        if feed:
+            # в «АВТОНОМНО» набранное без ПЕРЕДАЧИ в линию не уходит
+            term.type(feed, send=mode != "host")
+        if dump is None:
+            if want_status:
+                say(term.status())
+            deadline = time.time() + seconds
+            while seconds <= 0 or time.time() < deadline:
+                term.pump()
+            return
+        if wait > 0:
+            term.wait_quiet(quiet=0.5, timeout=wait)
+        lines = frame_lines(term.parser)
+        hist = history_text(term.parser)
+        if want_status:
+            lines = [term.status(), ""] + lines
+        out = "\n".join(lines) + "\n"
+        if wait > 0 and hist:               # что было на экране до прокрутки
+            out += "\n--- ушло с экрана (хвост истории) ---\n" + hist + "\n"
+        if dump == "-":
+            sys.stdout.write(out)
+            sys.stdout.flush()
+        else:
+            with open(dump, "w", encoding="utf-8") as f:
+                f.write(out)
+            say(f"[кадр] записан в {dump} ({len(lines)} строк)")
+    finally:
+        term.close()
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="ie15emu",
                                  description="Эмулятор терминала 15ИЭ-00-013")
@@ -671,6 +721,18 @@ def main(argv: list[str] | None = None) -> None:
                     help="подогнать окно терминала ровно на «25 рядов кадра + "
                          "подвал» (по умолчанию окно не трогаем: кадр ЭВМ "
                          "дотягивается до низа окна)")
+    ap.add_argument("--headless", action="store_true",
+                    help="без окна терминала: без панели, справки и мыши; "
+                         "кадр доступен как текст (см. ie15emu.agent)")
+    ap.add_argument("--dump", nargs="?", const="-", default=None,
+                    metavar="ФАЙЛ",
+                    help="вывести кадр ЭВМ текстом и выйти («-» — stdout); "
+                         "--headless подразумевается")
+    ap.add_argument("--wait", type=float, default=3.0,
+                    help="сколько секунд ждать выдачи перед --dump "
+                         "(0 — не ждать)")
+    ap.add_argument("--status", action="store_true",
+                    help="в --dump добавить строку состояния линии")
     ap.add_argument("--version", action="version", version=__version__)
     args = ap.parse_args(argv)
     args = apply_conf(args, load_conf(args.conf))
@@ -694,12 +756,19 @@ def main(argv: list[str] | None = None) -> None:
     parser.charset = charset
 
     if args.line:
-        run_line(parser, args.line, args.png, args.seconds,
-                 args.feed, mode=args.mode, layout=layout,
-                 keymap=args.keymap, take_mouse=bool(args.mouse),
-                 take_fit=bool(args.fit), machine=args.machine or "",
-                 show_help=not bool(args.no_help),
-                 password=args.password, keyfile=args.keyfile)
+        if args.headless or args.dump is not None:
+            run_headless(parser, args.line, args.feed, args.dump,
+                         args.wait, args.seconds, bool(args.status),
+                         mode=args.mode, layout=layout,
+                         keymap=args.keymap, machine=args.machine or "",
+                         password=args.password, keyfile=args.keyfile)
+        else:
+            run_line(parser, args.line, args.png, args.seconds,
+                     args.feed, mode=args.mode, layout=layout,
+                     keymap=args.keymap, take_mouse=bool(args.mouse),
+                     take_fit=bool(args.fit), machine=args.machine or "",
+                     show_help=not bool(args.no_help),
+                     password=args.password, keyfile=args.keyfile)
     else:
         run_script(parser, args.png)
 

@@ -117,6 +117,11 @@ class Screen:
                                    # 'n1' — русские верх+низ (КОИ-7 Н1),
                                    # 'n2' — международная строка + русские
                                    # коды ЭВМ (VT-52, режим линии БЭСМ-6)
+        # счётчик изменений содержимого кадра: для программного управления
+        # (агент ждёт «выдача кончилась» — rev перестал расти) и для чтения
+        # только нового текста; row_rev — отметка каждого ряда
+        self.rev = 0
+        self.row_rev: list[int] = [0] * self.rows
         # представление (PgUp/PgDn): None — авто-следить за курсором;
         # целое — закреплённая верхняя строка окна вывода
         self.view_top: int | None = None
@@ -142,6 +147,9 @@ class Screen:
             del self.attr[rows:]
         self.rows = rows
         self.y = min(self.y, rows - 1)
+        del self.row_rev[rows:]
+        self.row_rev.extend([0] * (rows - len(self.row_rev)))
+        self.touch()
 
     def _push_history(self, row: list[int], attr: list[int]) -> None:
         if self.history_max <= 0:
@@ -162,6 +170,19 @@ class Screen:
         panel = 2 + len(self.service_more)        # черта + ряды подвала
         used = max(self.last_used() + 1, self.y + 1)
         return len(self.history) + used + panel
+
+    def touch(self, y: int | None = None) -> None:
+        """Отметить изменение содержимого кадра (ряда y или всего кадра)."""
+        self.rev += 1
+        if y is None:
+            for i in range(len(self.row_rev)):
+                self.row_rev[i] = self.rev
+        elif 0 <= y < len(self.row_rev):
+            self.row_rev[y] = self.rev
+
+    def changed_since(self, rev: int) -> list[int]:
+        """Номера рядов кадра, изменившихся после отметки `rev`."""
+        return [y for y, r in enumerate(self.row_rev) if r > rev]
 
     def last_used(self) -> int:
         """Последний заполненный ряд кадра (или ряд курсора), -1 — пусто."""
@@ -251,15 +272,21 @@ class Screen:
         self.scrolled += 1             # ряд ушёл из кадра (для протяжки)
         gone = self.cells.pop(0)
         gone_attr = self.attr.pop(0)
+        self.row_rev.pop(0)
         self._push_history(gone, gone_attr)       # в «историю» просмотра
         self.cells.append([0x20] * COLS)
         self.attr.append([0] * COLS)
+        self.row_rev.append(0)
+        self.touch()
 
     def scroll_down(self) -> None:
         self.cells.pop()
         self.attr.pop()
+        self.row_rev.pop()
         self.cells.insert(0, [0x20] * COLS)
         self.attr.insert(0, [0] * COLS)
+        self.row_rev.insert(0, 0)
+        self.touch()
 
     # --- навигация по словам (Ctrl+стрелки клавиатуры 15ВВВ) ----------
     # разделители слова — пробел и точка (знак конца предложений в Н1);
@@ -328,26 +355,33 @@ class Screen:
             # а не по будущим байтам
             a |= ATTR_CTRL | ATTR_BLINK
         self.attr[self.y][self.x] = a
+        self.row_rev[self.y] = self.rev + 1
         if not advance:
+            self.rev += 1
             return
         self.x += 1
         self.wrap_cursor()
+        self.rev += 1
 
     def erase_eol(self) -> None:
         for x in range(self.x, COLS):
             self.cells[self.y][x] = 0x20
             self.attr[self.y][x] = 0
+        self.touch(self.y)
 
     def erase_eod(self) -> None:
         self.erase_eol()
         for y in range(self.y + 1, self.rows):
             self.cells[y] = [0x20] * COLS
             self.attr[y] = [0] * COLS
+            self.row_rev[y] = self.rev + 1
+        self.rev += 1
 
     def clear_all(self) -> None:
         self.cells = [[0x20] * COLS for _ in range(self.rows)]
         self.attr = [[0] * COLS for _ in range(self.rows)]
         self.x = self.y = 0
+        self.touch()
 
     def clear_screen_kept(self) -> None:
         """Клавиша «ОЧИСТКА»: экран (кадр ЭВМ) очищается с возвратом в
