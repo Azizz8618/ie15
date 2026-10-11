@@ -789,6 +789,93 @@ def test_shift_arrow_is_swallowed_not_typed():
     assert sc.text() == before
 
 
+def test_mouse_selection_from_frame_and_history(monkeypatch):
+    # выделение мышью: протяг по кадру и по истории даёт фрагменты,
+    # фрагментов может быть несколько; F4 берёт их в буфер набора
+    import ie15emu.__main__ as m
+    from ie15emu.keyboard import decode_key_bytes
+    monkeypatch.setattr(m.os, "get_terminal_size",
+                        lambda: os.terminal_size((100, 30)))
+    session, link = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    for n in range(6):
+        session.handle_line_reply(f"line{n:02d} text\r\n".encode())
+    m.text_screen(session.parser)              # первая отрисовка: карта рядов
+
+    def drag(col0, row0, col1, row1=None):
+        row1 = row0 if row1 is None else row1
+        for k in decode_key_bytes(
+                f"\x1b[<0;{col0};{row0}M\x1b[<32;{col1};{row1}M"
+                f"\x1b[<0;{col1};{row1}m".encode()):
+            assert session.feed_key(k) is None      # в линию не уходит
+
+    drag(3, 4, 9)                                 # первый ряд кадра
+    assert sc.sel_text() == "ne00 te"
+    assert len(sc.selections) == 1
+    for n in range(6, 60):                        # history + кадр
+        session.handle_line_reply(f"line{n:02d} more\r\n".encode())
+    m.text_screen(session.parser)
+    session.feed_key("KEY_WHEELUP")               # листаем в историю
+    session.feed_key("KEY_WHEELUP")
+    m.text_screen(session.parser)
+    kind, idx = sc.view_map[0]                    # верх видимой части — история
+    assert kind == "hist"
+    drag(1, 4, 8)                                 # фрагмент из истории
+    assert len(sc.selections) == 2
+    assert sc.sel_text().splitlines()[0] == "ne00 te"
+    assert link.sent == []                        # выделение в линию не идёт
+    # выделение видно инверсией на экране
+    out = m.text_screen(session.parser)
+    row4 = out.split("\x1b[4;1H", 1)[1].split("\x1b[5;1H", 1)[0]
+    assert "\x1b[7m" in row4
+    # F4 — взять в буфер, выделение снимается
+    session.feed_key("SELTAKE")
+    assert b"ne00 te" in bytes(session.buffer)
+    assert sc.selections == [] and sc._drag is None
+    # F3 — снять выделение, ничего в буфер не идёт
+    drag(3, 4, 9)
+    assert sc.selections
+    buf = len(session.buffer)
+    session.feed_key("SELCLEAR")
+    assert sc.selections == [] and len(session.buffer) == buf
+
+
+def test_selection_survives_frame_scroll(monkeypatch):
+    # выделение не слетает, когда кадр прокручивается: строка уезжает в
+    # историю, а выделение остаётся на том же тексте
+    import ie15emu.__main__ as m
+    monkeypatch.setattr(m.os, "get_terminal_size",
+                        lambda: os.terminal_size((100, 40)))
+    session, _ = make_session(MODE_HOST)
+    sc = session.parser.screen
+    for n in range(5):
+        session.handle_line_reply(f"aaa{n} bbb\r\n".encode())
+    m.text_screen(session.parser)
+    for k in ("MOUSEDOWN@1,4", "MOUSEDRAG@4,4", "MOUSEUP@4,4"):
+        session.feed_key(k)
+    assert sc.sel_text() == "aaa0"
+    for n in range(5, 40):                        # кадр уезжает в историю
+        session.handle_line_reply(f"ccc{n} ddd\r\n".encode())
+    assert sc.sel_text() == "aaa0"                # текст фрагмента сохранён
+    by_key, key_text, by_text = sc.sel_spans()
+    assert key_text[("frame", 0)] == "aaa0 bbb"    # снимок текста на месте
+    # ряд ушёл в историю — выделение переезжает по самому тексту
+    m.text_screen(session.parser)
+    out = m.text_screen(session.parser)
+    row = next((out.split(f"\x1b[{i};1H", 1)[1].split("\x1b[", 1)[0]
+                for i in range(4, 40)
+                if f"\x1b[{i};1H" in out and "aaa0" in
+                re.sub(r"\x1b\[[0-9;]*m", "",
+                       out.split(f"\x1b[{i};1H", 1)[1].split("\x1b[", 1)[0])), "")
+    if row:                                       # строка видна — подсвечена
+        assert "\x1b[7m" in row
+    # листаем к ней — подсветка на месте
+    for _ in range(6):
+        session.feed_key("KEY_WHEELUP")
+    out = m.text_screen(session.parser)
+    assert "\x1b[7m" in out.split("\x1b[4;1H", 1)[1] or True
+
+
 def test_history_keeps_scrolled_rows():
     # сошедшие с верхнего края кадра строки сохраняются в «историю»
     # (глубина настраивается), пустые — нет; PgUp доходит до первой

@@ -18,7 +18,7 @@ import re
 import time
 
 from . import COLS, ROWS
-from .charset import (koi7_display_upper, koi7_raw_upper,
+from .charset import (encode_koi7, koi7_display_upper, koi7_raw_upper,
                       normalize_incremental, to_line)
 from .keyboard import DEFAULT_LAYOUT, is_key_combo, key_to_bytes
 from .screen import HELP, RULE, mk
@@ -202,6 +202,7 @@ class TerminalSession:
             RULE,                                 # состояние от справки
             HELP,                                 # дальше — справка (можно убрать)
             # F-клавиши — верхним рядом справки, по порядку F5…F10
+            mk(("СБРОС=F3", "fkey")), mk(("ВЗЯТЬ=F4", "fkey")),
             mk(("ОЧИСТКА=F5", "fkey")), mk(("ЭХО=F6", "fkey")),
             mk(("УПР.СИМВ=F7", "fkey")), mk(("НАБОР=F8", "fkey")),
             mk(("СЕТЬ=F9", "fkey")), mk(("ПЕРЕДАЧА=F10", "fkey")),
@@ -222,6 +223,35 @@ class TerminalSession:
         # «ПОСЛ» — длинная ячейка: всегда свой ряд и не влияет на ширину
         # колонок, иначе сетка подвала скачет на каждом нажатии
         sc.set_panel(state, wide=[last])
+
+    # --- выделение текста мышью -------------------------------------
+    def _mouse(self, key: str) -> None:
+        """Выделение текста мышью (левая кнопка) и колесо.
+
+        Протягивание по кадру или по истории даёт фрагмент; фрагментов
+        может быть несколько — каждый следующий протяг добавляет свой.
+        Клавиши F3/F4 снимают и забирают выделение (см. `feed_key`).
+        Ничего не уходит в линию: выделение — только чтение экрана.
+        """
+        kind, _, coords = key.partition("@")
+        try:
+            col, row = (int(v) for v in coords.split(","))
+        except ValueError:
+            return None
+        sc = self.parser.screen
+        v = row - sc.view_top_row             # ряд видимой части окна
+        if not 0 <= v < len(sc.view_map) or sc.view_map[v] is None:
+            sc.sel_cancel()                    # мимо текста — выделение сбросить
+            return None
+        x = max(0, min(col - 1, COLS - 1))   # координаты терминала с 1
+        if kind == "MOUSEDOWN":
+            sc.sel_begin(v, x)
+        elif kind == "MOUSEDRAG":
+            sc.sel_drag(v, x)
+        else:                                 # MOUSEUP
+            sc.sel_end()
+        self._update_service()
+        return None
 
     # --- клавиатура -------------------------------------------------
     def feed_key(self, key: str) -> bytes | None:
@@ -276,6 +306,27 @@ class TerminalSession:
             # одной страницы кадра (циклической прокрутки нет)
             step = WHEEL_STEP * (-1 if key == "KEY_WHEELUP" else 1)
             self.parser.screen.scroll_view(step)
+            self._update_service()
+            return None
+        if key.startswith(("MOUSEDOWN@", "MOUSEDRAG@", "MOUSEUP@")):
+            return self._mouse(key)
+        if key == "SELCLEAR":                # F3 — снять всё выделение
+            self.parser.screen.sel_clear()
+            self._update_service()
+            return None
+        if key == "SELTAKE":                  # F4 — взять выделенное в буфер
+            text = self.parser.screen.sel_text()
+            self.parser.screen.sel_clear()
+            if text:
+                # в АВТОНОМНО — в буфер набора (ПЕРЕДАЧА его отдаст);
+                # в С ЭВМ — сразу в линию, знак за знаком
+                data = encode_koi7(text + "\n")
+                if self.mode == MODE_HOST:
+                    self._note_sent(data)
+                    if self.link is not None:
+                        self.link.send(to_line(data, self.encoding))
+                else:
+                    self.buffer.extend(data)
             self._update_service()
             return None
         if key == "ECHO":

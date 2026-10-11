@@ -81,6 +81,14 @@ class Screen:
         self._panel_rows: list[list[Cell]] = []   # ряды подвала (с цветами)
         self._panel_colw = COLS    # ширина колонки сетки подвала
         self.status_cells: list[Cell] = []   # строка состояния линии
+        # выделение текста мышью: список фрагментов, каждый — список
+        # (вид, номер ряда, от, до, текст ряда); незаконченное протягивание
+        self.selections: list[list[tuple[str, int, int, int, str]]] = []
+        self._drag: tuple | None = None
+        # карта видимой части окна: номер ряда окна → (вид, номер ряда);
+        # её заполняет отрисовка (text_screen), по ней клик попадает в текст
+        self.view_map: list[tuple[str, int] | None] = []
+        self.view_top_row = 4          # номер ряда окна для view_map[0]
         self.show_help = True   # ряды-легенды подвала (справка по клавишам)
         self._service_rows: list[str] = []   # готовые ряды (set_service)
         self.x = 0
@@ -375,6 +383,108 @@ class Screen:
         self._panel = ([mk(c) if isinstance(c, str) else c for c in cells],
                        [mk(c) if isinstance(c, str) else c for c in wide])
         self.relayout()
+
+    # --- выделение текста мышью ------------------------------------
+    # Выделение живёт в координатах содержимого: ряд кадра («frame», y)
+    # или ряд истории («hist», i) плюс диапазон знаков. Каждый завершённый
+    # «протяг» — отдельный фрагмент, фрагментов может быть сколько угодно;
+    # текст фрагмента снимается снимком в момент отпускания кнопки.
+    def sel_begin(self, row: int, x: int) -> None:
+        """Начало протягивания (row — ряд видимой части окна)."""
+        self._drag = (row, x)
+
+    def sel_drag(self, row: int, x: int) -> None:
+        if self._drag is not None and len(self._drag) == 2:
+            self._drag = (self._drag[0], self._drag[1], row, x)
+
+    def sel_end(self) -> str:
+        """Отпускание кнопки: фрагмент зафиксирован, вернём его текст."""
+        drag = self._drag
+        self._drag = None
+        if not drag or len(drag) < 4:
+            return ""
+        v0, x0 = drag[0], drag[1]
+        v1, x1 = drag[2], drag[3]
+        if v1 < v0:
+            v0, x0, v1, x1 = v1, x1, v0, x0
+        frag: list[tuple[str, int, int, int, str]] = []
+        text_lines: list[str] = []
+        for v in range(v0, v1 + 1):
+            ent = self.view_map[v] if 0 <= v < len(self.view_map) else None
+            if ent is None:
+                continue
+            kind, idx = ent
+            row_text = self.row_text(kind, idx)
+            if row_text is None:
+                continue
+            a = x0 if v == v0 else 0
+            b = x1 if v == v1 else len(row_text) - 1
+            a = max(0, min(a, len(row_text) - 1))
+            b = max(a, min(b, len(row_text) - 1))
+            frag.append((kind, idx, a, b, row_text))
+            text_lines.append(row_text[a:b + 1].strip())
+        if not frag:
+            return ""
+        self.selections.append(frag)
+        return "\n".join(t for t in text_lines if t)
+
+    def sel_cancel(self) -> None:
+        self._drag = None
+
+    def sel_clear(self) -> None:
+        """Снять всё выделение (в том числе незаконченное протягивание)."""
+        self._drag = None
+        self.selections.clear()
+
+    def sel_text(self) -> str:
+        """Весь выделенный текст: фрагменты в порядке выделения."""
+        out = []
+        for frag in self.selections:
+            for _, _, a, b, row_text in frag:
+                s = row_text[a:b + 1].strip()
+                if s:
+                    out.append(s)
+        return "\n".join(out)
+
+    def sel_spans(self):
+        """Данные для отрисовки выделения инверсией.
+
+        Возвращает (по ряду, текст ряда, по тексту): диапазоны знаков по
+        ключу (вид, номер ряда) — им пользуемся, только если текст ряда
+        совпал со снимком (иначе ряд уже другой — кадр прокрутился), и
+        запасной ключ по самому тексту — тогда выделение остаётся на
+        «уехавшей» строке, когда она ушла в историю.
+        """
+        by_key: dict[tuple[str, int], list[tuple[int, int]]] = {}
+        key_text: dict[tuple[str, int], str] = {}
+        by_text: dict[int, list[tuple[int, int]]] = {}
+        for frag in self.selections:
+            for kind, idx, a, b, row_text in frag:
+                by_key.setdefault((kind, idx), []).append((a, b))
+                key_text[(kind, idx)] = row_text
+                by_text.setdefault(hash(row_text), []).append((a, b))
+        return by_key, key_text, by_text
+
+    def row_text(self, kind: str, idx: int) -> str | None:
+        """Текст ряда кадра или истории как он виден на экране."""
+        from .charset import display_char
+        if kind == "hist":
+            if not 0 <= idx < len(self.history):
+                return None
+            cells, attrs = self.history[idx]
+        else:
+            if not 0 <= idx < self.rows:
+                return None
+            cells, attrs = self.cells[idx], self.attr[idx]
+        out = []
+        for x, code in enumerate(cells[:COLS]):
+            a = attrs[x]
+            if a & ATTR_CTRL:
+                out.append(display_char(code | 0x40, "n0") if self.show_ctrl
+                           else " ")
+            else:
+                out.append(display_char(code, self.display_set))
+        return "".join(out).rstrip()
 
     def panel_cells(self) -> list[str]:
         """Ячейки подвала текстом, как их сложил set_panel (для проверок)."""

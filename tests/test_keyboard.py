@@ -21,8 +21,12 @@ def test_mouse_sgr_wheel():
     assert decode_key_bytes(b"\x1b[<64;10;5m") == []        # отпускание
     assert decode_key_bytes(b"\x1b[<68;1;1M") == [KEY_WHEELUP]   # +shift
     assert decode_key_bytes(b"\x1b[<81;1;1M") == [KEY_WHEELDOWN]  # +ctrl
-    assert decode_key_bytes(b"\x1b[<0;3;4M\x1b[<0;3;4m") == []    # клик
-    assert decode_key_bytes(b"\x1b[<32;1;1M") == []          # движение
+    # левая кнопка — выделение текста: нажатие, протягивание, отпускание
+    assert decode_key_bytes(b"\x1b[<0;3;4M") == ["MOUSEDOWN@3,4"]
+    assert decode_key_bytes(b"\x1b[<32;9;4M") == ["MOUSEDRAG@9,4"]
+    assert decode_key_bytes(b"\x1b[<0;9;4m") == ["MOUSEUP@9,4"]
+    assert decode_key_bytes(b"\x1b[<2;5;5M") == []          # правая
+    assert decode_key_bytes(b"\x1b[<32;1;1m") == []          # движение без кнопки
     assert decode_key_bytes(b"a\x1b[<64;1;1Mb") == ["a", KEY_WHEELUP, "b"]
     # стрелки/функциональные после мышиных событий не пострадали
     assert decode_key_bytes(b"\x1b[<64;1;1M\x1b[A") == [KEY_WHEELUP, "KEY_UP"]

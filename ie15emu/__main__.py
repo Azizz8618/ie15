@@ -490,8 +490,18 @@ def text_screen(parser: Parser) -> str:
     view_h = max(1, term_h - 3)
     sc.set_rows(view_h - sc.panel_rows() - 1)
 
-    def row_line(cells, attr, y=None):
+    sel_key, sel_text, sel_by_text = sc.sel_spans()   # выделение мышью
+    view_map: list[tuple[str, int] | None] = []   # ряд вида → (вид, номер)
+
+    def row_line(cells, attr, y=None, kind=None, idx=0):
         from .charset import display_char
+        mark = None
+        if kind is not None:
+            text = sc.row_text(kind, idx) or ""
+            if sel_text.get((kind, idx)) == text:
+                mark = sel_key.get((kind, idx))
+            else:                      # ряд «уехал» (прокрутка кадра)
+                mark = sel_by_text.get(hash(text))
         toks = []
         for x, code in enumerate(cells):
             a = attr[x]
@@ -509,19 +519,31 @@ def text_screen(parser: Parser) -> str:
                 ch = f"\x1b[5;7m{ch}\x1b[0m"
             if y is not None and y == sc.y and x == sc.x:
                 ch = f"\x1b[7m{ch}\x1b[27m"
+            elif mark and any(a0 <= x <= b0 for a0, b0 in mark):
+                ch = f"\x1b[7m{ch}\x1b[27m"      # выделенный текст
             toks.append(ch)
         return "".join(toks)
 
-    lines = [row_line(c, a) for c, a in sc.history]
+    def hist_line(i):
+        cells, attrs = sc.history[i]
+        view_map.append(("hist", i))
+        return row_line(cells, attrs, None, "hist", i)
+
+    def frame_line(y):
+        view_map.append(("frame", y))
+        return row_line(sc.cells[y], sc.attr[y], y, "frame", y)
+
+    lines = [hist_line(i) for i in range(len(sc.history))]
     # в вид идут только ИСПОЛЬЗУЕМЫЕ ряды кадра: пустые ряды под кадром
     # не занимали бы место в окне — из-за них первые строки вывода
     # выталкивались из вида, а подвал уезжал за нижний край
     used = max(sc.last_used() + 1, sc.y + 1)
-    lines += [row_line(row, sc.attr[y], y)
-              for y, row in enumerate(sc.cells[:used])]
+    lines += [frame_line(y) for y in range(used)]
     panel_n = sc.panel_rows() + 1       # ряды подвала + черта над ним
+    view_map.append(None)               # черта над подвалом
     lines.append("-" * sc.panel_cols)     # черта подвала — на всю ширину окна
     lines.extend(sc.panel_styled_rows())   # подвал с цветом значений и групп
+    view_map.extend([None] * len(sc.service_more))
     # окно просмотра (PgUp/PgDn): закреплённый сдвиг или авто-следование
     # за курсором; рисуем абсолютной позицией — в коротком окне ничего
     # не скроллится, верх поля всегда виден
@@ -540,6 +562,11 @@ def text_screen(parser: Parser) -> str:
         pad = view_h - len(view)
         view = (view[:len(view) - panel_n] + [""] * pad +
                 view[len(view) - panel_n:])
+    # карта «ряд окна → ряд кадра/истории»: по ней клик мыши попадает в текст
+    sc.view_map = view_map[top:top + view_h]
+    while len(sc.view_map) < view_h:
+        sc.view_map.append(None)
+    sc.view_top_row = 4
     out = "\x1b[H\x1b[2J"
     # строка состояния линии, черта и пустая строка — вне кадра ЭВМ, в
     # листание (PgUp/колесо) они не попадают

@@ -235,10 +235,14 @@ KEY_ECHO = "ECHO"       # клавиша «ЭХО»: подавить вывод
 KEY_CLEAR = "CLEAR"     # «ОЧИСТКА»: экран в историю, кадр — в начало
 KEY_WHEELUP = "KEY_WHEELUP"       # колесо мыши вверх: листание «истории»
 KEY_WHEELDOWN = "KEY_WHEELDOWN"   # колесо мыши вниз: к кадру ЭВМ
+KEY_SELCLEAR = "SELCLEAR"   # снять всё выделение мышью (F3)
+KEY_SELTAKE = "SELTAKE"     # взять выделенное в буфер набора (F4)
 
 SPECIAL_KEYS = {"KEY_SEND": KEY_SEND, "KEY_MODE": KEY_MODE,
                 "KEY_CMDSET": KEY_CMDSET, "KEY_BLINK": KEY_BLINK,
                 "KEY_ECHO": KEY_ECHO, "KEY_CLEAR": KEY_CLEAR,
+                "KEY_SELCLEAR": KEY_SELCLEAR, "KEY_SELTAKE": KEY_SELTAKE,
+                "F3": KEY_SELCLEAR, "F4": KEY_SELTAKE,
                 "F5": KEY_CLEAR, "F6": KEY_ECHO, "F7": KEY_BLINK,
                 "F8": KEY_CMDSET, "F9": KEY_MODE, "F10": KEY_SEND}
 
@@ -255,6 +259,8 @@ SEQ_KEYS = {
     b"\x1b[4~": "KEY_END", b"\x1b[F": "KEY_END", b"\x1bOF": "KEY_END",
     b"\x1b[2~": "KEY_INSERT", b"\x1b[3~": "KEY_DELETE",
     b"\x1b[5~": "KEY_PAGEUP", b"\x1b[6~": "KEY_PAGEDOWN",
+    b"\x1bOR": KEY_SELCLEAR, b"\x1b[13~": KEY_SELCLEAR,   # F3 — снять выделение
+    b"\x1bOS": KEY_SELTAKE, b"\x1b[14~": KEY_SELTAKE,     # F4 — взять в буфер
     b"\x1b[15~": KEY_CLEAR,                         # F5 — ОЧИСТКА экрана
     b"\x1b[17~": KEY_ECHO,                          # F6 — ЭХО (подавить набор)
     b"\x1b[18~": KEY_BLINK,                         # F7 — УПР.СИМВ (показ УП)
@@ -344,32 +350,41 @@ def _parse_mod_key(data: bytes, i: int):
 def _parse_mouse(data: bytes, i: int):
     """Мышь терминала в режиме SGR (мышь отдана приложению).
 
-    Возвращает (имя клавиши или «», сколько байт съели). Колесо вверх/вниз
-    (кнопки 64/65) — листание «истории» выдачи, остальные события (клики,
-    движение) эмулятору не нужны: съедаем молча, чтобы они не попали в
-    линию как мусор.
+    Возвращает (имя нажатия или «», сколько байт съели). Колесо влево-вниз
+    — листание «истории», левая кнопка — выделение текста (нажатие,
+    протягивание, отпускание; координаты окна в знаках после «@»).
+    Остальные события (правая кнопка, движение без кнопки) съедаются
+    молча, чтобы они не попали в линию как мусор.
     """
     j = data.find(b"<", i)
     if j != i + 2:
         return None, 0
     k = data.find(b"M", j)
-    m = data.find(b"m", j)                      # отпускание — без колеба
+    m = data.find(b"m", j)                      # отпускание
     ends = [p for p in (k, m) if p >= 0 and p - j < 24]
     if not ends:
         return None, 0
     k = min(ends)
     try:
-        btn = int(data[j + 1:k].split(b";")[0])
+        btn, x, y = (int(v) for v in data[j + 1:k].split(b";"))
     except ValueError:
         return None, 0
-    if data[k:k + 1] != b"M":                  # отпускание колеса — тихо
-        return "", k + 1 - i
-    base = btn & ~0b10100                     # без shift/meta/ctrl (4|8|16)
-    if base == 64:
+    base = btn & ~0b10100                       # без shift/meta/ctrl (4|8|16)
+    if data[k:k + 1] != b"M":                   # отпускание
+        if base == 0:                           # левой кнопки — конец фрагмента
+            return f"MOUSEUP@{x},{y}", k + 1 - i
+        return "", k + 1 - i                   # колесо — тихо
+    if base == 64:                              # колесо вверх
         return KEY_WHEELUP, k + 1 - i
-    if base == 65:
+    if base == 65:                              # колесо вниз
         return KEY_WHEELDOWN, k + 1 - i
-    return "", k + 1 - i
+    if base == 0:                               # нажатие левой кнопки
+        kind = "MOUSEDOWN"
+    elif base in (32, 33, 64):                 # протягивание с кнопкой
+        kind = "MOUSEDRAG"
+    else:                                       # правая/средняя — тихо
+        return "", k + 1 - i
+    return f"{kind}@{x},{y}", k + 1 - i
 
 
 def is_key_combo(key: str) -> bool:
