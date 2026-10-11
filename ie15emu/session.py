@@ -242,15 +242,27 @@ class TerminalSession:
         sc = self.parser.screen
         v = row - sc.view_top_row             # ряд видимой части окна
         if not 0 <= v < len(sc.view_map) or sc.view_map[v] is None:
-            sc.sel_cancel()                    # мимо текста — выделение сбросить
+            if kind == "MOUSEDOWN":
+                # клик мимо текста — протяжку отменяем; уже выбранные
+                # фрагменты при этом остаются
+                sc.sel_cancel()
+            elif kind == "MOUSEUP":
+                # отпустили над подвалом/за краем — протяжку надо закончить,
+                # иначе она повисла бы до следующего щелчка
+                sc.sel_end()
+            # движение мимо текста игнорируем: начало и конец не теряются
             return None
+        kind_row, kind_idx = sc.view_map[v]
         x = max(0, min(col - 1, COLS - 1))   # координаты терминала с 1
         if kind == "MOUSEDOWN":
-            sc.sel_begin(v, x)
-        elif kind == "MOUSEDRAG":
-            sc.sel_drag(v, x)
-        else:                                 # MOUSEUP
+            sc.sel_begin(kind_row, kind_idx, x)
+        elif kind == "MOUSEUP":
+            # отпускание — тоже конец протяжки: быстрый протяг не всегда
+            # сопровождается событиями движения, иначе выделялся бы один знак
+            sc.sel_drag(kind_row, kind_idx, x)
             sc.sel_end()
+        else:                                 # MOUSEDRAG
+            sc.sel_drag(kind_row, kind_idx, x)
         # подвал не пересобираем: события мыши идут десятками в секунду,
         # а состояние сеанса от них не меняется
         return None

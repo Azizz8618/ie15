@@ -33,6 +33,10 @@ def test_mouse_sgr_wheel():
     assert decode_key_bytes(b"\x1b[64;9;6M") == ["MOUSEDRAG@9,6"]
     assert decode_key_bytes(b"\x1b[M\x20\x23\x24") == ["MOUSEDOWN@3,4"]
     assert decode_key_bytes(b"\x1b[M\x40\x29\x26") == ["MOUSEDRAG@9,6"]
+    # X10-код 3 — отпускание левой кнопки (и код 35 — с битом движения);
+    # без разбора отпускания выделение не фиксировалось бы на X10
+    assert decode_key_bytes(b"\x1b[M\x23\x29\x26") == ["MOUSEUP@9,6"]
+    assert decode_key_bytes(b"\x1b[M\x43\x29\x26") == ["MOUSEUP@9,6"]
     assert decode_key_bytes(b"\x1b[M\x60\x21\x21") == [KEY_WHEELUP]
     assert decode_key_bytes(b"\x1b[M\x61\x21\x21") == [KEY_WHEELDOWN]
     assert decode_key_bytes(b"a\x1b[<64;1;1Mb") == ["a", KEY_WHEELUP, "b"]

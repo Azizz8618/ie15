@@ -508,7 +508,9 @@ def text_screen(parser: Parser) -> str:
     sc.set_rows(view_h - sc.panel_rows() - 1)
 
     sel_key, sel_text, sel_by_text = sc.sel_spans()   # выделение мышью
-    has_sel = bool(sc.selections)
+    # выделение есть и у завершённых фрагментов, и у незаконченной
+    # протяжки — во втором случае её видно прямо под указателем
+    has_sel = bool(sc.selections) or sc._drag is not None
     view_map: list[tuple[str, int] | None] = []   # ряд вида → (вид, номер)
 
     def row_line(cells, attr, y=None, kind=None, idx=0):

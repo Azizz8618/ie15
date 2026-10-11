@@ -389,8 +389,12 @@ def _parse_mouse(data: bytes, i: int):
     btn &= ~0b10100                              # без shift/meta/ctrl
     moving = bool(btn & 0b110000)                # 32 — движение, 64 — drag
     btn &= ~0b110000
+    if btn == 3:                                  # X10: отпускание — код 3
+        press = False                          # (в SGR такого кода не бывает)
     if not press:                                 # отпускание
-        if btn == 0 and not moving:
+        # кнопка 0 без бита движения — обычное отпускание; X10-код 3
+        # (в том числе с битом движения при отпускании протяжки) — тоже
+        if (btn == 0 and not moving) or btn == 3:
             return f"MOUSEUP@{x},{y}", end - i
         return "", end - i                       # колесо/движение — тихо
     if btn == 64:                                 # колесо вверх

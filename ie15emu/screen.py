@@ -84,7 +84,7 @@ class Screen:
         # выделение текста мышью: список фрагментов, каждый — список
         # (вид, номер ряда, от, до, текст ряда); незаконченное протягивание
         self.selections: list[list[tuple[str, int, int, int, str]]] = []
-        self._drag: list[int] | None = None   # [v0, x0, v, x]
+        self._drag: list | None = None   # [ak, ai, ax, ek, ei, ex, текст_ак]
         # карта видимой части окна: номер ряда окна → (вид, номер ряда);
         # её заполняет отрисовка (text_screen), по ней клик попадает в текст
         self.view_map: list[tuple[str, int] | None] = []
@@ -390,31 +390,95 @@ class Screen:
     # или ряд истории («hist», i) плюс диапазон знаков. Каждый завершённый
     # «протяг» — отдельный фрагмент, фрагментов может быть сколько угодно;
     # текст фрагмента снимается снимком в момент отпускания кнопки.
-    def sel_begin(self, row: int, x: int) -> None:
-        """Начало протягивания (row — ряд видимой части окна).
+    #
+    # Протяжка держится в координатах содержимого, а НЕ окна: во время
+    # протягивания ЭВМ успевает выдать строки, кадр смещается, и привязка
+    # к ряду окна уводила начало на другую строку — выделение разрасталось
+    # до половины экрана. Снимок текста анкера позволяет найти строку и
+    # после того, как она ушла в историю.
+    def sel_begin(self, kind: str, idx: int, x: int) -> None:
+        """Начало протягивания (kind, idx — ряд кадра или истории)."""
+        self._drag = [kind, idx, x, kind, idx, x,
+                      self.row_text(kind, idx) or ""]
 
-        Храним [начало_ряд, начало_знак, текущий_ряд, текущий_знак]:
-        начало не меняется, правый конец тянется за указателем.
-        """
-        self._drag = [row, x, row, x]
-
-    def sel_drag(self, row: int, x: int) -> None:
+    def sel_drag(self, kind: str, idx: int, x: int) -> None:
+        """Текущая точка протягивания (конец тянется за указателем)."""
         if self._drag is not None:
-            self._drag[2] = row
-            self._drag[3] = x
+            self._drag[3] = kind
+            self._drag[4] = idx
+            self._drag[5] = x
 
-    def sel_end(self) -> str:
-        """Отпускание кнопки: фрагмент зафиксирован, вернём его текст."""
+    def _view_of(self, kind: str, idx: int, text: str | None = None
+                 ) -> int | None:
+        """Ряд окна с данным содержимым.
+
+        Если задан текст, ряд подходит только когда текст совпал: при выводе
+        ЭВМ кадр смещается, и ряд с прежним номером уже другой строкой.
+        """
+        try:
+            v = self.view_map.index((kind, idx))
+        except ValueError:
+            return None
+        if text is not None and self.row_text(kind, idx) != text:
+            return None
+        return v
+
+    def _view_by_text(self, text: str, near: int | None) -> int | None:
+        """Ряд окна с таким же текстом (строка уехала в историю)."""
+        if not text:
+            return None
+        best = None
+        for v, ent in enumerate(self.view_map):
+            if ent is None:
+                continue
+            if self.row_text(*ent) == text and (best is None or
+                                                (near is not None and
+                                                 abs(v - near) <
+                                                 abs(best - near))):
+                best = v
+        return best
+
+    def _clamp_view(self, ve: int) -> int | None:
+        """Ряд окна для начала протяжки, если строка ушла из вида.
+
+        Выводит ЭВМ, начало уехало за верх окна — прижимаем его к краю
+        видимой части (ближнему к концу протяжки), иначе выделение было бы
+        пустым.
+        """
+        n = len(self.view_map)
+        if n == 0:
+            return None
+        va = 0 if ve >= n // 2 else n - 1
+        step = 1 if va == 0 else -1
+        while 0 <= va < n:
+            ent = self.view_map[va]
+            if ent is not None and (self.row_text(*ent) or "").strip():
+                return va
+            va += step
+        return None
+
+    def _drag_fragment(self) -> list[tuple[str, int, int, int, str]]:
+        """Фрагмент незаконченной протяжки — для подсветки на лету."""
         drag = self._drag
-        self._drag = None
         if not drag:
-            return ""
-        v0, x0, v1, x1 = drag
-        if v1 < v0:
-            v0, x0, v1, x1 = v1, x1, v0, x0
-        frag: list[tuple[str, int, int, int, str]] = []
-        text_lines: list[str] = []
-        for v in range(v0, v1 + 1):
+            return []
+        ak, ai, ax, ek, ei, ex, atext = drag
+        ve = self._view_of(ek, ei)
+        va = self._view_of(ak, ai, atext)
+        if ve is None:
+            return []
+        if va is None:
+            va = self._view_by_text(atext, ve) or self._clamp_view(ve)
+        if va is None:
+            return []
+        return self._span(va, ax, ve, ex)
+
+    def _span(self, va: int, xa: int, vb: int, xb: int):
+        """Фрагмент от точки (va, xa) до точки (vb, xb) по рядам окна."""
+        if vb < va:
+            va, xa, vb, xb = vb, xb, va, xa
+        out: list[tuple[str, int, int, int, str]] = []
+        for v in range(va, vb + 1):
             ent = self.view_map[v] if 0 <= v < len(self.view_map) else None
             if ent is None:
                 continue
@@ -422,16 +486,43 @@ class Screen:
             row_text = self.row_text(kind, idx)
             if row_text is None:
                 continue
-            a = x0 if v == v0 else 0
-            b = x1 if v == v1 else len(row_text) - 1
+            a = xa if v == va else 0
+            b = xb if v == vb else len(row_text) - 1
             a = max(0, min(a, len(row_text) - 1))
             b = max(a, min(b, len(row_text) - 1))
-            frag.append((kind, idx, a, b, row_text))
-            text_lines.append(row_text[a:b + 1].strip())
+            piece = row_text[a:b + 1].strip()
+            # пустой ряд в выделение не попадает: подсветка по тексту иначе
+            # нашла бы его вместе со всеми пустыми рядами кадра
+            if not piece:
+                continue
+            out.append((kind, idx, a, b, row_text))
+        return out
+
+    def sel_end(self) -> str:
+        """Отпускание кнопки: фрагмент зафиксирован, вернём его текст."""
+        drag = self._drag
+        self._drag = None
+        if not drag:
+            return ""
+        ak, ai, ax, ek, ei, ex, atext = drag
+        ve = self._view_of(ek, ei)
+        va = self._view_of(ak, ai, atext)
+        if va is None:
+            va = (self._view_by_text(atext, ve) if ve is not None
+                  else None) or self._clamp_view(ve or 0)
+        if va is None:
+            return ""
+        if ve is None:
+            # отпустили мимо текста (над подвалом, за краем окна) — конец
+            # прижимаем к последней строке с текстом
+            ve = self._clamp_view(va)
+            if ve is None:
+                ve = va
+        frag = self._span(va, ax, ve, ex)
         if not frag:
             return ""
         self.selections.append(frag)
-        return "\n".join(t for t in text_lines if t)
+        return "\n".join(t[4][t[2]:t[3] + 1].strip() for t in frag)
 
     def sel_cancel(self) -> None:
         self._drag = None
@@ -463,11 +554,15 @@ class Screen:
         by_key: dict[tuple[str, int], list[tuple[int, int]]] = {}
         key_text: dict[tuple[str, int], str] = {}
         by_text: dict[int, list[tuple[int, int]]] = {}
-        for frag in self.selections:
+        for frag in list(self.selections) + [self._drag_fragment()]:
             for kind, idx, a, b, row_text in frag:
                 by_key.setdefault((kind, idx), []).append((a, b))
                 key_text[(kind, idx)] = row_text
-                by_text.setdefault(hash(row_text), []).append((a, b))
+                if row_text:
+                    # запасной ключ только для непустых строк: пустой ряд
+                    # совпал бы с любой пустой строкой кадра и подсветка
+                    # разошлась бы на весь экран
+                    by_text.setdefault(hash(row_text), []).append((a, b))
         return by_key, key_text, by_text
 
     def row_text(self, kind: str, idx: int) -> str | None:

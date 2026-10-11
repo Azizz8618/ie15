@@ -913,6 +913,119 @@ def test_selection_drag_is_fast_and_complete(monkeypatch):
     assert "row00" in sc.sel_text() and "row05" in sc.sel_text()
 
 
+def _inverted_rows(out: str) -> list[str]:
+    """Ряды окна с инверсией (выделением) — без одиночного курсора."""
+    rows = []
+    for seg in re.split(r"\x1b\[\d+;1H", out)[1:]:
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", seg).rstrip()
+        if plain and seg.count("\x1b[7m") >= 2:
+            rows.append(plain)
+    return rows
+
+
+def test_selection_stays_on_one_line(monkeypatch):
+    # Выделение строки не должно расползаться на весь экран: подсветка
+    # ровно на выбранных рядах, пустые ряды кадра в выделение не попадают
+    # (раньше подсвечивались все разом — у всех текст «»).
+    import ie15emu.__main__ as m
+    monkeypatch.setattr(m.os, "get_terminal_size",
+                        lambda: os.terminal_size((100, 40)))
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    session.handle_line_reply(b"pervaya stroka\r\n")
+    session.handle_line_reply(b"vtoraya stroka\r\n")
+    sc.y = 20                       # между строками — пустые ряды кадра
+    m.text_screen(session.parser)
+    for k in ("MOUSEDOWN@1,4", "MOUSEDRAG@16,4", "MOUSEUP@16,4"):
+        session.feed_key(k)
+    assert sc.sel_text() == "pervaya stroka"
+    assert _inverted_rows(m.text_screen(session.parser)) == ["pervaya stroka"]
+    # многорядная протяжка через пустые ряды: только строки с текстом
+    sc.sel_clear()
+    for k in ("MOUSEDOWN@1,4", "MOUSEDRAG@16,12", "MOUSEUP@16,12"):
+        session.feed_key(k)
+    assert sc.sel_text() == "pervaya stroka\nvtoraya stroka"
+    assert len(_inverted_rows(m.text_screen(session.parser))) == 2
+
+
+def test_selection_end_position_from_mouseup(monkeypatch):
+    # Быстрый протяг не всегда сопровождается событиями движения: конец
+    # берём из самого отпускания, иначе выделяется один знак.
+    import ie15emu.__main__ as m
+    monkeypatch.setattr(m.os, "get_terminal_size",
+                        lambda: os.terminal_size((100, 40)))
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    session.handle_line_reply(b"stroka proverki\r\n")
+    m.text_screen(session.parser)
+    session.feed_key("MOUSEDOWN@1,4")
+    session.feed_key("MOUSEUP@40,4")              # без MOUSEDRAG
+    assert sc.sel_text() == "stroka proverki"
+
+
+def test_selection_anchor_follows_content_not_view(monkeypatch):
+    # Пока тянут, ЭВМ выдаёт строки и кадр смещается. Начало протяжки
+    # держится за строку, а не за ряд окна: иначе выделение разрасталось
+    # до половины экрана.
+    import ie15emu.__main__ as m
+    monkeypatch.setattr(m.os, "get_terminal_size",
+                        lambda: os.terminal_size((100, 40)))
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    for n in range(20):
+        session.handle_line_reply(f"stroka {n:02d}\r\n".encode())
+    m.text_screen(session.parser)
+    session.feed_key("MOUSEDOWN@1,5")             # вторая строка кадра
+    for _ in range(sc.rows + 4):                  # кадр уезжает в историю
+        session.handle_line_reply(b"more text\r\n")
+    m.text_screen(session.parser)
+    session.feed_key("MOUSEDRAG@6,5")
+    session.feed_key("MOUSEUP@6,5")
+    frag = sc.selections[-1]
+    assert 0 < len(frag) <= sc.rows               # не разошлось, но не пусто
+    assert sc.sel_text()
+
+
+def test_selection_survives_drag_over_panel(monkeypatch):
+    # Протяжка через подвал (мимо текста) не должна терять ни начало,
+    # ни уже выбранные фрагменты
+    import ie15emu.__main__ as m
+    monkeypatch.setattr(m.os, "get_terminal_size",
+                        lambda: os.terminal_size((100, 40)))
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    for n in range(4):
+        session.handle_line_reply(f"stroka {n}\r\n".encode())
+    m.text_screen(session.parser)
+    for k in ("MOUSEDOWN@1,4", "MOUSEDRAG@8,5", "MOUSEUP@8,5"):
+        session.feed_key(k)
+    keep = sc.sel_text()
+    session.feed_key("MOUSEDOWN@1,4")             # вторая протяжка
+    session.feed_key("MOUSEDRAG@10,25")           # указатель над подвалом
+    session.feed_key("MOUSEUP@10,25")
+    assert keep in sc.sel_text()                  # прежний фрагмент цел
+    assert len(sc.selections) == 2
+
+
+def test_selection_highlight_while_dragging(monkeypatch):
+    # Незаконченная протяжка видна сразу: оператор видит, что выделяет
+    import ie15emu.__main__ as m
+    monkeypatch.setattr(m.os, "get_terminal_size",
+                        lambda: os.terminal_size((100, 40)))
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    for n in range(3):
+        session.handle_line_reply(f"stroka {n}\r\n".encode())
+    sc.x = sc.y = 0                                # курсор в стороне
+    m.text_screen(session.parser)
+    session.feed_key("MOUSEDOWN@1,4")
+    session.feed_key("MOUSEDRAG@8,5")
+    assert _inverted_rows(m.text_screen(session.parser)) == ["stroka 0",
+                                                            "stroka 1"]
+    session.feed_key("MOUSEUP@8,5")
+    assert len(sc.selections) == 1
+
+
 def test_selection_highlight_survives_row_change():
     # выделение не должно висеть на изменившемся ряде: подсветка переезжает
     # по тексту, а если текста уже нет — снимается
