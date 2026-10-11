@@ -948,6 +948,70 @@ def test_selection_stays_on_one_line(monkeypatch):
     assert len(_inverted_rows(m.text_screen(session.parser))) == 2
 
 
+def test_selection_highlights_one_of_identical_rows(monkeypatch):
+    # Строки с одинаковым текстом (каталог, меню, повторяющийся запрос)
+    # не должны подсвечиваться разом: выделил одну — подсвечена одна.
+    import ie15emu.__main__ as m
+    monkeypatch.setattr(m.os, "get_terminal_size",
+                        lambda: os.terminal_size((100, 40)))
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    for _ in range(10):
+        session.handle_line_reply(b">>\r\n")
+    sc.x = sc.y = 10                            # курсор в стороне
+    m.text_screen(session.parser)
+    for k in ("MOUSEDOWN@1,4", "MOUSEDRAG@3,4", "MOUSEUP@3,4"):
+        session.feed_key(k)
+    assert sc.sel_text() == ">>"
+    assert len(_inverted_rows(m.text_screen(session.parser))) == 1
+
+
+def test_selection_follows_row_into_visible_history(monkeypatch):
+    # Строка ушла из кадра в историю и видна после PgUp — подсветка должна
+    # её найти. Раньше карта рядов считалась в конце отрисовки, и сверка
+    # шла с картой прошлого кадра: подсветка либо терялась, либо вставала
+    # не туда.
+    import ie15emu.__main__ as m
+    monkeypatch.setattr(m.os, "get_terminal_size",
+                        lambda: os.terminal_size((100, 40)))
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    m.text_screen(session.parser)
+    for n in range(sc.rows + 5):                # заполняем кадр
+        session.handle_line_reply(f"stroka {n:02d}\r\n".encode())
+    m.text_screen(session.parser)
+    for k in ("MOUSEDOWN@1,4", "MOUSEDRAG@9,4", "MOUSEUP@9,4"):
+        session.feed_key(k)
+    assert sc.sel_text() == "stroka 06"
+    for _ in range(3):                          # кадр уезжает в историю
+        session.handle_line_reply(b"novye dannye\r\n")
+    session.feed_key("KEY_PAGEUP")              # листаем к истории
+    assert _inverted_rows(m.text_screen(session.parser)) == ["stroka 06"]
+
+
+def test_selection_keeps_row_even_if_it_left_the_window(monkeypatch):
+    # ЭВМ печатает так много, что начатая строка уходит за верх окна:
+    # выделение должно взять её по факту ухода (счётчик прокруток), а не
+    # начинаться с края окна — иначе выделяется пол-экрана.
+    import ie15emu.__main__ as m
+    monkeypatch.setattr(m.os, "get_terminal_size",
+                        lambda: os.terminal_size((100, 40)))
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    for n in range(20):
+        session.handle_line_reply(f"stroka {n:02d}\r\n".encode())
+    m.text_screen(session.parser)
+    session.feed_key("MOUSEDOWN@1,5")             # строка «stroka 01»
+    for _ in range(sc.rows + 3):                  # уходит за верх окна
+        session.handle_line_reply(b"more text\r\n")
+    m.text_screen(session.parser)
+    session.feed_key("MOUSEDRAG@9,5")
+    session.feed_key("MOUSEUP@9,5")
+    assert sc.sel_text().startswith("stroka 01")  # начало — нажатая строка
+    assert sc.sel_stats()[2] == sum(len(t[4][t[2]:t[3] + 1].strip())
+                                    for t in sc.selections[-1])
+
+
 def test_selection_end_position_from_mouseup(monkeypatch):
     # Быстрый протяг не всегда сопровождается событиями движения: конец
     # берём из самого отпускания, иначе выделяется один знак.
@@ -1005,6 +1069,32 @@ def test_selection_survives_drag_over_panel(monkeypatch):
     session.feed_key("MOUSEUP@10,25")
     assert keep in sc.sel_text()                  # прежний фрагмент цел
     assert len(sc.selections) == 2
+
+
+def test_selection_size_shown_in_status_line(monkeypatch):
+    # В строке состояния видно размер выделения: сразу понятно, выбрана
+    # одна строка или, скажем, пол-экрана. Ряд кадра это не занимает.
+    import ie15emu.__main__ as m
+    monkeypatch.setattr(m.os, "get_terminal_size",
+                        lambda: os.terminal_size((100, 40)))
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    session.mouse_on = True
+    for n in range(5):
+        session.handle_line_reply(f"stroka {n}\r\n".encode())
+    m.text_screen(session.parser)
+    assert "ВЫД=" not in re.sub(r"\x1b\[[0-9;]*m", "", sc.status_line())
+    for k in ("MOUSEDOWN@1,4", "MOUSEDRAG@9,4", "MOUSEUP@9,4"):
+        session.feed_key(k)
+    line = re.sub(r"\x1b\[[0-9;]*m", "", sc.status_line())
+    assert "ВЫД=1фр 1с" in line
+    for k in ("MOUSEDOWN@1,5", "MOUSEDRAG@9,6", "MOUSEUP@9,6"):
+        session.feed_key(k)
+    line = re.sub(r"\x1b\[[0-9;]*m", "", sc.status_line())
+    assert "ВЫД=2фр 3с" in line
+    session.feed_key("SELCLEAR")                       # F3
+    assert "ВЫД=" not in re.sub(r"\x1b\[[0-9;]*m", "",
+                                sc.status_line())
 
 
 def test_selection_highlight_while_dragging(monkeypatch):

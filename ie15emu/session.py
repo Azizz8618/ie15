@@ -250,6 +250,7 @@ class TerminalSession:
                 # отпустили над подвалом/за краем — протяжку надо закончить,
                 # иначе она повисла бы до следующего щелчка
                 sc.sel_end()
+                self._update_status()
             # движение мимо текста игнорируем: начало и конец не теряются
             return None
         kind_row, kind_idx = sc.view_map[v]
@@ -261,6 +262,7 @@ class TerminalSession:
             # сопровождается событиями движения, иначе выделялся бы один знак
             sc.sel_drag(kind_row, kind_idx, x)
             sc.sel_end()
+            self._update_status()           # «ВЫД» в строке состояния
         else:                                 # MOUSEDRAG
             sc.sel_drag(kind_row, kind_idx, x)
         # подвал не пересобираем: события мыши идут десятками в секунду,
@@ -326,7 +328,7 @@ class TerminalSession:
             return self._mouse(key)
         if key == "SELCLEAR":                # F3 — снять всё выделение
             self.parser.screen.sel_clear()
-            self._update_service()
+            self._update_status()           # «ВЫД» в строке состояния
             return None
         if key == "SELTAKE":                  # F4 — взять выделенное в буфер
             text = self.parser.screen.sel_text()
@@ -342,6 +344,7 @@ class TerminalSession:
                 else:
                     self.buffer.extend(data)
             self._update_service()
+            self._update_status()           # «ВЫД» в строке состояния
             return None
         if key == "ECHO":
             self.echo = not self.echo
@@ -620,6 +623,13 @@ class TerminalSession:
         cells.append(mk(("МЫШЬ=", "label"),
                         ("ВКЛ" if self.mouse_on else "ВЫКЛ",
                          "on" if self.mouse_on else "off")))
+        # размер выделения мышью: видно сразу, выбрана одна строка или,
+        # скажем, пол-экрана. Строка состояния — вне кадра, места в кадре
+        # это не занимает.
+        frags, rows_n, chars = self.parser.screen.sel_stats()
+        if frags:
+            cells.append(mk(("ВЫД=", "label"),
+                            (f"{frags}фр {rows_n}с {chars}зн", "state")))
         cells.append(mk(f"{when.tm_mday:02d}.{when.tm_mon:02d}.{when.tm_year} "
                         f"{when.tm_hour:02d}:{when.tm_min:02d}:"
                         f"{when.tm_sec:02d}"))
