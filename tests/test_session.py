@@ -1012,6 +1012,47 @@ def test_selection_keeps_row_even_if_it_left_the_window(monkeypatch):
                                     for t in sc.selections[-1])
 
 
+def test_selection_anchor_found_after_scroll_with_old_history(monkeypatch):
+    # Перед протяжкой в истории уже есть ряды, а во время протяжки кадр
+    # уезжает далеко: строка начала ищется по своему номеру в потоке
+    # выдачи (пустые ряды в историю не пишутся — по индексу считать нельзя).
+    import ie15emu.__main__ as m
+    monkeypatch.setattr(m.os, "get_terminal_size",
+                        lambda: os.terminal_size((100, 40)))
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    m.text_screen(session.parser)                 # кадр мал, выдача уже в истории
+    for n in range(20):
+        session.handle_line_reply(f"stroka {n:02d}  kol\r\n".encode())
+    m.text_screen(session.parser)
+    session.feed_key("MOUSEDOWN@1,6")             # строка «stroka 02  kol»
+    pressed = sc.row_text(*sc.view_map[6 - sc.view_top_row])
+    for _ in range(sc.rows + 3):
+        session.handle_line_reply(b"more text\r\n")
+    m.text_screen(session.parser)
+    session.feed_key("MOUSEDRAG@8,6")
+    session.feed_key("MOUSEUP@8,6")
+    assert sc.sel_text().startswith(pressed)     # начало — нажатая строка
+    assert pressed in sc.sel_text().split("\n")[0]
+    # то же самое колонкой (с чистого экрана): колонка режет те же строки
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    m.text_screen(session.parser)
+    for n in range(20):
+        session.handle_line_reply(f"stroka {n:02d}  kol\r\n".encode())
+    m.text_screen(session.parser)
+    session.feed_key("ctrl+MOUSEDOWN@1,6")
+    pressed = sc.row_text(*sc.view_map[6 - sc.view_top_row])
+    for _ in range(sc.rows + 3):
+        session.handle_line_reply(b"more text\r\n")
+    m.text_screen(session.parser)
+    session.feed_key("ctrl+MOUSEDRAG@8,6")
+    session.feed_key("ctrl+MOUSEUP@8,6")
+    assert sc.sel_kind == "КОЛ"
+    first = sc.selections[-1][0]
+    assert first[0] == "mem" and first[4].startswith(pressed[:8])
+
+
 def test_selection_end_position_from_mouseup(monkeypatch):
     # Быстрый протяг не всегда сопровождается событиями движения: конец
     # берём из самого отпускания, иначе выделяется один знак.
@@ -1071,6 +1112,43 @@ def test_selection_survives_drag_over_panel(monkeypatch):
     assert len(sc.selections) == 2
 
 
+def test_selection_column_mode(monkeypatch):
+    # Протяжка с Ctrl — выделение колонкой: диапазон знаков один на все
+    # ряды, независимо от направления протяжки. Без Ctrl — строчное.
+    import ie15emu.__main__ as m
+    monkeypatch.setattr(m.os, "get_terminal_size",
+                        lambda: os.terminal_size((100, 40)))
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    for t in ("kolokol    12   340", "stol       3   1200",
+              "spalnya     7    890"):
+        session.handle_line_reply((t + "\r\n").encode())
+    sc.x = sc.y = 0
+    m.text_screen(session.parser)
+    # колонка: знаки 1-3 в рядах 4-6
+    for k in ("ctrl+MOUSEDOWN@1,4", "ctrl+MOUSEDRAG@3,6",
+              "ctrl+MOUSEUP@3,6"):
+        session.feed_key(k)
+    assert sc.sel_kind == "КОЛ"
+    assert sc.sel_text() == "kol\nsto\nspa"
+    frag = sc.selections[-1]
+    assert [t[2] for t in frag] == [0, 0, 0]      # одинаковый столбец
+    assert [t[3] for t in frag] == [2, 2, 2]
+    # обратная протяжка (снизу вверх, справа налево) — тот же прямоугольник
+    sc.sel_clear()
+    for k in ("ctrl+MOUSEDOWN@12,6", "ctrl+MOUSEDRAG@2,4",
+              "ctrl+MOUSEUP@2,4"):
+        session.feed_key(k)
+    assert sc.sel_text() == "olokol    1\ntol       3\npalnya"
+    # без Ctrl — строчное выделение: от нажатой строки до отпущенной
+    sc.sel_clear()
+    for k in ("MOUSEDOWN@1,4", "MOUSEDRAG@20,6", "MOUSEUP@20,6"):
+        session.feed_key(k)
+    assert sc.sel_kind == "СТР"
+    assert sc.sel_text() == ("kolokol    12   340\n"
+                             "stol       3   1200\nspalnya     7    890")
+
+
 def test_selection_size_shown_in_status_line(monkeypatch):
     # В строке состояния видно размер выделения: сразу понятно, выбрана
     # одна строка или, скажем, пол-экрана. Ряд кадра это не занимает.
@@ -1087,11 +1165,11 @@ def test_selection_size_shown_in_status_line(monkeypatch):
     for k in ("MOUSEDOWN@1,4", "MOUSEDRAG@9,4", "MOUSEUP@9,4"):
         session.feed_key(k)
     line = re.sub(r"\x1b\[[0-9;]*m", "", sc.status_line())
-    assert "ВЫД=1фр 1с" in line
+    assert "ВЫД=СТР 1фр 1с" in line
     for k in ("MOUSEDOWN@1,5", "MOUSEDRAG@9,6", "MOUSEUP@9,6"):
         session.feed_key(k)
     line = re.sub(r"\x1b\[[0-9;]*m", "", sc.status_line())
-    assert "ВЫД=2фр 3с" in line
+    assert "ВЫД=СТР 2фр 3с" in line
     session.feed_key("SELCLEAR")                       # F3
     assert "ВЫД=" not in re.sub(r"\x1b\[[0-9;]*m", "",
                                 sc.status_line())

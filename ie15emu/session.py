@@ -231,9 +231,14 @@ class TerminalSession:
 
         Протягивание по кадру или по истории даёт фрагмент; фрагментов
         может быть несколько — каждый следующий протяг добавляет свой.
+        С нажатым Ctrl выделение идёт колонкой (прямоугольник знаков),
+        без Ctrl — строчное, от нажатой строки до отпущенной.
         Клавиши F3/F4 снимают и забирают выделение (см. `feed_key`).
         Ничего не уходит в линию: выделение — только чтение экрана.
         """
+        block = key.startswith("ctrl+")
+        if block:
+            key = key[5:]
         kind, _, coords = key.partition("@")
         try:
             col, row = (int(v) for v in coords.split(","))
@@ -256,7 +261,7 @@ class TerminalSession:
         kind_row, kind_idx = sc.view_map[v]
         x = max(0, min(col - 1, COLS - 1))   # координаты терминала с 1
         if kind == "MOUSEDOWN":
-            sc.sel_begin(kind_row, kind_idx, x)
+            sc.sel_begin(kind_row, kind_idx, x, block)
         elif kind == "MOUSEUP":
             # отпускание — тоже конец протяжки: быстрый протяг не всегда
             # сопровождается событиями движения, иначе выделялся бы один знак
@@ -324,7 +329,9 @@ class TerminalSession:
             self.parser.screen.scroll_view(step)
             self._update_service()
             return None
-        if key.startswith(("MOUSEDOWN@", "MOUSEDRAG@", "MOUSEUP@")):
+        if key.startswith(("MOUSEDOWN@", "MOUSEDRAG@", "MOUSEUP@",
+                           "ctrl+MOUSEDOWN@", "ctrl+MOUSEDRAG@",
+                           "ctrl+MOUSEUP@")):
             return self._mouse(key)
         if key == "SELCLEAR":                # F3 — снять всё выделение
             self.parser.screen.sel_clear()
@@ -629,7 +636,8 @@ class TerminalSession:
         frags, rows_n, chars = self.parser.screen.sel_stats()
         if frags:
             cells.append(mk(("ВЫД=", "label"),
-                            (f"{frags}фр {rows_n}с {chars}зн", "state")))
+                            (f"{self.parser.screen.sel_kind} "
+                             f"{frags}фр {rows_n}с {chars}зн", "state")))
         cells.append(mk(f"{when.tm_mday:02d}.{when.tm_mon:02d}.{when.tm_year} "
                         f"{when.tm_hour:02d}:{when.tm_min:02d}:"
                         f"{when.tm_sec:02d}"))

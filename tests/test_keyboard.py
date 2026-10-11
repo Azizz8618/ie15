@@ -27,6 +27,12 @@ def test_mouse_sgr_wheel():
     assert decode_key_bytes(b"\x1b[<0;9;4m") == ["MOUSEUP@9,4"]
     assert decode_key_bytes(b"\x1b[<2;5;5M") == []          # правая
     assert decode_key_bytes(b"\x1b[<32;1;1m") == []          # движение без кнопки
+    # Ctrl с мышью не стирается: им выбирается выделение колонкой
+    # (бит 16 в SGR, бит 4 в urxvt)
+    assert decode_key_bytes(b"\x1b[<16;3;4M") == ["ctrl+MOUSEDOWN@3,4"]
+    assert decode_key_bytes(b"\x1b[<48;9;4M") == ["ctrl+MOUSEDRAG@9,4"]
+    assert decode_key_bytes(b"\x1b[<16;9;4m") == ["ctrl+MOUSEUP@9,4"]
+    assert decode_key_bytes(b"\x1b[48;3;4M") == ["ctrl+MOUSEDOWN@3,4"]
     # терминалы без SGR (1006) отвечают urxvt (1015) и старой формой X10 —
     # без их разбора мышь у пользователя не работает вовсе
     assert decode_key_bytes(b"\x1b[32;3;4M") == ["MOUSEDOWN@3,4"]
