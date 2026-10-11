@@ -688,6 +688,80 @@ def test_panel_grid_stable_while_values_change():
     assert sig() != base and sig()[1] < base[1]     # панель ниже
 
 
+def test_low_window_keeps_status_line_and_scrolls_text(monkeypatch):
+    # окно ниже «25 рядов кадра + подвал»: строка состояния не уезжает,
+    # первая выданная строка видна сразу, дальше уезжает текст сверху
+    import ie15emu.__main__ as m
+    monkeypatch.setattr(m.os, "get_terminal_size",
+                        lambda: os.terminal_size((100, 25)))
+    session, _ = make_session(MODE_HOST)
+    sc = session.parser.screen
+
+    def rows():
+        out = m.text_screen(session.parser)
+        marks = list(re.finditer(r"\x1b\[(\d+);1H", out))
+        got = {}
+        for k, mt in enumerate(marks):
+            end = marks[k + 1].start() if k + 1 < len(marks) else len(out)
+            got[int(mt.group(1))] = re.sub(
+                r"\x1b\[[0-9;]*m", "", out[mt.end():end]).rstrip()
+        return got
+
+    r = rows()
+    first = re.sub(r"\x1b\[[0-9;]*m", "", sc.status_line()).rstrip()
+    assert first in r[1]                            # статус — первый ряд
+    assert r[2].startswith("---") and r[2] == "-" * sc.panel_cols
+    for n in range(10):                            # вывод короче окна
+        session.handle_line_reply(f"line{n:02d}\r\n".encode())
+    r = rows()
+    assert any(t.startswith("line00") for t in r.values()), r[4]
+    assert "-" * sc.panel_cols in list(r.values())[-len(sc.service_more) - 2:]
+    for n in range(10, 60):                        # вывод длиннее окна
+        session.handle_line_reply(f"line{n:02d}\r\n".encode())
+    r = rows()
+    assert first in r[1]                            # статус не уехал
+    assert not any(t.startswith("line00") for t in r.values())  # текст ушёл
+    assert any(t.startswith("line59") for t in r.values())     # низ виден
+    assert max(rows()) == 25                        # подвал внизу окна
+
+
+def test_view_uses_only_used_frame_rows(monkeypatch):
+    # пустые ряды кадра не занимают место в окне: подвал виден всегда,
+    # а при выводе уезжает наверх только текст, не строка состояния
+    import ie15emu.__main__ as m
+    monkeypatch.setattr(m.os, "get_terminal_size",
+                        lambda: os.terminal_size((100, 25)))
+    session, _ = make_session(MODE_HOST)
+    sc = session.parser.screen
+
+    def rows():
+        out = m.text_screen(session.parser)
+        marks = list(re.finditer(r"\x1b\[(\d+);1H", out))
+        got = {}
+        for k, mt in enumerate(marks):
+            end = marks[k + 1].start() if k + 1 < len(marks) else len(out)
+            got[int(mt.group(1))] = re.sub(
+                r"\x1b\[[0-9;]*m", "", out[mt.end():end]).rstrip()
+        return got
+
+    status = re.sub(r"\x1b\[[0-9;]*m", "", sc.status_line()).rstrip()
+    r = rows()
+    assert "-" * sc.panel_cols in r.values()       # подвал виден в пустом кадре
+    assert max(r) == 25                             # ровно в окно
+    for n in range(10):
+        session.handle_line_reply(f"line{n:02d}\r\n".encode())
+    r = rows()
+    assert r[4].startswith("line00")                # первая строка на месте
+    assert status in r[1]                           # статус не уехал
+    assert "-" * sc.panel_cols in r.values()        # подвал на месте
+    for n in range(10, 70):                         # вывод длиннее окна
+        session.handle_line_reply(f"line{n:02d}\r\n".encode())
+    r = rows()
+    assert status in r[1]
+    assert not any(t.startswith("line00") for t in r.values())  # ушёл наверх
+    assert "-" * sc.panel_cols in r.values()        # подвал всё ещё в окне
+
+
 def test_history_keeps_scrolled_rows():
     # сошедшие с верхнего края кадра строки сохраняются в «историю»
     # (глубина настраивается), пустые — нет; PgUp доходит до первой

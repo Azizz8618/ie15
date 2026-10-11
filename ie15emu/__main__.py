@@ -513,7 +513,12 @@ def text_screen(parser: Parser) -> str:
         return "".join(toks)
 
     lines = [row_line(c, a) for c, a in sc.history]
-    lines += [row_line(row, sc.attr[y], y) for y, row in enumerate(sc.cells)]
+    # в вид идут только ИСПОЛЬЗУЕМЫЕ ряды кадра: пустые ряды под кадром
+    # не занимали бы место в окне — из-за них первые строки вывода
+    # выталкивались из вида, а подвал уезжал за нижний край
+    used = max(sc.last_used() + 1, sc.y + 1)
+    lines += [row_line(row, sc.attr[y], y)
+              for y, row in enumerate(sc.cells[:used])]
     panel_n = sc.panel_rows() + 1       # ряды подвала + черта над ним
     lines.append("-" * sc.panel_cols)     # черта подвала — на всю ширину окна
     lines.extend(sc.panel_styled_rows())   # подвал с цветом значений и групп
@@ -526,11 +531,10 @@ def text_screen(parser: Parser) -> str:
     # контенту; остаток окна добираем пустыми рядами перед подвалом,
     # чтобы подвал всегда стоял по нижней кромке экрана
     top = sc.sync_view_top(view_h)
-    # окно меньше содержимого (кадр не может быть ниже 25 рядов) — в
-    # следящем режиме режем верх кадра, но не подвал: строку состояния и
-    # легенду резать нельзя; в закреплённом (PgUp/колесо) — как листали
-    if sc.view_top is None:
-        top = max(top, len(lines) - view_h)
+    # В следящем режиме верх по контенту: кадр с первого используемого
+    # ряда, при нехватке места — по курсору (живой текст важнее пустоты).
+    # Строка состояния и чёрта с пустой строкой — вне кадра, прижаты к
+    # верху окна и никуда не уезжают.
     view = lines[top:top + view_h]
     if len(view) < view_h:
         pad = view_h - len(view)
