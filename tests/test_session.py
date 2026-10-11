@@ -876,6 +876,69 @@ def test_selection_survives_frame_scroll(monkeypatch):
     assert "\x1b[7m" in out.split("\x1b[4;1H", 1)[1] or True
 
 
+def test_selection_drag_is_fast_and_complete(monkeypatch):
+    # протяжка мышью: событий десятки в секунду, поэтому обработка должна
+    # быть дешёвой (подвал не пересобирается) и не «замерзать» на первом
+    # же движении — фрагмент должен покрывать всю протяжку
+    import time
+    import ie15emu.__main__ as m
+    monkeypatch.setattr(m.os, "get_terminal_size",
+                        lambda: os.terminal_size((120, 40)))
+    session, link = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    session.mouse_on = True
+    for n in range(20):
+        session.handle_line_reply(f"row{n:02d} текст\r\n".encode())
+    m.text_screen(session.parser)
+    panel_before = panel_text(sc)
+
+    t0 = time.perf_counter()
+    session.feed_key("MOUSEDOWN@1,4")
+    for x in range(2, 41):
+        session.feed_key(f"MOUSEDRAG@{x},4")
+    session.feed_key("MOUSEUP@40,4")
+    elapsed = time.perf_counter() - t0
+
+    assert len(sc.selections) == 1
+    assert sc.sel_text() == "row00 tekst"      # вся протяжка, не первый знак
+    assert panel_text(sc) == panel_before      # подвал не пересобирался
+    assert link.sent == []
+    assert elapsed < 0.2, f"{elapsed:.3f} с на 40 событий"
+    # многорядная протяжка берёт ряды от начала до конца
+    session.feed_key("MOUSEDOWN@1,4")
+    session.feed_key("MOUSEDRAG@12,9")
+    session.feed_key("MOUSEUP@12,9")
+    frag = sc.selections[-1]
+    assert len(frag) == 6 and frag[0][0] == "frame" and frag[-1][1] == 5
+    assert "row00" in sc.sel_text() and "row05" in sc.sel_text()
+
+
+def test_selection_highlight_survives_row_change():
+    # выделение не должно висеть на изменившемся ряде: подсветка переезжает
+    # по тексту, а если текста уже нет — снимается
+    import ie15emu.__main__ as m
+    sc = Parser().screen
+    sc.set_panel_cols(80)
+    sc.cells[0] = [0x41] * 10 + [0x20] * 70
+    sc.y = 10                               # курсор в стороне: не мешает
+    sc.selections = [[("frame", 0, 0, 3, "AAAAAAAAAA")]]
+    before = m.text_screen(_p(sc))
+    row4 = before.split("\x1b[4;1H", 1)[1].split("\x1b[5;1H", 1)[0]
+    assert "\x1b[7m" in row4                 # текст совпал — подсветка есть
+    sc.cells[0] = [0x42] * 10 + [0x20] * 70  # ряд изменился
+    after = m.text_screen(_p(sc))
+    row4 = after.split("\x1b[4;1H", 1)[1].split("\x1b[5;1H", 1)[0]
+    assert "\x1b[7m" not in row4            # подсветки на чужом тексте нет
+
+
+def _p(sc):
+    """Парсер с уже готовым экраном (для отрисовки)."""
+    p = Parser()
+    p.screen = sc
+    p.charset = None
+    return p
+
+
 def test_history_keeps_scrolled_rows():
     # сошедшие с верхнего края кадра строки сохраняются в «историю»
     # (глубина настраивается), пустые — нет; PgUp доходит до первой

@@ -27,6 +27,9 @@ from .parser import Parser
 from .render import to_png_bytes, to_text
 from .session import TerminalSession
 
+DRAW_MIN_GAP = 0.015   # с, минимальный интервал между кадрами
+                       # (защита от потока перерисовок при мыши)
+
 ROM_DEFAULT = Path(__file__).resolve().parent.parent / "rom"
 CONF_DEFAULT = ROM_DEFAULT.parent / "ie15.conf"
 
@@ -401,6 +404,7 @@ def run_line(parser: Parser, url: str, png: str | None,
             "в подвале (ПОСЛ), этим и привязывают в [keys]"))
     t0 = time.time()
     last_stamp = 0.0
+    last_draw = 0.0
     fit = WindowFit()
     if take_fit:                      # по умолчанию окно не трогаем:
         _install_winch(fit)         # кадр сам дотягивается до низа окна
@@ -435,8 +439,17 @@ def run_line(parser: Parser, url: str, png: str | None,
                 # проверяем по символу от ЭВМ (и по нажатию) — сбитый
                 # масштаб шрифта возвращается сам
                 dirty = fit.restore(parser) if take_fit else False
+                # Протяжка мышью даёт события десятками в секунду: если ввод
+                # ещё не разобран, кадр дорисуем следующим шагом (иначе
+                # терминал получает поток полных перерисовок). Пропуск
+                # ограничен 15 мс и только когда данные уже ждут.
+                now = time.monotonic()
+                if fd is not None and now - last_draw < DRAW_MIN_GAP:
+                    if select.select([fd], [], [], 0)[0]:
+                        continue
                 sys.stdout.write(text_screen(parser))
                 sys.stdout.flush()
+                last_draw = time.monotonic()
     except KeyboardInterrupt:
         pass
     except LinkError as e:            # ЭВМ сбросила линию — не трейсбек, а выход
@@ -495,12 +508,13 @@ def text_screen(parser: Parser) -> str:
     sc.set_rows(view_h - sc.panel_rows() - 1)
 
     sel_key, sel_text, sel_by_text = sc.sel_spans()   # выделение мышью
+    has_sel = bool(sc.selections)
     view_map: list[tuple[str, int] | None] = []   # ряд вида → (вид, номер)
 
     def row_line(cells, attr, y=None, kind=None, idx=0):
         from .charset import display_char
         mark = None
-        if kind is not None:
+        if has_sel and kind is not None:
             text = sc.row_text(kind, idx) or ""
             if sel_text.get((kind, idx)) == text:
                 mark = sel_key.get((kind, idx))

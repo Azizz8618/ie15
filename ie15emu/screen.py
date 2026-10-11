@@ -84,11 +84,12 @@ class Screen:
         # выделение текста мышью: список фрагментов, каждый — список
         # (вид, номер ряда, от, до, текст ряда); незаконченное протягивание
         self.selections: list[list[tuple[str, int, int, int, str]]] = []
-        self._drag: tuple | None = None
+        self._drag: list[int] | None = None   # [v0, x0, v, x]
         # карта видимой части окна: номер ряда окна → (вид, номер ряда);
         # её заполняет отрисовка (text_screen), по ней клик попадает в текст
         self.view_map: list[tuple[str, int] | None] = []
         self.view_top_row = 4          # номер ряда окна для view_map[0]
+        self._rowtext: dict[tuple[str, int], tuple[int, str]] = {}  # кэш текста
         self.show_help = True   # ряды-легенды подвала (справка по клавишам)
         self._service_rows: list[str] = []   # готовые ряды (set_service)
         self.x = 0
@@ -390,21 +391,25 @@ class Screen:
     # «протяг» — отдельный фрагмент, фрагментов может быть сколько угодно;
     # текст фрагмента снимается снимком в момент отпускания кнопки.
     def sel_begin(self, row: int, x: int) -> None:
-        """Начало протягивания (row — ряд видимой части окна)."""
-        self._drag = (row, x)
+        """Начало протягивания (row — ряд видимой части окна).
+
+        Храним [начало_ряд, начало_знак, текущий_ряд, текущий_знак]:
+        начало не меняется, правый конец тянется за указателем.
+        """
+        self._drag = [row, x, row, x]
 
     def sel_drag(self, row: int, x: int) -> None:
-        if self._drag is not None and len(self._drag) == 2:
-            self._drag = (self._drag[0], self._drag[1], row, x)
+        if self._drag is not None:
+            self._drag[2] = row
+            self._drag[3] = x
 
     def sel_end(self) -> str:
         """Отпускание кнопки: фрагмент зафиксирован, вернём его текст."""
         drag = self._drag
         self._drag = None
-        if not drag or len(drag) < 4:
+        if not drag:
             return ""
-        v0, x0 = drag[0], drag[1]
-        v1, x1 = drag[2], drag[3]
+        v0, x0, v1, x1 = drag
         if v1 < v0:
             v0, x0, v1, x1 = v1, x1, v0, x0
         frag: list[tuple[str, int, int, int, str]] = []
@@ -466,7 +471,13 @@ class Screen:
         return by_key, key_text, by_text
 
     def row_text(self, kind: str, idx: int) -> str | None:
-        """Текст ряда кадра или истории как он виден на экране."""
+        """Текст ряда кадра или истории как он виден на экране.
+
+        Ряд не меняется между кадрами развёртки (а история тем более),
+        поэтому текст держим в кэше по подписи содержимого ряда: протяжка
+        мышью даёт десятки событий в секунду, а пересборка текста всех рядов
+        на каждом — самая дорогая часть отрисовки.
+        """
         from .charset import display_char
         if kind == "hist":
             if not 0 <= idx < len(self.history):
@@ -476,6 +487,11 @@ class Screen:
             if not 0 <= idx < self.rows:
                 return None
             cells, attrs = self.cells[idx], self.attr[idx]
+        key = (kind, idx)
+        sig = hash(bytes(cells) + bytes(attrs))
+        hit = self._rowtext.get(key)
+        if hit is not None and hit[0] == sig:
+            return hit[1]
         out = []
         for x, code in enumerate(cells[:COLS]):
             a = attrs[x]
@@ -484,7 +500,11 @@ class Screen:
                            else " ")
             else:
                 out.append(display_char(code, self.display_set))
-        return "".join(out).rstrip()
+        text = "".join(out).rstrip()
+        if len(self._rowtext) > 4000:        # история растёт — чистим кэш
+            self._rowtext.clear()
+        self._rowtext[key] = (sig, text)
+        return text
 
     def panel_cells(self) -> list[str]:
         """Ячейки подвала текстом, как их сложил set_panel (для проверок)."""
