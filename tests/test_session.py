@@ -832,8 +832,8 @@ def test_mouse_selection_from_frame_and_history(monkeypatch):
     for n in range(6, 60):                        # history + кадр
         session.handle_line_reply(f"line{n:02d} more\r\n".encode())
     m.text_screen(session.parser)
-    session.feed_key("KEY_WHEELUP")               # листаем в историю
-    session.feed_key("KEY_WHEELUP")
+    for _ in range(4):                             # листаем в историю
+        session.feed_key("KEY_WHEELUP")
     m.text_screen(session.parser)
     kind, idx = sc.view_map[0]                    # верх видимой части — история
     assert kind == "hist"
@@ -1164,6 +1164,33 @@ def test_selection_column_mode(monkeypatch):
     assert sc.sel_kind == "СТР"
     assert sc.sel_text() == ("kolokol    12   340\n"
                              "stol       3   1200\nspalnya     7    890")
+
+
+def test_selection_on_one_row_ignores_drag_direction(monkeypatch):
+    # Протяжка в пределах одной строки: направление не важно, справа налево
+    # выделяется тот же диапазон, что и слева направо. Раньше при обратном
+    # направлении диапазон схлопывался до одного знака.
+    import ie15emu.__main__ as m
+    monkeypatch.setattr(m.os, "get_terminal_size",
+                        lambda: os.terminal_size((100, 40)))
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    session.handle_line_reply(b"kolokol    12   340\r\n")
+    sc.x = sc.y = 0
+    m.text_screen(session.parser)
+    for name, keys in (
+            ("слева направо", ("MOUSEDOWN@3,4", "MOUSEDRAG@9,4",
+                              "MOUSEUP@9,4")),
+            ("справа налево", ("MOUSEDOWN@9,4", "MOUSEDRAG@3,4",
+                              "MOUSEUP@3,4")),
+    ):
+        sc.sel_clear()
+        for k in keys:
+            session.feed_key(k)
+        assert sc.sel_kind == "СТР", name
+        assert sc.sel_text() == "lokol", name
+        frag = sc.selections[-1]
+        assert (frag[0][2], frag[0][3]) == (2, 8), name
 
 
 def test_selection_size_shown_in_status_line(monkeypatch):

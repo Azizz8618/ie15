@@ -502,10 +502,17 @@ def text_screen(parser: Parser) -> str:
     # подвал тянется на всю ширину окна: ячеек в ряду больше — панель ниже
     sc.set_panel_cols(term_w)
     # верх окна: строка состояния линии, под ней черта и пустая строка —
-    # обе вне кадра ЭВМ; дальше кадр на всю оставшуюся высоту, внизу
-    # подвал с чертой: пустот не остаётся ни при каком размере окна
+    # обе вне кадра ЭВМ; дальше «вид» (контент) и подвал с чертой над ним.
+    # Подвал прижат к нижней кромке окна и в листании не участвует: прокрутка
+    # двигает только контент (историю + кадр), подвал остаётся на месте.
     view_h = max(1, term_h - 3)
-    sc.set_rows(view_h - sc.panel_rows() - 1)
+    panel_n = sc.panel_rows() + 1       # ряды подвала + черта над ним
+    # окно ниже, чем подвал: часть рядов подвала урезаем (показываем верхние
+    # — состояния), но не ценой последних рядов контента
+    MIN_CONTENT = 3                     # меньше трёх рядов контента не вид
+    panel_n = min(panel_n, max(2, view_h - MIN_CONTENT))
+    content_h = max(1, view_h - panel_n)
+    sc.set_rows(content_h)
 
 
     def row_line(cells, attr, y=None, kind=None, idx=0):
@@ -550,27 +557,27 @@ def text_screen(parser: Parser) -> str:
     # не занимали бы место в окне — из-за них первые строки вывода
     # выталкивались из вида, а подвал уезжал за нижний край
     used = max(sc.last_used() + 1, sc.y + 1)
-    panel_n = sc.panel_rows() + 1       # ряды подвала + черта над ним
     nh, nf = len(sc.history), used
-    total = nh + nf + panel_n           # всего рядов в развёртке
+    total = nh + nf                     # контент: подвал в развёртке не участвует
     # окно просмотра (PgUp/PgDn): закреплённый сдвиг или авто-следование
     # за курсором; рисуем абсолютной позицией — в коротком окне ничего
     # не скроллится, верх поля всегда виден
-    sc._view_h = view_h
+    sc._view_h = content_h
     # верх окна — по sync_view_top: в следящем режиме кадр всегда с первого
     # ряда (история над ним не выползает), в закреплённом (PgUp/PgDn) — по
-    # контенту; остаток окна добираем пустыми рядами перед подвалом,
-    # чтобы подвал всегда стоял по нижней кромке экрана
-    top = sc.sync_view_top(view_h)
+    # контенту; нехватку контента добираем пустыми рядами внизу поля, а
+    # подвал внизу окна рисуем всегда — он от прокрутки не зависит
+    top = sc.sync_view_top(content_h)
     # карта «ряд окна → ряд кадра/истории»: по ней клик мыши попадает в
     # текст, а подсветка выделения сверяется с видимыми рядами. Считаем
     # карту ДО отрисовки: иначе сверка шла бы с картой прошлого кадра —
     # и выделение подсвечивало бы не те строки (либо терялось вовсе)
     view_map = [("hist", i) for i in range(nh)]
     view_map += [("frame", y) for y in range(nf)]
-    view_map += [None] * panel_n       # черта над подвалом и сам подвал
-    sc.view_map = view_map[top:top + view_h]
-    while len(sc.view_map) < view_h:
+    # карта — только по полю просмотра: подвал в листании не участвует,
+    # и ряд под ним «текстом» не считается
+    sc.view_map = view_map[top:top + content_h]
+    while len(sc.view_map) < content_h:
         sc.view_map.append(None)       # контента не хватило — пустые ряды
     sc.view_top_row = 4
     sel_key, sel_text, sel_by_text = sc.sel_spans()   # выделение мышью
@@ -580,25 +587,18 @@ def text_screen(parser: Parser) -> str:
     panel_lines = sc.panel_styled_rows()
 
     def line_at(pos: int) -> str:
-        """Ряд развёртки по номеру: история, кадр, черта, подвал."""
+        """Ряд контента по номеру развёртки: история, кадр."""
         if pos < nh:
             return hist_line(pos)
-        if pos < nh + nf:
-            return frame_line(pos - nh)
-        if pos == nh + nf:
-            return "-" * sc.panel_cols   # черта подвала — на всю ширину
-        return panel_lines[pos - nh - nf - 1]
+        return frame_line(pos - nh)
 
     # В следящем режиме верх по контенту: кадр с первого используемого
     # ряда, при нехватке места — по курсору (живой текст важнее пустоты).
     # Строка состояния и чёрта с пустой строкой — вне кадра, прижаты к
     # верху окна и никуда не уезжают. Ряды за пределами окна не строим
     # вовсе — при длинной истории это заметная экономия.
-    view = [line_at(pos) for pos in range(top, min(total, top + view_h))]
-    if len(view) < view_h:
-        pad = view_h - len(view)
-        view = (view[:len(view) - panel_n] + [""] * pad +
-                view[len(view) - panel_n:])
+    view = [line_at(pos) for pos in range(top, min(total, top + content_h))]
+    view += [""] * (content_h - len(view))    # контента мало — пустота внизу
     out = "\x1b[H\x1b[2J"
     # строка состояния линии, черта и пустая строка — вне кадра ЭВМ, в
     # листание (PgUp/колесо) они не попадают
@@ -606,6 +606,11 @@ def text_screen(parser: Parser) -> str:
     out += f"\x1b[2;1H{'-' * sc.panel_cols}\x1b[3;1H"
     for i, ln in enumerate(view):
         out += f"\x1b[{i + 4};1H{ln}"
+    # подвал с чертой — всегда по нижней кромке окна, независимо от
+    # прокрутки: при PgUp/колесе уезжает только контент над ним
+    out += f"\x1b[{content_h + 4};1H{'-' * sc.panel_cols}"
+    for i, ln in enumerate(panel_lines[:panel_n - 1]):
+        out += f"\x1b[{content_h + 5 + i};1H{ln}"
     return out
 
 
