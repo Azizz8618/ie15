@@ -151,7 +151,12 @@ def key_to_bytes(key: str, layout: str | None = None,
     ASCII как есть).
     """
     if key in ("KEY_ENTER", "\n", "\r"):
-        return b"\r\n"
+        return b"\r"
+    # Ctrl+буква — управляющий символ (Ctrl+A=01 … Ctrl+Z=1A) вне зависимости
+    # от раскладки: нажатие с Ctrl всегда даёт код ИТ 0x60+знак (как на
+    # 15ВВВ), независимо от того, что клавиша набрала бы без модификатора.
+    if len(key) == 6 and key.startswith("ctrl+") and key[5:].isascii() and key[5:].isalpha():
+        return bytes([ord(key[5].lower()) & 0x1F])
     if key in ("KEY_BACKSPACE", "\x7f"):
         return b"\x08"
     if key == "KEY_UP":
@@ -228,6 +233,9 @@ def key_to_bytes(key: str, layout: str | None = None,
 
 # Служебные клавиши сеанса (команды эмулятора, а не коды линии).
 KEY_SEND = "SEND"       # «передать накопленное» (аналог клавиши SEND)
+KEY_UNDO = "UNDO"       # «отмена»: вернуть буфер набора на шаг назад
+                        # (АВТОНОМНО; глубина — [terminal] undo)
+CTRL_UNDO = 0x15        # Ctrl+U (УП 15) — клавиша отмены правки набора
 KEY_MODE = "MODE"       # переключение АВТОНОМНО ↔ С ЭВМ
 KEY_CMDSET = "CMDSET"   # клавиша «НАБОР»: набор №1 ↔ набор №2 (VT52)
 KEY_BLINK = "BLINK"     # клавиша «УПР.СИМВ»: показ/скрытие знаков УП
@@ -237,8 +245,22 @@ KEY_WHEELUP = "KEY_WHEELUP"       # колесо мыши вверх: листа
 KEY_WHEELDOWN = "KEY_WHEELDOWN"   # колесо мыши вниз: к кадру ЭВМ
 KEY_SELCLEAR = "SELCLEAR"   # снять всё выделение мышью (F3)
 KEY_SELTAKE = "SELTAKE"     # взять выделенное в буфер набора (F4)
+# Выделение с клавиатуры (Shift+стрелки): построчное; Shift+Ctrl+стрелки —
+# поколонное. Стрелки 15ВВВ с такими кодами не работали, свободны.
+KEY_SELRIGHT = "SELRIGHT"
+KEY_SELLEFT = "SELLEFT"
+KEY_SELUP = "SELUP"
+KEY_SELDOWN = "SELDOWN"
+KEY_CTRLSELRIGHT = "CTRLSELRIGHT"
+KEY_CTRLSELLEFT = "CTRLSELLEFT"
+KEY_CTRLSELUP = "CTRLSELUP"
+KEY_CTRLSELDOWN = "CTRLSELDOWN"
+KEY_CTRLRIGHT = "KEY_CTRLRIGHT"     # прыжок по словам: начало следующего
+KEY_CTRLLEFT = "KEY_CTRLLEFT"       # …и текущего слова
+KEY_CTRLUP = "KEY_CTRLUP"           # начало текущей строки
+KEY_CTRLDOWN = "KEY_CTRLDOWN"       # начало строки ниже
 
-SPECIAL_KEYS = {"KEY_SEND": KEY_SEND, "KEY_MODE": KEY_MODE,
+SPECIAL_KEYS = {"KEY_UNDO": KEY_UNDO, "KEY_SEND": KEY_SEND, "KEY_MODE": KEY_MODE,
                 "KEY_CMDSET": KEY_CMDSET, "KEY_BLINK": KEY_BLINK,
                 "KEY_ECHO": KEY_ECHO, "KEY_CLEAR": KEY_CLEAR,
                 "KEY_SELCLEAR": KEY_SELCLEAR, "KEY_SELTAKE": KEY_SELTAKE,
@@ -253,8 +275,14 @@ SEQ_KEYS = {
     b"\x1b[B": "KEY_DOWN", b"\x1bOB": "KEY_DOWN",
     b"\x1b[C": "KEY_RIGHT", b"\x1bOC": "KEY_RIGHT",
     b"\x1b[D": "KEY_LEFT", b"\x1bOD": "KEY_LEFT",
-    b"\x1b[1;5C": "KEY_CTRLRIGHT", b"\x1b[1;5D": "KEY_CTRLLEFT",
-    b"\x1b[1;5A": "KEY_CTRLUP", b"\x1b[1;5B": "KEY_CTRLDOWN",
+    b"\x1b[1;5C": KEY_CTRLRIGHT, b"\x1b[1;5D": KEY_CTRLLEFT,
+    b"\x1b[1;5A": KEY_CTRLUP, b"\x1b[1;5B": KEY_CTRLDOWN,
+    # Shift+стрелки — выделение с клавиатуры (построчное; с Ctrl —
+    # поколонное: ESC[1;6A и т.п.). Имена без «KEY_»: в линию не уходят
+    b"\x1b[1;2C": KEY_SELRIGHT, b"\x1b[1;2D": KEY_SELLEFT,
+    b"\x1b[1;2A": KEY_SELUP, b"\x1b[1;2B": KEY_SELDOWN,
+    b"\x1b[1;6C": KEY_CTRLSELRIGHT, b"\x1b[1;6D": KEY_CTRLSELLEFT,
+    b"\x1b[1;6A": KEY_CTRLSELUP, b"\x1b[1;6B": KEY_CTRLSELDOWN,
     b"\x1b[H": "KEY_HOME", b"\x1b[1~": "KEY_HOME", b"\x1bOH": "KEY_HOME",
     b"\x1b[4~": "KEY_END", b"\x1b[F": "KEY_END", b"\x1bOF": "KEY_END",
     b"\x1b[2~": "KEY_INSERT", b"\x1b[3~": "KEY_DELETE",
@@ -262,6 +290,9 @@ SEQ_KEYS = {
     b"\x1bOR": KEY_SELCLEAR, b"\x1b[13~": KEY_SELCLEAR,   # F3 — снять выделение
     b"\x1bOS": KEY_SELTAKE, b"\x1b[14~": KEY_SELTAKE,     # F4 — взять в буфер
     b"\x1b[15~": KEY_CLEAR,                         # F5 — ОЧИСТКА экрана
+    b"\x1b[[E": KEY_CLEAR,                          # F5 консоли Linux (ESC[[A…E)
+    b"\x1b[[A": KEY_SELCLEAR,                       # F3 консоли Linux
+    b"\x1b[[B": KEY_SELTAKE,                        # F4 консоли Linux
     b"\x1b[17~": KEY_ECHO,                          # F6 — ЭХО (подавить набор)
     b"\x1b[18~": KEY_BLINK,                         # F7 — УПР.СИМВ (показ УП)
     b"\x1b[19~": KEY_CMDSET,                        # F8 — НАБОР (набор 1↔2)
@@ -331,12 +362,22 @@ def _parse_csi_u(data: bytes, i: int):
 _MOD_KEY = re.compile(rb"\x1b\[(?:1;(\d+)([A-D])|(\d+);(\d+)~)")
 
 
+# Функциональные клавиши xterm по букве: их тоже можно нажать
+# с модификатором — и тогда имя собирается как «модификаторы+клавиша».
+_MOD_LETTER = {"A": KEY_CTRLUP, "B": KEY_CTRLDOWN,          # стрелки: Ctrl
+               "C": KEY_CTRLRIGHT, "D": KEY_CTRLLEFT}
+
+
 def _parse_mod_key(data: bytes, i: int):
-    """Нажатие клавиши с модификатором (Shift+↑, Alt+Home и т. п.).
+    """Нажатие клавиши с модификатором (Shift+↑, Ctrl+Home и т. п.).
+
+    Shift+стрелки отдаём выделению с клавиатуры (Shift — построчное,
+    Shift+Ctrl — поколонное), Ctrl+стрелки — прыжкам по словам/строкам.
+    Остальные комбинации (Alt+…, Ctrl+F5 и т. п.) гасим: таких клавиш
+    у 15ВВВ нет, в линию мусор не идёт.
 
     Возвращает (имя клавиши или «», сколько байт съели) либо (None, 0),
-    если это не такая последовательность. Имя пустое — нажатие гасится:
-    в линию оно не идёт и экран не листает.
+    если это не такая последовательность.
     """
     m = _MOD_KEY.match(data, i)
     if not m:
@@ -344,7 +385,23 @@ def _parse_mod_key(data: bytes, i: int):
     mod = int(m.group(1) or m.group(4))
     if mod < 2:                       # без модификаторов — разбирают ниже
         return None, 0
-    return "", m.end() - i
+    mask = mod - 1                    # параметр xterm = 1+shift(1)+alt(2)+ctrl(4)
+    letter = m.group(2)               # «A»…«D» — стрелки (ESC [ 1 ; m X)
+    if letter:
+        if mask & 2:                  # Alt — таких клавиш у 15ВВВ нет
+            return "", m.end() - i
+        shift, ctrl = bool(mask & 1), bool(mask & 4)
+        base = _MOD_LETTER[letter.decode("ascii")]
+        if shift and ctrl:
+            return {KEY_CTRLUP: KEY_CTRLSELUP, KEY_CTRLDOWN: KEY_CTRLSELDOWN,
+                    KEY_CTRLRIGHT: KEY_CTRLSELRIGHT,
+                    KEY_CTRLLEFT: KEY_CTRLSELLEFT}[base], m.end() - i
+        if shift:
+            return {KEY_CTRLUP: KEY_SELUP, KEY_CTRLDOWN: KEY_SELDOWN,
+                    KEY_CTRLRIGHT: KEY_SELRIGHT,
+                    KEY_CTRLLEFT: KEY_SELLEFT}[base], m.end() - i
+        return base, m.end() - i      # Ctrl без Shift — слова/строки
+    return "", m.end() - i            # Alt/прочие «~»-формы — гасим
 
 
 def _parse_mouse(data: bytes, i: int):
@@ -450,6 +507,10 @@ def decode_key_bytes(data: bytes) -> list[str]:
             continue
         if b in (0x08, 0x7F):              # Backspace/DEL
             out.append("KEY_BACKSPACE")
+            i += 1
+            continue
+        if b == CTRL_UNDO:                 # Ctrl+U — отмена правки набора
+            out.append(KEY_UNDO)
             i += 1
             continue
         if b == 0x1B:

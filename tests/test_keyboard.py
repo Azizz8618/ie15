@@ -182,7 +182,7 @@ def test_h2_symbols_same_keys_both_layouts():
 
 
 def test_host_mode_key_mapping():
-    assert key_to_bytes("KEY_ENTER") == b"\r\n"
+    assert key_to_bytes("KEY_ENTER") == b"\r"
     assert key_to_bytes("KEY_ESC") == b"\x1b"
 
 

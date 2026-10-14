@@ -82,6 +82,7 @@ class Screen:
         self._panel: tuple[list[Cell], list[Cell]] | None = None
         self._panel_rows: list[list[Cell]] = []   # ряды подвала (с цветами)
         self._panel_colw = COLS    # ширина колонки сетки подвала
+        self.panel_colw_min = 0    # ниже этой ширины колонка не сжимается
         self.status_cells: list[Cell] = []   # строка состояния линии
         # выделение текста мышью: список фрагментов, каждый — список
         # (вид, номер ряда, от, до, текст ряда); незаконченное протягивание
@@ -299,6 +300,37 @@ class Screen:
 
     def _grid_at(self, i: int) -> int:
         return self.cells[i // COLS][i % COLS]
+
+    def cursor_anchor(self) -> tuple[str, int, int]:
+        """Строка под курсором для протяжки с клавиатуры: («frame», y, x)."""
+        return ("frame", min(self.y, self.rows - 1),
+                min(max(self.x, 0), COLS - 1))
+
+    def kbd_sel_begin(self, block: bool = False) -> None:
+        """Начать протяжку с клавиатуры (Shift+стрелка).
+
+        Якорь — курсор 15ИЭ: завершённый фрагмент остаётся, а новое
+        нажатие при незаконченной протяжке двигает её конец (как Shift+←
+        в любом редакторе).
+        """
+        kind, idx, x = self.cursor_anchor()
+        if self._drag is None:
+            self.sel_begin(kind, idx, x, block)
+        else:
+            self._drag[8] = block          # вид протяжки — по клавише
+
+    def kbd_sel_drag(self, y: int, x: int, block: bool = False) -> None:
+        """Сдвинуть конец протяжки к точке (y, x) кадра.
+
+        Строчное выделение живёт в координатах содержимого — здесь они
+        совпадают с координатами курсора (кадр под курсором); точку
+        прижимаем к краям, чтобы протяжка «простреливала» наискось.
+        """
+        if self._drag is None:
+            return
+        y = max(0, min(y, self.rows - 1))
+        x = max(0, min(x, COLS - 1))
+        self.sel_drag("frame", y, x)
 
     def word_right(self) -> None:
         """Ctrl+→: курсор на начало следующего слова (из середины слова —
@@ -704,11 +736,16 @@ class Screen:
     def sel_spans(self):
         """Данные для отрисовки выделения инверсией.
 
-        Возвращает (по ряду, текст ряда, по тексту): диапазоны знаков по
+        Возвращает (по ряду, тext ряда, по тексту): диапазоны знаков по
         ключу (вид, номер ряда) — им пользуемся, только если текст ряда
         совпал со снимком (иначе ряд уже другой — кадр прокрутился), и
         запасной ключ по самому тексту — тогда выделение остаётся на
         «уехавшей» строке, когда она ушла в историю.
+
+        На жёстком терминале (ASCII) транслитерация ломает поиск по тексту:
+        «Щ» → «Shch», «ШЧ» → «Shch» — разные тексты выглядят одинаково,
+        и подсветка попадает не на те строки. Поэтому by_text только для
+        уникальных ASCII-текстов (кириллица не участвует).
         """
         by_key: dict[tuple[str, int], list[tuple[int, int]]] = {}
         key_text: dict[tuple[str, int], str] = {}
@@ -730,11 +767,12 @@ class Screen:
                     continue          # строка вне окна: подсвечивать нечего
                 by_key.setdefault((kind, idx), []).append((a, b))
                 key_text[(kind, idx)] = row_text
-                # запасной ключ по тексту: им воспользуется отрисовка, когда
-                # строка ушла из кадра в историю (у неё уже другой ключ).
-                # Только для уникальных текстов — иначе выделение одной
-                # строки подсветило бы все одноимённые.
-                if row_text and seen.get(row_text) == 1:
+                # Запасной ключ по тексту: только для уникальных ASCII-текстов.
+                # На жёстком терминале кириллица транслитерируется («Щ»→«Shch»,
+                # «ШЧ»→«Shch») — разные тексты выглядят одинаково, и подсветка
+                # попала бы не на те строки. ASCII-тексты транслитерация не
+                # меняет, поэтому для них запасной ключ безопасен.
+                if row_text and row_text.isascii() and seen.get(row_text) == 1:
                     by_text.setdefault(row_text, []).append((a, b))
         return by_key, key_text, by_text
 
@@ -808,6 +846,9 @@ class Screen:
         # сжимать сетку, но в колонку не влезает — занимает ряд целиком
         longest = max((len(p) for p, c in zip(plain, cells)
                        if p and c is not RULE and c not in wide), default=0)
+        # пол ширины колонки (Session: «СЕТЬ=АВТОНОМНО»): сетка не должна
+        # зависеть от того, какое значение стоит в ячейке сейчас
+        longest = max(longest, self.panel_colw_min)
         cols = max(1, (w + len(SEP)) // (longest + len(SEP)))
         colw = (w - len(SEP) * (cols - 1)) // cols
         rows: list[list[Cell]] = []

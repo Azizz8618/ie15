@@ -20,8 +20,12 @@ import time
 from . import COLS, ROWS
 from .charset import (encode_koi7, koi7_display_upper, koi7_raw_upper,
                       normalize_incremental, to_line)
-from .keyboard import DEFAULT_LAYOUT, is_key_combo, key_to_bytes
+from .keyboard import (DEFAULT_LAYOUT, is_key_combo, key_to_bytes,
+                       KEY_CTRLSELDOWN, KEY_CTRLSELLEFT, KEY_CTRLSELRIGHT,
+                       KEY_CTRLSELUP, KEY_SELDOWN, KEY_SELLEFT,
+                       KEY_SELRIGHT, KEY_SELUP)
 from .screen import HELP, RULE, mk
+from .undo import DEFAULT_UNDO, UndoStack
 
 MODE_LOCAL = "local"      # «АВТОНОМНО»
 MODE_HOST = "host"        # «С ЭВМ»
@@ -84,7 +88,8 @@ class TerminalSession:
     def __init__(self, parser, link=None, mode: str = MODE_LOCAL,
                  koi7: bool = False, encoding: str = "utf8",
                  layout: str | None = None,
-                 keymap: dict[str, str] | None = None) -> None:
+                 keymap: dict[str, str] | None = None,
+                 undo_depth: int = DEFAULT_UNDO) -> None:
         if mode not in (MODE_LOCAL, MODE_HOST):
             raise ValueError(f"неизвестный режим: {mode!r}")
         self.parser = parser
@@ -105,6 +110,9 @@ class TerminalSession:
         self.default_layout = layout     # раскладка, включаемая набором Н1
         self.koi7 = layout is not None
         self.buffer = bytearray()
+        # отмена правок набора (АВТОНОМНО): снимки буфера, глубина — из
+        # конфига ([terminal] undo), 0 — выключена
+        self.undo = UndoStack(undo_depth)
         self.echo = True             # клавиша «ЭХО» (F6): вывод набираемого
                                      # на экран; снята — пароли не печатаются
         self._echo_pending = bytearray()   # эхо-ответ линии, ожидаемый при
@@ -219,11 +227,18 @@ class TerminalSession:
             # сочетания с Ctrl («УПР») — отдельной группой
             mk(("СЛОВО=Ctrl+→", "ctrl")), mk(("СЛОВО=Ctrl+←", "ctrl")),
             mk(("НАЧСТР=Ctrl+↑", "ctrl")), mk(("НИЖСТР=Ctrl+↓", "ctrl")),
-            "",                                   # конец группы Ctrl
+            mk(("ВЫД=Shift+Стрелки", "edit")),    # выделение с клавиатуры
+            mk(("ВЫДКОЛ=Shift+Ctrl", "edit")),
             # правка текста — отдельной группой
             mk(("ДОМ=Home", "edit")), mk(("СТЕРСТР=End", "edit")),
             mk(("ИНВЕРС=Ins", "edit")), mk(("НОРМ=Del", "edit")),
         ]
+        # «АВТОНОМНО» длиннее «С ЭВМ»: ширина колонки сетки не должна
+        # зависеть от режима сеанса, иначе на F9 (СЕТЬ↔АВТОНОМНО) все
+        # колонки подвала съезжают. Пол «СЕТЬ=АВТОНОМНО» держит колонку
+        # (см. Screen._grid) одинаковой в обоих режимах; ставится ДО
+        # set_panel — первая же сборка идёт уже с этим минимумом.
+        sc.panel_colw_min = len("СЕТЬ=АВТОНОМНО")
         # «ПОСЛ» — длинная ячейка: всегда свой ряд и не влияет на ширину
         # колонок, иначе сетка подвала скачет на каждом нажатии
         sc.set_panel(state, wide=[last])
@@ -293,6 +308,18 @@ class TerminalSession:
         по этим строкам и пишут привязки в [keys].
         """
         orig = key
+        # незаконченная протяжка с клавиатуры (Shift+стрелки) живёт, пока
+        # не завершат: любой другой знак/клавиша фиксирует фрагмент — как
+        # отпускание кнопки мыши при протяжке указателем. Саму мышь
+        # (MOUSEDOWN/DRAG/UP) и селект-клавиши это не трогает: у мыши
+        # свой жизненный цикл протяжки, селект-клавиши её продолжают.
+        if self.parser.screen._drag is not None and \
+                key not in (KEY_SELRIGHT, KEY_SELLEFT, KEY_SELUP, KEY_SELDOWN,
+                            KEY_CTRLSELRIGHT, KEY_CTRLSELLEFT,
+                            KEY_CTRLSELUP, KEY_CTRLSELDOWN) and \
+                "MOUSE" not in key:
+            self.parser.screen.sel_end()
+            self._update_status()           # «ВЫД» в строке состояния
         if key in self.keymap:
             key = self.keymap[key]
             if not key:
@@ -309,10 +336,16 @@ class TerminalSession:
             self._update_service()
         elif is_key_combo(key):
             # нажатие с Ctrl/Alt/Shift без привязки: точное имя — в
-            # подвал, его и пишут ключом в [keys]; в линию не уходит
-            self.last_key = f"{key} U+{ord(key.rsplit('+', 1)[-1]):04X}"
-            self._update_service()
-            return None
+            # подвал, его и пишут ключом в [keys]; в линию не уходит.
+            # Исключение — Ctrl+ASCII-буква: это управляющий символ
+            # (Ctrl+E → 05), его ведёт key_to_bytes (как на 15ВВВ: Ctrl
+            # всегда даёт УП). Кириллица с Ctrl — гасится (нет такого УП).
+            last = key.rsplit('+', 1)[-1]
+            if not (len(key) == 6 and key.startswith("ctrl+")
+                    and last.isascii() and last.isalpha()):
+                self.last_key = f"{key} U+{ord(last):04X}"
+                self._update_service()
+                return None
         elif len(key) == 1:
             self.last_key = arrow + f"{key} U+{ord(key):04X}"
             self._update_service()
@@ -341,8 +374,12 @@ class TerminalSession:
             self._update_status()           # «ВЫД» в строке состояния
             return None
         if key == "SELTAKE":                  # F4 — взять выделенное в буфер
-            text = self.parser.screen.sel_text()
-            self.parser.screen.sel_clear()
+            sc = self.parser.screen
+            if sc._drag is not None:          # открытая протяжка — завершить
+                sc.sel_end()
+                self._update_status()
+            text = sc.sel_text()
+            sc.sel_clear()
             if text:
                 # в АВТОНОМНО — в буфер набора (ПЕРЕДАЧА его отдаст);
                 # в С ЭВМ — сразу в линию, знак за знаком
@@ -352,6 +389,7 @@ class TerminalSession:
                     if self.link is not None:
                         self.link.send(to_line(data, self.encoding))
                 else:
+                    self.undo.snapshot(self.buffer)     # отменяемая правка
                     self.buffer.extend(data)
             self._update_service()
             self._update_status()           # «ВЫД» в строке состояния
@@ -390,6 +428,20 @@ class TerminalSession:
                 # переходит в режим С ЭВМ
                 self.set_mode(MODE_HOST)
             return data
+        if key == "UNDO":
+            # отмена правки набора (АВТОНОМНО): вернуть буферу состояние
+            # до последней правки. В С ЭВМ буфера нет — отменять нечего
+            if self.mode == MODE_HOST or not self.buffer:
+                self.last_key = "ОТМЕНА: пусто"
+                self._update_service()
+                return None
+            self.undo.undo(self.buffer)
+            # эхо на экране относятся к прежнему содержимому: перерисуем
+            self._undo_echo()
+            self.last_key = "ОТМЕНА"
+            self._update_service()
+            self._update_status()           # счётчик отмены в строке состояния
+            return None
         if key == "MODE":
             self.toggle_mode()
             return None
@@ -411,6 +463,36 @@ class TerminalSession:
             getattr(self.parser.screen, move)()
             self._update_service()
             return None
+        if key in (KEY_SELRIGHT, KEY_SELLEFT, KEY_SELUP, KEY_SELDOWN,
+                   KEY_CTRLSELRIGHT, KEY_CTRLSELLEFT, KEY_CTRLSELUP,
+                   KEY_CTRLSELDOWN):
+            # выделение с клавиатуры: Shift+стрелки — построчное,
+            # Shift+Ctrl+стрелки — поколонное (как протяжка мышью с Ctrl).
+            # Якорь — курсор 15ИЭ, конец тянется за стрелки; завершённое
+            # выделение снимается следующим Shift+стрелка (начало нового).
+            # Курсор при протяжке не двигается: его двигают стрелки
+            # без Shift (в С ЭВМ — отдают коды ЭВМ).
+            sc = self.parser.screen
+            dy = -1 if key in (KEY_SELUP, KEY_CTRLSELUP) else \
+                1 if key in (KEY_SELDOWN, KEY_CTRLSELDOWN) else 0
+            dx = -1 if key in (KEY_SELLEFT, KEY_CTRLSELLEFT) else \
+                1 if key in (KEY_SELRIGHT, KEY_CTRLSELRIGHT) else 0
+            if sc._drag is None:
+                # первая клавиша лишь открывает протяжку от курсора:
+                # вбок выделяется знак под курсором, вверх/вниз — строка
+                # от курсора (диапазон протяжки включает обе точки)
+                sc.kbd_sel_begin(block=key in (KEY_CTRLSELRIGHT,
+                                               KEY_CTRLSELLEFT,
+                                               KEY_CTRLSELUP,
+                                               KEY_CTRLSELDOWN))
+            else:                              # продолжение: тянем конец
+                sc.kbd_sel_drag(sc._drag[4] + dy, sc._drag[5] + dx)
+            n, lines, chars = sc.sel_stats()
+            self.last_key = (f"ВЫД: {lines} стр., {chars} зн. (F4 — взять)"
+                             if lines else "ВЫД: пусто")
+            self._update_service()
+            self._update_status()
+            return None
         data = key_to_bytes(key, layout=self.layout,
                             shift_to_rus=self.nabor == "n2")
         if not data:
@@ -421,25 +503,50 @@ class TerminalSession:
         # держим линию свободной (как на незаполненном PLAN-символ «Р»).
         # Эхо — заглавными (Н1 не различает регистр, так же отвечает ЭВМ);
         # в буфере код остаётся как дана раскладка.
+        # KEY_ENTER: в буфер идёт только CR (0D) — управляющий символ,
+        # а на экране курсор перемещается в начало следующей строки (CR+LF).
         buffered = bool(self.buffer)
+        self.undo.snapshot(self.buffer)             # отменяемая правка
         self.buffer += data
         if self.echo:
             if not buffered:
                 self._echo_top = self.parser.screen.y
-            if self.nabor in ("n0", "n1"):
-                # Н0: ASCII как есть; Н1: русские оба регистра как есть
-                # (строчные коды 0x60.. — русские строчные, верхние —
-                # 0x40..0x5F и внутренние 0x00..0x1E)
-                self.parser.feed(data)
-            else:
-                # Н2 (VT-52/линия ЭВМ): эхо заглавными — одно-регистная
-                # традиция кодов ЭВМ; латинскую строчную показываем верхним
-                # регистром, т.к. строчные коды 0x60.. заняты русскими
-                latin = bytes((b - 0x20) if 0x61 <= b <= 0x7A else b
-                              for b in data)
-                self.parser.feed(koi7_display_upper(latin))
+            self._echo_feed(data + b"\n" if key == "KEY_ENTER" else data)
         self._update_service()
+        self._update_status()       # счётчик отмены «ОТМЕНА=» в строке
         return None
+
+    def _echo_feed(self, data: bytes) -> None:
+        """Напечатать набираемое на экран (АВТОНОМНО).
+
+        Н0: ASCII как есть; Н1: русские оба регистра как есть (строчные
+        коды 0x60.. — русские строчные, верхние — 0x40..0x5F и внутренние
+        0x00..0x1E). Н2 (VT-52/линия ЭВМ): эхо заглавными — одно-регистровая
+        традиция кодов ЭВМ; латинскую строчную показываем верхним
+        регистром, т.к. строчные коды 0x60.. заняты русскими.
+        """
+        if self.nabor in ("n0", "n1"):
+            self.parser.feed(data)
+        else:
+            latin = bytes((b - 0x20) if 0x61 <= b <= 0x7A else b
+                          for b in data)
+            self.parser.feed(koi7_display_upper(latin))
+
+    def _undo_echo(self) -> None:
+        """Перерисовать набираемое после отмены правки.
+
+        На экране лежит прежнее содержимое (знаки уже напечатаны), а буфер
+        после отмены другой. Стираем строки прежнего эха целиком и печатаем
+        текущий буфер заново — иначе остался бы «хвост» отменённых знаков.
+        При выключенном эхом на экране нет ничего нашего — не трогаем.
+        """
+        if not self.echo:
+            return
+        self._erase_local_echo()          # стирает и ставит курсор в начало
+        if not self.buffer:
+            return
+        self._echo_top = self.parser.screen.y
+        self._echo_feed(bytes(self.buffer))
 
     def _queue_echo(self, data: bytes) -> None:
         """Что вернёт линия в эхо на отданные байты (в форме приёма) —
@@ -497,6 +604,9 @@ class TerminalSession:
         """Клавиша SEND: выдать накопленное в линию и очистить буфер."""
         data = bytes(self.buffer)
         self.buffer.clear()
+        # отданное в линию отменять нечего: буфера уже нет, а следующий
+        # набор начинается с чистого листа
+        self.undo.clear()
         self._update_service()         # «ПЕРЕДАЧА=ПУСТО»
         return data
 
@@ -641,6 +751,15 @@ class TerminalSession:
             cells.append(mk(("ВЫД=", "label"),
                             (f"{self.parser.screen.sel_kind} "
                              f"{frags}фр {rows_n}с {chars}зн", "state")))
+        # отмена правок набора (АВТОНОМНО): «ОТМЕНА=Ctrl+U» — клавиша, а рядом
+        # число — сколько шагов ещё можно вернуть. В подвале для этого
+        # нет места (каждая группа уже занята, лишний ряд съел бы кадр),
+        # поэтому подсказка живёт здесь — как и «ВЫД» выше. Показываем
+        # только когда отменять есть что: на пустом буфере строка состояния
+        # не должна лишней мигать
+        if self.undo.depth and self.undo.available:
+            cells.append(mk(("ОТМЕНА=", "label"),
+                            (f"Ctrl+U ({len(self.undo)})", "state")))
         cells.append(mk(f"{when.tm_mday:02d}.{when.tm_mon:02d}.{when.tm_year} "
                         f"{when.tm_hour:02d}:{when.tm_min:02d}:"
                         f"{when.tm_sec:02d}"))
