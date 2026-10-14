@@ -140,6 +140,29 @@ def test_local_ctrl_arrows_move_cursor_in_buffer():
     assert session.pending() == typed("AB XCD")
 
 
+def test_local_arrows_move_cursor_in_buffer():
+    # Обычные стрелки в АВТОНОМНО двигают курсор по буферу набора,
+    # а не отправляют escape-последовательности (иначе курсор «уезжал
+    # вправо» — ESC C интерпретировался как команда терминала)
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    for ch in "AB":
+        session.feed_key(ch)
+    session.feed_key("KEY_ENTER")
+    for ch in "XY":
+        session.feed_key(ch)
+    # буфер: "AB\rXY", курсор после "XY" (позиция 5)
+    assert session._buf_pos == 5
+    session.feed_key("KEY_UP")
+    assert session._buf_pos == 2                    # столбец 2 первой строки
+    assert (sc.x, sc.y) == (2, 0)
+    session.feed_key("KEY_DOWN")
+    assert session._buf_pos == 5                    # столбец 2 второй строки
+    assert (sc.x, sc.y) == (2, 1)
+    # Стрелки не портят буфер
+    assert session.pending() == typed("AB") + b"\r" + typed("XY")
+
+
 def test_local_backspace_does_not_join_lines():
     # Backspace в начале строки не стирает ПР — строки не склеиваются
     session, _ = make_session(MODE_LOCAL)

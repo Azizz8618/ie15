@@ -405,6 +405,44 @@ class TerminalSession:
                 self.last_key = "КОНЕЦ"
                 self._update_service()
                 return None
+        if key in ("KEY_UP", "KEY_DOWN", "KEY_RIGHT", "KEY_LEFT"):
+            # В АВТОНОМНО обычные стрелки двигают курсор по буферу набора
+            # (в С ЭВМ остаются кодами терминала ESC A/B/C/D). Без этой
+            # обработки стрелки проваливались в key_to_bytes и отправляли
+            # escape-последовательности в буфер — курсор «уезжал вправо».
+            if self.mode == MODE_LOCAL:
+                buf, n = self.buffer, len(self.buffer)
+                pos = self._buf_pos
+                if key == "KEY_RIGHT":
+                    self._buf_pos = min(pos + 1, n)
+                elif key == "KEY_LEFT":
+                    self._buf_pos = max(pos - 1, 0)
+                else:
+                    # Вычисляем текущий столбец
+                    line_start = buf.rfind(b"\r", 0, pos) + 1
+                    col = pos - line_start
+                    if key == "KEY_UP":
+                        # Предыдущая строка, тот же столбец
+                        prev_end = line_start - 1
+                        if prev_end <= 0:
+                            self._buf_pos = 0
+                        else:
+                            prev_start = buf.rfind(b"\r", 0, prev_end) + 1
+                            self._buf_pos = min(prev_start + col, prev_end)
+                    else:  # KEY_DOWN
+                        # Следующая строка, тот же столбец
+                        next_start = buf.find(b"\r", pos)
+                        if next_start < 0:
+                            self._buf_pos = n
+                        else:
+                            next_end = buf.find(b"\r", next_start + 1)
+                            next_line_end = n if next_end < 0 else next_end
+                            self._buf_pos = min(next_start + 1 + col, next_line_end)
+                if self.echo and self.buffer:
+                    self._redraw_echo()
+                self.last_key = CONTROL_HINTS.get(key, "")
+                self._update_service()
+                return None
         if key == "SELCLEAR":                # F3 — снять всё выделение
             self.parser.screen.sel_clear()
             self._update_status()           # «ВЫД» в строке состояния
