@@ -523,6 +523,54 @@ def normalize_combo(s: str) -> str:
     return "+".join([m for m in _COMBO_MODS if m in mods] + [rest])
 
 
+def split_incomplete(data: bytes) -> tuple[bytes, bytes]:
+    """Разделить данные на разобранное и недобранный хвост escape-последовательности.
+
+    Терминал отдаёт нажатие несколькими байтами («ESC [ 27 ; 5 ; 101 ~»), и
+    `os.read` возвращает их НЕ обязательно целиком. Если первый кусок
+    кончается на «ESC» или «ESC [ 27 ;», разбирать его нельзя: ESC погаснет,
+    а «[ 2 7 ;» уйдёт в набор обычными знаками — ровно тот «[», что
+    наблюдался вместо Ctrl+E. Поэтому хвост, который ещё может стать
+    последовательностью, ждёт следующих байтов.
+
+    Правило: у CSI финальный байт — 0x40…0x7E, а всё до него параметры
+    (0x20…0x3F). Пока параметры идут и финального байта нет — ждём. Отдельно
+    «ESC [ M»: это старая мышь X10, за ней обязательно ещё три байта.
+
+    Возвращает (полная часть, хвост).
+    """
+    i = data.rfind(b"\x1b")
+    if i < 0:
+        return data, b""
+    tail = data[i:]
+    n = len(tail)
+    if n == 1:                          # ждём знака после ESC
+        return data[:-1], tail
+    if tail[:2] == b"\x1b[":
+        rest = tail[2:]
+        if not rest or all(0x20 <= c <= 0x3F for c in rest):
+            return data[:-n], tail       # параметры идут, финального нет
+        if rest[0] == 0x4D and n < 6:    # «ESC [ M» + код,x,y — мышь X10
+            return data[:-n], tail
+        return data, b""                 # финальный байт есть — разбираем
+    if tail[:2] == b"\x1bO":
+        return data, b""                 # SS3 («ESC O A») приходит целиком
+    if n < 8 and any(seq.startswith(tail) for seq in SEQ_KEYS):
+        return data[:-n], tail           # префикс известной последовательности
+    return data, b""
+
+
+def decode_keys(data: bytes, pending: bytes = b"") -> tuple[list[str], bytes]:
+    """Разобрать нажатия с учётом недобранного хвоста (состоятельный вход).
+
+    Возвращает (имена нажатий, хвост для следующего вызова). Обычный
+    `decode_key_bytes` годится там, где данные приходят целиком (--feed,
+    тесты); для живой клавиатуры нужен этот: он копит хвост между чтениями.
+    """
+    whole, tail = split_incomplete(pending + data)
+    return decode_key_bytes(whole), tail
+
+
 def decode_key_bytes(data: bytes) -> list[str]:
     """Распарсить байты нажатий в имена клавиш/символы для feed_key().
 

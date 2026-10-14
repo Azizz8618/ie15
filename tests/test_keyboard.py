@@ -9,8 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from ie15emu.charset import encode_koi7
 from ie15emu.keyboard import (DEFAULT_LAYOUT, KEY_BLINK, KEY_CMDSET, KEY_CTRLUP,
                               KEY_MODE, KEY_SEND, KEY_WHEELDOWN, KEY_WHEELUP,
-                              ctrl_code, decode_key_bytes, is_key_combo,
-                              key_to_bytes, normalize_combo)
+                              ctrl_code, decode_key_bytes, decode_keys,
+                              is_key_combo, key_to_bytes, normalize_combo)
 
 
 def test_mouse_sgr_wheel():
@@ -217,6 +217,38 @@ def test_ctrl_e_arrives_from_every_terminal_form():
             decode_key_bytes(seq) == ["\x05"]
     # в старой форме стрелки остались стрелками
     assert decode_key_bytes(b"\x1b[1;5A") == [KEY_CTRLUP]
+
+
+def test_sequence_split_by_read_is_not_mangled():
+    # os.read отдаёт нажатие по частям: недобранный хвост escape-последовательности
+    # обязан ждать следующих байтов, иначе ESC погаснет, а «[ 27 ;» уйдёт в
+    # набор обычными знаками — тот самый «[» вместо Ctrl+E
+    seqs = [b"\x05", b"\x1b[101;5u", b"\x1b[27;5;101~", b"\x1b[1;5E",
+            b"\r", b"\x1b[H", b"\x1b[2~", b"\x1b[A", b"\x1b[<0;10;5M",
+            b"ABC", b"a\x1b[1;2Ab"]
+    for seq in seqs:
+        want = decode_key_bytes(seq)
+        for cut in range(1, len(seq)):
+            keys, tail = decode_keys(seq[:cut], b"")
+            keys2, _ = decode_keys(seq[cut:], tail)
+            assert keys + keys2 == want, (seq, cut, keys + keys2, want)
+        # и совсем по одному байту — так «терминал» может отдать всё сразу
+        keys, pending = [], b""
+        for b in seq:
+            got, pending = decode_keys(bytes([b]), pending)
+            keys += got
+        assert keys == want, (seq, keys, want)
+
+
+def test_ordinary_typing_never_buffered():
+    # обычные знаки не ждут продолжения: ввод не должен «залипать»
+    keys, pending = decode_keys(b"abc", b"")
+    assert keys == ["a", "b", "c"] and pending == b""
+    # одиночный ESC без продолжения — тоже знак (а не хвост навечно)
+    keys, pending = decode_keys(b"\x1b", b"")
+    assert keys == [] and pending == b"\x1b"
+    keys, pending = decode_keys(b"A", pending)
+    assert keys == ["alt+A"] and pending == b""
 
 
 def test_shift_to_rus_h2():

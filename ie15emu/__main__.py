@@ -21,7 +21,7 @@ from pathlib import Path
 
 from . import COLS, ROWS, __version__
 from .charset import Charset, encode_koi7
-from .keyboard import DEFAULT_LAYOUT, key_to_bytes
+from .keyboard import DEFAULT_LAYOUT, decode_keys, key_to_bytes
 from .link import LinkError, open_link
 from .parser import Parser
 from .render import to_png_bytes, to_text
@@ -352,8 +352,6 @@ def run_line(parser: Parser, url: str, png: str | None,
     import termios
     import tty
 
-    from .keyboard import decode_key_bytes
-
     try:
         link = open_link(url, **linkkw)
     except (LinkError, OSError) as e:
@@ -427,6 +425,7 @@ def run_line(parser: Parser, url: str, png: str | None,
     if take_fit:                      # по умолчанию окно не трогаем:
         _install_winch(fit)         # кадр сам дотягивается до низа окна
     dirty = True                         # первый кадр рисуем сразу
+    kb_pending = b""                     # недобранный хвост escape-последовательности
     try:
         while seconds <= 0 or time.time() - t0 < seconds:
             fds = [link_sock(link)] if link_sock(link) is not None else []
@@ -440,7 +439,11 @@ def run_line(parser: Parser, url: str, png: str | None,
             dirty = False
             if fd is not None and fd in ready:
                 chunk = os.read(fd, 256)
-                for key in decode_key_bytes(chunk):
+                # недобранный хвост escape-последовательности ждёт следующих
+                # байтов: os.read отдаёт нажатие по частям, и разорванная
+                # последовательность рассыпалась бы в знаки («[» вместо Ctrl+E)
+                keys, kb_pending = decode_keys(chunk, kb_pending)
+                for key in keys:
                     session.emit(session.feed_key(key))
                     dirty = True       # АВТОНОМНО: эхо в ОЗУ без ответа линии
             data = link.recv()
