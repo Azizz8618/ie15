@@ -6,3 +6,6 @@ shots/
 logs/
 *.log
 .venv/
+*.swp
+*.swo
+*~

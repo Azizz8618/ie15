@@ -26,12 +26,22 @@ from .link import LinkError, open_link
 from .parser import Parser
 from .render import to_png_bytes, to_text
 from .session import TerminalSession
+from .undo import DEFAULT_UNDO
+
+from .hardterm import Output
 
 DRAW_MIN_GAP = 0.015   # с, минимальный интервал между кадрами
                        # (защита от потока перерисовок при мыши)
 
 ROM_DEFAULT = Path(__file__).resolve().parent.parent / "rom"
 CONF_DEFAULT = ROM_DEFAULT.parent / "ie15.conf"
+
+# Вывод в терминал. На «жёстком» терминале (ASCII-локаль, нет юникодного
+# шрифта) Output подставляет латиницу вместо кириллицы и ASCII вместо
+# псевдографики — иначе первый же русский знак обрывает сеанс
+# UnicodeEncodeError. Управляющие последовательности (ESC …) в
+# подстраховку не попадают: они всегда ASCII.
+OUT = Output()
 
 
 def load_conf(path: str | None = None) -> configparser.ConfigParser:
@@ -87,7 +97,7 @@ def say(msg: str) -> None:
     """Сообщение пользователю: перенос по 80 знаков, слова не разрывать."""
     import textwrap
     for ln in textwrap.wrap(msg, width=COLS) or [""]:
-        print(ln)
+        OUT.write(ln + "\n")
 
 
 def apply_port(url: str | None, spec: str) -> str:
@@ -145,6 +155,10 @@ def apply_conf(ns, cp: configparser.ConfigParser):
         ns.keyfile = kf if kf and Path(kf).is_file() else None
     if getattr(ns, "history", None) is None:
         ns.history = cp.get("terminal", "history", fallback="1000") or "1000"
+    if getattr(ns, "undo", None) is None:
+        # глубина отмены правок набора (АВТОНОМНО); 0 — отмена выключена
+        ns.undo = cp.get("terminal", "undo", fallback=str(DEFAULT_UNDO)) \
+            or str(DEFAULT_UNDO)
     if getattr(ns, "nabor", None) is None:
         term = "terminal" if cp.has_section("terminal") else None
         nb = cp.get(term, "nabor", fallback="") if term else ""
@@ -166,8 +180,9 @@ def apply_conf(ns, cp: configparser.ConfigParser):
         # (циклической прокрутки нет); mouse = off — листает сам терминал
         ns.mouse = cp.getboolean("terminal", "mouse", fallback=True)
     if not getattr(ns, "no_help", None):
-        # справка подвала (легенда клавиш) по умолчанию видна
-        ns.no_help = cp.getboolean("terminal", "help", fallback=True)
+        # справка подвала (легенда клавиш): [terminal] help = on/off;
+        # в ns.no_help хранится ОБРАТНОЕ («--no-help»), поэтому инверсия
+        ns.no_help = not cp.getboolean("terminal", "help", fallback=True)
     if not getattr(ns, "machine", None):
         # номер ЭВМ в строке состояния над кадром (пусто — не показываем)
         ns.machine = (cp.get("line", "machine", fallback="") or "").strip()
@@ -330,6 +345,7 @@ def run_line(parser: Parser, url: str, png: str | None,
              layout: str | None = None, keymap: dict[str, str] | None = None,
              take_mouse: bool = True, take_fit: bool = False,
              machine: str = "", show_help: bool = True,
+             undo_depth: int = DEFAULT_UNDO,
              **linkkw) -> None:
     import os
     import select
@@ -344,7 +360,7 @@ def run_line(parser: Parser, url: str, png: str | None,
         say(f"[линия] {url} — не удалось подключиться: {e}")
         return
     session = TerminalSession(parser, link=link, mode=mode, layout=layout,
-                              keymap=keymap)
+                              keymap=keymap, undo_depth=undo_depth)
     if machine:
         session.machine = str(machine)   # номер ЭВМ — в строке состояния
         session._update_status()
@@ -352,7 +368,9 @@ def run_line(parser: Parser, url: str, png: str | None,
     # состояния с полями сеанса остаётся в любом случае
     parser.screen.set_help(show_help)
     say(f"[линия] {url} — подключено (режим: {mode})")
-    say("[клавиши] ввод — в линию/буфер; F6 — ЭХО (пароль без вывода), "
+    say("[клавиши] ввод — в линию/буфер; Shift+стрелки — выделение "
+        "(Shift+Ctrl — колонкой), F4 — ВЗЯТЬ выделенное, "
+        "F6 — ЭХО (пароль без вывода), "
         "F8 — РЕЖИМ (набор №1↔№2), F9 — АВТОНОМНО↔С ЭВМ, F10 — SEND, "
         "Ctrl-C — выход")
     # До отправки первого текста читаем баннер SIMH («Encoding is …»),
@@ -447,8 +465,8 @@ def run_line(parser: Parser, url: str, png: str | None,
                 if fd is not None and now - last_draw < DRAW_MIN_GAP:
                     if select.select([fd], [], [], 0)[0]:
                         continue
-                sys.stdout.write(text_screen(parser))
-                sys.stdout.flush()
+                OUT.write(text_screen(parser))
+                OUT.flush()
                 last_draw = time.monotonic()
     except KeyboardInterrupt:
         pass
@@ -540,7 +558,7 @@ def text_screen(parser: Parser) -> str:
                 # различим инверсным блоком
                 ch = f"\x1b[5;7m{ch}\x1b[0m"
             if y is not None and y == sc.y and x == sc.x:
-                ch = f"\x1b[7m{ch}\x1b[27m"
+                ch = f"\x1b[7m{ch}\x1b[27m"      # курсор 15ИЭ — над текстом
             elif mark and any(a0 <= x <= b0 for a0, b0 in mark):
                 ch = f"\x1b[7m{ch}\x1b[27m"      # выделенный текст
             toks.append(ch)
@@ -654,8 +672,8 @@ def run_headless(parser: Parser, url: str, feed: str | None, dump: str | None,
         if wait > 0 and hist:               # что было на экране до прокрутки
             out += "\n--- ушло с экрана (хвост истории) ---\n" + hist + "\n"
         if dump == "-":
-            sys.stdout.write(out)
-            sys.stdout.flush()
+            OUT.write(out)
+            OUT.flush()
         else:
             with open(dump, "w", encoding="utf-8") as f:
                 f.write(out)
@@ -704,6 +722,9 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--history", default=None, type=str,
                     help="строк «истории» выдачи над экраном для PgUp "
                          "(по умолчанию 1000; 0 — не сохранять)")
+    ap.add_argument("--undo", default=None, type=str,
+                    help="глубина отмены правок набора в АВТОНОМНО "
+                         f"(Ctrl+U, по умолчанию {DEFAULT_UNDO}; 0 — выключить)")
     ap.add_argument("--nabor", choices=["n0", "n1", "n2"], default=None,
                     help="НАБОР терминала: Н0 — знаки ASCII, Н1 — русские "
                          "верхний и нижний регистры (КОИ-7), Н2 — набор "
@@ -773,6 +794,7 @@ def main(argv: list[str] | None = None) -> None:
                      keymap=args.keymap, take_mouse=bool(args.mouse),
                      take_fit=bool(args.fit), machine=args.machine or "",
                      show_help=not bool(args.no_help),
+                     undo_depth=int(args.undo),
                      password=args.password, keyfile=args.keyfile)
     else:
         run_script(parser, args.png)

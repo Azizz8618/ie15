@@ -87,6 +87,17 @@ def test_layout_off_in_conf():
     assert apply_conf(ns(), cp).layout == "off"
 
 
+def test_undo_depth_from_conf():
+    # Глубина отмены правок набора — из [terminal] undo, по умолчанию 20;
+    # 0 — отмена выключена, --undo важнее конфига
+    from ie15emu.undo import DEFAULT_UNDO
+    assert apply_conf(ns(), cp_from(CONF)).undo == str(DEFAULT_UNDO)
+    conf = CONF + "\nundo = 5\n"
+    assert apply_conf(ns(), cp_from(conf)).undo == "5"
+    assert apply_conf(ns(), cp_from(CONF + "undo = 0\n")).undo == "0"
+    assert apply_conf(ns(undo="7"), cp_from(conf)).undo == "7"
+
+
 def test_cli_wins_over_conf():
     cp = cp_from(CONF)
     got = apply_conf(ns(line="tcp://127.0.0.1:4202", mode="host", sets="2",
