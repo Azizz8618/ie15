@@ -291,8 +291,8 @@ SEQ_KEYS = {
     b"\x1bOS": KEY_SELTAKE, b"\x1b[14~": KEY_SELTAKE,     # F4 — взять в буфер
     b"\x1b[15~": KEY_CLEAR,                         # F5 — ОЧИСТКА экрана
     b"\x1b[[E": KEY_CLEAR,                          # F5 консоли Linux (ESC[[A…E)
-    b"\x1b[[A": KEY_SELCLEAR,                       # F3 консоли Linux
-    b"\x1b[[B": KEY_SELTAKE,                        # F4 консоли Linux
+    b"\x1b[[C": KEY_SELCLEAR,                       # F3 консоли Linux
+    b"\x1b[[D": KEY_SELTAKE,                        # F4 консоли Linux
     b"\x1b[17~": KEY_ECHO,                          # F6 — ЭХО (подавить набор)
     b"\x1b[18~": KEY_BLINK,                         # F7 — УПР.СИМВ (показ УП)
     b"\x1b[19~": KEY_CMDSET,                        # F8 — НАБОР (набор 1↔2)

@@ -272,8 +272,8 @@ def test_service_panel_all_bits():
                    "ESC=Esc", "КУРСОР=Стрелки", "ДОМ=Home", "СТЕРСТР=End",
                    "СЛОВО=Ctrl+→", "СЛОВО=Ctrl+←", "НАЧСТР=Ctrl+↑",
                    "НИЖСТР=Ctrl+↓", "ИНВЕРС=Ins",
-                   "НОРМ=Del", "ЭХО=F6", "УПР.СИМВ=F7", "УПР.СИМВ=F7", "НАБОР=F8", "СЕТЬ=F9",
-                   "ПЕРЕДАЧА=F10"):
+                   "НОРМ=Del", "ЭХО=F6", "УПР.СИМВ=F7", "НАБОР=F8", "СЕТЬ=F9",
+                   "ПЕРЕДАЧА=F10", "ВЫД=Shift+Стрелки", "ВЫДКОЛ=Shift+Ctrl"):
         assert legend in panel(), legend
     assert "ЭХО=ВКЛ" in panel()                      # состояние в ряду состояний
     session.feed_key("ECHO")
@@ -283,7 +283,7 @@ def test_service_panel_all_bits():
     # окна; колонки ровные: разделители « | » стоят на одних позициях
     for i, line in enumerate(rows()):
         assert len(line) <= 80, f"ряд {i} шире 80 ({len(line)})"
-    assert len(rows()) <= 10, rows()
+    assert len(rows()) <= 11, rows()
     cells = session.parser.screen.panel_cells()
     for cell in cells:
         if cell and cell not in panel():          # ячейка не разорвана
@@ -705,6 +705,27 @@ def test_panel_grid_stable_while_values_change():
     assert sig() != base and sig()[1] < base[1]     # панель ниже
 
 
+def test_panel_grid_stable_across_mode_toggle():
+    # F9 (АВТОНОМНО ↔ С ЭВМ): сетка подвала не должна ехать за сменой
+    # значения «СЕТЬ=…» — иначе колонки подвала прыгают на каждом
+    # переключении режима (в С ЭВМ значение короче «АВТОНОМНО» на знак)
+    session, _ = make_session(MODE_HOST)
+    sc = session.parser.screen
+
+    def seps():
+        rows = ["".join(sc.service)] + sc.service_more
+        return (sc._panel_colw, len(rows),
+                tuple(sorted({i for l in rows
+                              for i, ch in enumerate(l) if ch == "|"})))
+
+    base = seps()
+    session.feed_key(KEY_MODE)                       # → АВТОНОМНО
+    assert "СЕТЬ=АВТОНОМНО" in panel_text(sc)
+    assert seps() == base, seps()
+    session.feed_key(KEY_MODE)                       # → С ЭВМ
+    assert seps() == base, seps()
+
+
 def test_low_window_keeps_status_line_and_scrolls_text(monkeypatch):
     # окно ниже «25 рядов кадра + подвал»: строка состояния не уезжает,
     # первая выданная строка видна сразу, дальше уезжает текст сверху
@@ -784,11 +805,15 @@ def test_shift_arrow_is_swallowed_not_typed():
     # разбирались как ESC + «[1;2A» и уходили в линию — эхо ЭВМ забивало
     # кадр («циклическая прокрутка»). Теперь нажатие гасится целиком.
     from ie15emu.keyboard import decode_key_bytes
-    for seq in (b"\x1b[1;2A", b"\x1b[1;2B", b"\x1b[1;2C", b"\x1b[1;2D",
-                b"\x1b[1;3A", b"\x1b[1;4C", b"\x1b[1;6A", b"\x1b[1;8D",
+    for seq in (b"\x1b[1;3A", b"\x1b[1;4C", b"\x1b[1;7A", b"\x1b[1;8D",
                 b"\x1b[5;2~", b"\x1b[3;3~"):
         assert decode_key_bytes(seq) == [], seq
-    assert decode_key_bytes(b"a\x1b[1;2Ab") == ["a", "b"]     # текст не теряется
+    # Shift+стрелки и Shift+Ctrl+стрелки — выделение с клавиатуры
+    assert decode_key_bytes(b"\x1b[1;2A") == ["SELUP"]
+    assert decode_key_bytes(b"\x1b[1;2C") == ["SELRIGHT"]
+    assert decode_key_bytes(b"\x1b[1;6A") == ["CTRLSELUP"]
+    assert decode_key_bytes(b"\x1b[1;6C") == ["CTRLSELRIGHT"]
+    assert decode_key_bytes(b"a\x1b[1;2Ab") == ["a", "SELUP", "b"]  # текст не теряется
     # без модификаторов и Ctrl-стрелки работают как прежде
     assert decode_key_bytes(b"\x1b[A") == ["KEY_UP"]
     assert decode_key_bytes(b"\x1b[1;5A") == ["KEY_CTRLUP"]
@@ -1412,7 +1437,7 @@ def test_fit_rows_is_frame_plus_panel():
     assert fit_rows(session.parser) == ROWS + 5 + (sc.panel_rows() - 1)
     assert sc.panel_rows() <= 12                     # 80 знаков
     sc.set_panel_cols(120)                           # шире окно — ниже панель
-    assert sc.panel_rows() <= 9
+    assert sc.panel_rows() <= 10
     assert fit_rows(session.parser) == ROWS + 5 + (sc.panel_rows() - 1)
 
 
@@ -1436,7 +1461,7 @@ def test_frame_grows_to_window_and_panel_sits_at_bottom(monkeypatch):
         last = max(int(n) for n in re.findall(r"\x1b\[(\d+);1H", out))
         assert last == height
         last_row = out.split(f"\x1b[{height};1H", 1)[1]
-        assert "ДОМ=Home" in last_row          # последняя строка — конец справки
+        assert "НОРМ=Del" in last_row          # последняя строка — конец справки
         # строка состояния — первый ряд окна, в кадр ЭВМ не входит
         first_row = out.split("\x1b[1;1H", 1)[1].split("\x1b[2;1H", 1)[0]
         assert sc.status_line().strip() in first_row
@@ -1525,9 +1550,82 @@ def test_clear_key_clears_visible_page_in_wide_window(monkeypatch):
     assert "HELLO" in m.text_screen(session.parser)
 
 
+def test_console_f_keys():
+    # Linux-консоль (TERM=linux, KEYMAP ruwin-*) шлёт F1–F5 старым
+    # форматом ESC[[A…E: F5 — ОЧИСТКА, F3/F4 — снятие/взятие выделения
+    from ie15emu.keyboard import (KEY_CLEAR, KEY_SELCLEAR, KEY_SELTAKE,
+                                  decode_key_bytes)
+    assert decode_key_bytes(b"\x1b[[E") == [KEY_CLEAR]
+    assert decode_key_bytes(b"\x1b[[C") == [KEY_SELCLEAR]
+    assert decode_key_bytes(b"\x1b[[D") == [KEY_SELTAKE]
+    # остальные ESC[[… консоли в линию не уходят: ESC гасится, скобка
+    # и буква — печатные знаки (безопасныйfallback)
+    assert decode_key_bytes(b"\x1b[[C") == ["KEY_ESC", "[", "[", "C"]
+    # xterm-формы не задеты
+    assert decode_key_bytes(b"\x1b[15~") == [KEY_CLEAR]
+    assert decode_key_bytes(b"\x1b[13~") == [KEY_SELCLEAR]
+
+
+def test_kbd_selection_shift_arrows(monkeypatch):
+    # Shift+стрелки — выделение построчное, Shift+Ctrl+стрелки — поколонное
+    # (как протяжка мышью с Ctrl). Якорь — курсор 15ИЭ; первая клавиша
+    # открывает протяжку, следующие тянут её конец; фрагмент фиксирует
+    # любая другая клавиша (или F4, которая выделенное забирает).
+    import ie15emu.__main__ as m
+    monkeypatch.setattr(m.os, "get_terminal_size",
+                        lambda: os.terminal_size((100, 40)))
+    from ie15emu import keyboard as K
+    session, _ = make_session(MODE_HOST)      # «X» уходит в линию, кадр чист
+    sc = session.parser.screen
+    session.handle_line_reply(b"PERVOE SLOVO. VTOROE\r\n"
+                              b"VTORAYA STROKA ZDES\r\n")
+    sc.x = sc.y = 0
+    m.text_screen(session.parser)             # view_map для протяжки
+    # Shift+→: открыть на (0,0), каждое следующее — знак вправо
+    session.feed_key(K.KEY_SELRIGHT)
+    assert sc._drag is not None and sc._drag[8] is False
+    session.feed_key(K.KEY_SELRIGHT)
+    session.feed_key(K.KEY_SELRIGHT)          # конец на 3-м знаке
+    session.feed_key("X")                     # любая клавиша завершает
+    assert sc.sel_text() == "PER", sc.sel_text()
+    assert sc.sel_kind == "СТР"
+    # Shift+↓: открытая протяжка тянется вниз на строку с текстом
+    sc.y = 0
+    sc.x = 0
+    session.feed_key(K.KEY_SELDOWN)
+    session.feed_key(K.KEY_SELDOWN)           # конец на строке 1
+    session.feed_key("X")
+    assert "PERVOE SLOVO. VTOROE\nV" in sc.sel_text(), sc.sel_text()
+    # Shift+Ctrl+стрелки — колонкой: диапазон знаков один на все ряды
+    sc.y = 0
+    sc.x = 0
+    session.feed_key(K.KEY_CTRLSELRIGHT)
+    assert sc._drag[8] is True                # протяжка открылась колонкой
+    session.feed_key(K.KEY_CTRLSELRIGHT)
+    session.feed_key(K.KEY_CTRLSELRIGHT)      # конец (0,2)
+    session.feed_key(K.KEY_CTRLSELDOWN)       # конец (1,2) — колонка 0..2
+    session.feed_key("X")
+    frag = sc.selections[-1]
+    assert sc.sel_kind == "КОЛ"
+    assert [t[2] for t in frag] == [0, 0]     # одинаковый столбец
+    assert [t[3] for t in frag] == [2, 2]
+    assert sc.sel_text().endswith("PER\nVTO"), sc.sel_text()
+    # Ctrl+стрелки работают как прежде (прыжки по словам), выделение не трогают
+    sel_before = len(sc.selections)
+    session.feed_key("KEY_CTRLRIGHT")
+    assert len(sc.selections) == sel_before   # новая протяжка не открыта
+    assert sc._drag is None
+
+
 if __name__ == "__main__":
+    import inspect
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
+            if inspect.signature(fn).parameters:
+                # тесты с фикстурами pytest (monkeypatch) тут не запустить —
+                # только через python3 -m pytest tests/
+                print(f"--  {name} (нужен pytest)")
+                continue
             fn()
             print(f"ok  {name}")
-    print("все проверки пройдены")
+    print("все проверки пройдены (полный прогон: python3 -m pytest tests/)")
