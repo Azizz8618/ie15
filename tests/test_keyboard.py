@@ -7,10 +7,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ie15emu.charset import encode_koi7
-from ie15emu.keyboard import (DEFAULT_LAYOUT, KEY_BLINK, KEY_CMDSET,
+from ie15emu.keyboard import (DEFAULT_LAYOUT, KEY_BLINK, KEY_CMDSET, KEY_CTRLUP,
                               KEY_MODE, KEY_SEND, KEY_WHEELDOWN, KEY_WHEELUP,
-                              decode_key_bytes, is_key_combo, key_to_bytes,
-                              normalize_combo)
+                              ctrl_code, decode_key_bytes, is_key_combo,
+                              key_to_bytes, normalize_combo)
 
 
 def test_mouse_sgr_wheel():
@@ -184,6 +184,39 @@ def test_h2_symbols_same_keys_both_layouts():
 def test_host_mode_key_mapping():
     assert key_to_bytes("KEY_ENTER") == b"\r"
     assert key_to_bytes("KEY_ESC") == b"\x1b"
+
+
+def test_ctrl_letter_is_control_code_in_any_layout():
+    # Ctrl+буква — управляющий символ вне зависимости от раскладки:
+    # Ctrl+E = 05, как на 15ВВВ (код = буква & 0x1F)
+    assert key_to_bytes("ctrl+e") == b"\x05"
+    assert key_to_bytes("ctrl+a") == b"\x01"
+    assert key_to_bytes("ctrl+z") == b"\x1a"
+    for layout in (None, "positional", "phonetic"):
+        assert key_to_bytes("ctrl+e", layout) == b"\x05"
+    assert key_to_bytes("ctrl+e", shift_to_rus=True) == b"\x05"
+    # Shift на управляющий символ не влияет
+    assert key_to_bytes("ctrl+shift+E") == b"\x05"
+    # кириллица, цифры и Alt — управляющих символов не дают
+    assert key_to_bytes("ctrl+х") == encode_koi7("ctrl+х")
+    assert ctrl_code("ctrl+х") is None and ctrl_code("alt+e") is None
+    assert ctrl_code("shift+e") is None and ctrl_code("ctrl+5") is None
+
+
+def test_ctrl_e_arrives_from_every_terminal_form():
+    # Ctrl+E приходит по-разному — во всех формах это один УП 05,
+    # а не «[» и мусор в наборе (старая форма modifyOtherKeys без CSI-u)
+    assert decode_key_bytes(b"\x05") == ["\x05"]                # байт ENQ
+    assert decode_key_bytes(b"\x1b[101;5u") == ["ctrl+e"]       # kitty CSI-u
+    assert decode_key_bytes(b"\x1b[27;5;101~") == ["ctrl+e"]    # modifyOtherKeys
+    assert decode_key_bytes(b"\x1b[1;5E") == ["ctrl+e"]         # старая форма
+    assert decode_key_bytes(b"\x1b[1;5e") == ["ctrl+e"]         # строчная буква
+    for seq in (b"\x05", b"\x1b[101;5u", b"\x1b[27;5;101~",
+                b"\x1b[1;5E", b"\x1b[1;5e"):
+        assert decode_key_bytes(seq) == ["ctrl+e"] or \
+            decode_key_bytes(seq) == ["\x05"]
+    # в старой форме стрелки остались стрелками
+    assert decode_key_bytes(b"\x1b[1;5A") == [KEY_CTRLUP]
 
 
 def test_shift_to_rus_h2():

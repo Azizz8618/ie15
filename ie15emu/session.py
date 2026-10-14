@@ -20,7 +20,7 @@ import time
 from . import COLS, ROWS
 from .charset import (encode_koi7, koi7_display_upper, koi7_raw_upper,
                       normalize_incremental, to_line)
-from .keyboard import (DEFAULT_LAYOUT, is_key_combo, key_to_bytes,
+from .keyboard import (DEFAULT_LAYOUT, ctrl_code, is_key_combo, key_to_bytes,
                        KEY_CTRLSELDOWN, KEY_CTRLSELLEFT, KEY_CTRLSELRIGHT,
                        KEY_CTRLSELUP, KEY_SELDOWN, KEY_SELLEFT,
                        KEY_SELRIGHT, KEY_SELUP)
@@ -53,6 +53,9 @@ CONTROL_HINTS = {
 LAYOUT_LABELS = {"phonetic": "ФОН", "positional": "ПОЗ"}
 
 WHEEL_STEP = 3       # рядов выдачи на щелчок колеса мыши
+
+# разделители слова для прыжков Ctrl+←/→ по набору (АВТОНОМНО)
+WORD_DELIMS = b" ."
 
 
 # Баннер tmxr/telnet SIMH: «CONNECTED TO THE PDP-11/70 SIMULATOR TTY
@@ -115,6 +118,8 @@ class TerminalSession:
         self.undo = UndoStack(undo_depth)
         self.echo = True             # клавиша «ЭХО» (F6): вывод набираемого
                                      # на экран; снята — пароли не печатаются
+        self.insert_mode = True      # Insert: вставка (True) / замена (False)
+        self._buf_pos = 0            # позиция курсора в буфере набора
         self._echo_pending = bytearray()   # эхо-ответ линии, ожидаемый при
                                      # выключенном эхе (срезается с приёма)
         self._echo_top = None        # строка, с которой началось локальное эхо блока
@@ -203,6 +208,7 @@ class TerminalSession:
             # терминала, а не в ЭВМ, и потерять его легко
             st("СЕТЬ=", "С ЭВМ" if host else "АВТОНОМНО",
                "state" if host else "local"),
+            
             st("НАБОР=", self.NABOR_LABELS[self.nabor]),
             st("ЛИНИЯ=", line.split("=", 1)[-1]),
             st("РАСК=", lay),
@@ -341,8 +347,7 @@ class TerminalSession:
             # (Ctrl+E → 05), его ведёт key_to_bytes (как на 15ВВВ: Ctrl
             # всегда даёт УП). Кириллица с Ctrl — гасится (нет такого УП).
             last = key.rsplit('+', 1)[-1]
-            if not (len(key) == 6 and key.startswith("ctrl+")
-                    and last.isascii() and last.isalpha()):
+            if ctrl_code(key) is None:
                 self.last_key = f"{key} U+{ord(last):04X}"
                 self._update_service()
                 return None
@@ -369,6 +374,37 @@ class TerminalSession:
                            "ctrl+MOUSEDOWN@", "ctrl+MOUSEDRAG@",
                            "ctrl+MOUSEUP@")):
             return self._mouse(key)
+        if key == "KEY_INSERT":
+            # Insert: в АВТОНОМНО переключает режим правки набора
+            # (вставка ↔ замена); в С ЭВМ — код терминала (ESC b)
+            if self.mode == MODE_LOCAL:
+                self.insert_mode = not self.insert_mode
+                self.last_key = "ВСТАВКА" if self.insert_mode else "ЗАМЕНА"
+                self._update_service()
+                return None
+        if key == "KEY_HOME":
+            # В АВТОНОМНО Home — курсор в начало текущей строки набора
+            # (в С ЭВМ остаётся код терминала ESC H — «дом»)
+            if self.mode == MODE_LOCAL:
+                self._buf_pos = self.buffer.rfind(b"\r", 0, self._buf_pos) + 1
+                if self.echo and self.buffer:
+                    self._redraw_echo()
+                else:
+                    self.parser.screen.x = 0
+                self.last_key = "ДОМ"
+                self._update_service()
+                return None
+        if key == "KEY_END":
+            # В АВТОНОМНО End — курсор в конец текущей строки набора
+            # (в С ЭВМ остаётся код терминала ESC K — «стереть до конца»)
+            if self.mode == MODE_LOCAL:
+                nxt = self.buffer.find(b"\r", self._buf_pos)
+                self._buf_pos = len(self.buffer) if nxt < 0 else nxt
+                if self.echo and self.buffer:
+                    self._redraw_echo()
+                self.last_key = "КОНЕЦ"
+                self._update_service()
+                return None
         if key == "SELCLEAR":                # F3 — снять всё выделение
             self.parser.screen.sel_clear()
             self._update_status()           # «ВЫД» в строке состояния
@@ -458,9 +494,17 @@ class TerminalSession:
         move = {"KEY_CTRLRIGHT": "word_right", "KEY_CTRLLEFT": "word_left",
                 "KEY_CTRLUP": "line_start", "KEY_CTRLDOWN": "line_below"}.get(key)
         if move:
-            # локальная навигация 15ВВВ: курсор двигается по экрану,
-            # в линию ничего не уходит (таких кодов у ЭВМ нет)
-            getattr(self.parser.screen, move)()
+            # Локальная навигация 15ВВВ: курсор двигается по экрану,
+            # в линию ничего не уходит (таких кодов у ЭВМ нет).
+            # В АВТОНОМНО набор идёт по позиции курсора в буфере, поэтому
+            # навигация ведётся по буферу — иначе курсор на экране разошёлся
+            # бы с тем местом, куда встанет следующий знак.
+            if self.mode == MODE_LOCAL and self.buffer:
+                self._buf_move(key)
+                if self.echo:
+                    self._redraw_echo()
+            else:
+                getattr(self.parser.screen, move)()
             self._update_service()
             return None
         if key in (KEY_SELRIGHT, KEY_SELLEFT, KEY_SELUP, KEY_SELDOWN,
@@ -499,19 +543,39 @@ class TerminalSession:
             return None
         if self.mode == MODE_HOST:
             return data        # очередь эхо-ответа ведёт emit()
-        # АВТОНОМНО: накапливаем в буфере и печатаем на экране,
-        # держим линию свободной (как на незаполненном PLAN-символ «Р»).
+        # АВТОНОМНО: набор правится по позиции курсора в буфере — вставка
+        # (Insert, по умолчанию) сдвигает хвост вправо, замена пишет поверх
+        # знака под курсором; Home/Enter/Bks двигают и экранный курсор.
         # Эхо — заглавными (Н1 не различает регистр, так же отвечает ЭВМ);
         # в буфере код остаётся как дана раскладка.
-        # KEY_ENTER: в буфер идёт только CR (0D) — управляющий символ,
-        # а на экране курсор перемещается в начало следующей строки (CR+LF).
         buffered = bool(self.buffer)
         self.undo.snapshot(self.buffer)             # отменяемая правка
-        self.buffer += data
+        pos = self._buf_pos
+        if key == "KEY_BACKSPACE":
+            # ВК: стираем знак слева от курсора. В начале строки ничего
+            # не делаем — ПР (разделитель строк) не стирается, иначе
+            # Backspace склеивал бы строки набора
+            if pos > 0 and self.buffer[pos - 1] != 0x0D:
+                del self.buffer[pos - 1:pos]
+                self._buf_pos = pos - 1
+        elif key == "KEY_ENTER":
+            # Enter: CR (0D) — управляющий символ разделителя строки; курсор
+            # (и на экране) — в начало следующей строки
+            self.buffer[pos:pos] = b"\r"
+            self._buf_pos = pos + 1
+        elif self.insert_mode:
+            self.buffer[pos:pos] = data      # вставка: хвост уходит вправо
+            self._buf_pos = pos + len(data)
+        elif pos + len(data) <= len(self.buffer):
+            self.buffer[pos:pos + len(data)] = data    # замена поверх
+            self._buf_pos = pos + len(data)
+        else:                                # замена в конце строки = добавление
+            self.buffer[pos:pos] = data
+            self._buf_pos = pos + len(data)
         if self.echo:
             if not buffered:
                 self._echo_top = self.parser.screen.y
-            self._echo_feed(data + b"\n" if key == "KEY_ENTER" else data)
+            self._redraw_echo()
         self._update_service()
         self._update_status()       # счётчик отмены «ОТМЕНА=» в строке
         return None
@@ -532,6 +596,58 @@ class TerminalSession:
                           for b in data)
             self.parser.feed(koi7_display_upper(latin))
 
+    def _buf_move(self, key: str) -> None:
+        """Передвинуть курсор набора по буферу (АВТОНОМНО).
+
+        Разделители слова — пробел и точка (как у Ctrl+стрелок 15ВВВ),
+        конец строки — ПР (0D), им же заканчивается и буфер.
+        """
+        buf, n = self.buffer, len(self.buffer)
+        pos = self._buf_pos
+        if key == "KEY_CTRLRIGHT":           # на начало следующего слова
+            while pos < n and buf[pos] not in WORD_DELIMS:
+                pos += 1                     # через хвост текущего слова
+            while pos < n and buf[pos] in WORD_DELIMS:
+                pos += 1                     # через разделители
+        elif key == "KEY_CTRLLEFT":          # на начало текущего слова
+            while pos > 0 and buf[pos - 1] in WORD_DELIMS:
+                pos -= 1
+            while pos > 0 and buf[pos - 1] not in WORD_DELIMS:
+                pos -= 1
+        elif key == "KEY_CTRLUP":            # начало текущей строки
+            pos = buf.rfind(b"\r", 0, pos) + 1
+        elif key == "KEY_CTRLDOWN":          # начало следующей строки
+            nxt = buf.find(b"\r", pos)
+            if nxt >= 0:
+                pos = buf.find(b"\r", nxt + 1) + 1 if buf.find(b"\r", nxt + 1) >= 0 \
+                    else nxt + 1
+            else:
+                pos = n                      # ниже строк нет — в конец
+        self._buf_pos = max(0, min(pos, n))
+
+    def _redraw_echo(self) -> None:
+        """Перерисовать локальное эхо набора по буферу (АВТОНОМНО).
+
+        Эхо рисуется целиком из буфера: и вставка, и замена двигают хвост
+        строки, а перерисовка по кускам оставляла бы «хвост» отменённых
+        знаков. После печати курсор ставится в позицию `_buf_pos`: по числу
+        ПР до неё — ряд, по остатку — знак.
+        """
+        sc = self.parser.screen
+        self._erase_local_echo()          # стирает и ставит курсор в начало
+        self._echo_top = sc.y
+        buf = bytes(self.buffer)
+        if buf:
+            # ПР в буфере — разделитель строк; на экране это ПР ПС
+            self._echo_feed(buf.replace(b"\r", b"\r\n"))
+        head = buf[:self._buf_pos]
+        nl = head.count(b"\r")            # сколько строк выше курсора
+        col = len(head) - (head.rfind(b"\r") + 1)
+        # перенос по COLS: строка эха длиннее 80 знаков идёт на следующий ряд,
+        # иначе курсор после 80-го знака уезжал бы в конец своей строки
+        sc.y = min(sc.rows - 1, self._echo_top + nl + col // COLS)
+        sc.x = col % COLS
+
     def _undo_echo(self) -> None:
         """Перерисовать набираемое после отмены правки.
 
@@ -542,11 +658,9 @@ class TerminalSession:
         """
         if not self.echo:
             return
-        self._erase_local_echo()          # стирает и ставит курсор в начало
-        if not self.buffer:
-            return
-        self._echo_top = self.parser.screen.y
-        self._echo_feed(bytes(self.buffer))
+        # отмена правки возвращает буфер — курсор в него же (в конец)
+        self._buf_pos = len(self.buffer)
+        self._redraw_echo()
 
     def _queue_echo(self, data: bytes) -> None:
         """Что вернёт линия в эхо на отданные байты (в форме приёма) —
@@ -604,6 +718,7 @@ class TerminalSession:
         """Клавиша SEND: выдать накопленное в линию и очистить буфер."""
         data = bytes(self.buffer)
         self.buffer.clear()
+        self._buf_pos = 0            # буфер пуст — курсор в начало набора
         # отданное в линию отменять нечего: буфера уже нет, а следующий
         # набор начинается с чистого листа
         self.undo.clear()

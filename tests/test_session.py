@@ -51,6 +51,128 @@ def test_local_mode_buffers_and_echoes():
     assert "HELLO" in session.parser.screen.text()   # эхо
 
 
+def typed(text):
+    """Коды буфера набора для этих знаков (в Н2 латиница — внутренние КОИ7)."""
+    from ie15emu.keyboard import key_to_bytes
+    return b"".join(key_to_bytes(c, shift_to_rus=True) for c in text)
+
+
+def test_local_home_goes_to_line_start():
+    # Home в АВТОНОМНО — курсор в начало текущей строки набора;
+    # следующий знак вставляется в начало, а не дописывается в конец
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    for ch in "ABCDE":
+        session.feed_key(ch)
+    assert (sc.x, sc.y) == (5, 0)
+    session.feed_key("KEY_HOME")
+    assert (sc.x, sc.y) == (0, 0)
+    session.feed_key("X")
+    assert session.pending() == typed("XABCDE")     # вставка в начало
+
+
+def test_local_home_works_on_second_line():
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    for ch in "AB":
+        session.feed_key(ch)
+    session.feed_key("KEY_ENTER")
+    for ch in "CD":
+        session.feed_key(ch)
+    assert (sc.x, sc.y) == (2, 1)
+    session.feed_key("KEY_HOME")
+    assert (sc.x, sc.y) == (0, 1)             # в начало второй строки
+    session.feed_key("Z")
+    assert session.pending() == typed("AB") + b"\r" + typed("ZCD")
+
+
+def test_local_end_goes_to_line_end():
+    # End в АВТОНОМНО — курсор в конец строки набора (симметрично Home)
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    for ch in "ABC":
+        session.feed_key(ch)
+    session.feed_key("KEY_HOME")
+    session.feed_key("KEY_END")
+    assert (sc.x, sc.y) == (3, 0)
+    session.feed_key("D")
+    assert session.pending() == typed("ABCD")
+
+
+def test_local_insert_and_replace_modes():
+    # Insert переключает режим правки: вставка (по умолчанию) сдвигает
+    # хвост строки, замена пишет поверх знака под курсором
+    session, _ = make_session(MODE_LOCAL)
+    assert session.insert_mode is True
+    for ch in "ABCD":
+        session.feed_key(ch)
+    session.feed_key("KEY_HOME")
+    session.feed_key("X")                     # вставка
+    assert session.pending() == typed("XABCD")
+    session.feed_key("KEY_INSERT")             # → замена
+    assert session.insert_mode is False
+    session.feed_key("KEY_HOME")
+    session.feed_key("Y")                     # замена поверх X
+    assert session.pending() == typed("YABCD")
+    assert len(session.pending()) == 5         # замена не удлиняет
+
+
+def test_local_insert_key_is_terminal_code_in_host_mode():
+    # В С ЭВМ Insert остаётся командой терминала (инверсное видео)
+    session, link = make_session(MODE_HOST)
+    assert session.insert_mode is True
+    session.emit(session.feed_key("KEY_INSERT"))
+    assert session.insert_mode is True         # режим правки не меняется
+    assert link.sent[-1] == b"\x1bb"
+
+
+def test_local_ctrl_arrows_move_cursor_in_buffer():
+    # Ctrl+стрелки в АВТОНОМНО ходят по буферу набора: курсор на экране
+    # и позиция вставки не расходятся (знак встаёт под курсор)
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    for ch in "AB CD":
+        session.feed_key(ch)
+    session.feed_key("KEY_HOME")
+    session.feed_key("KEY_CTRLRIGHT")          # начало слова CD
+    assert (sc.x, sc.y) == (3, 0)
+    session.feed_key("X")
+    assert session.pending() == typed("AB XCD")
+
+
+def test_local_backspace_does_not_join_lines():
+    # Backspace в начале строки не стирает ПР — строки не склеиваются
+    session, _ = make_session(MODE_LOCAL)
+    for ch in "AB":
+        session.feed_key(ch)
+    session.feed_key("KEY_ENTER")
+    for ch in "CD":
+        session.feed_key(ch)
+    session.feed_key("KEY_HOME")               # в начало второй строки
+    session.feed_key("KEY_BACKSPACE")
+    assert session.pending() == typed("AB") + b"\r" + typed("CD")
+    session.feed_key("KEY_CTRLRIGHT")
+    session.feed_key("KEY_BACKSPACE")          # а внутри строки стирает
+    assert session.pending() == typed("AB") + b"\r" + typed("C")
+
+
+def test_local_cursor_wraps_with_long_line():
+    # Строка длиннее 80 знаков переносится — курсор идёт на следующий ряд
+    # (иначе он остался бы в конце своей строки и правка била не туда)
+    from ie15emu import COLS
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    sc.set_rows(24)
+    for _ in range(COLS + 4):
+        session.feed_key("A")
+    assert session._buf_pos == COLS + 4
+    assert (sc.x, sc.y) == (4, 1)              # перенос на 80-м знаке
+    session.feed_key("KEY_HOME")
+    assert (sc.x, sc.y) == (0, 0)
+    session.feed_key("X")
+    assert session.pending() == typed("X") + typed("A") * (COLS + 4)
+
+
 def test_send_key_transmits_buffer_then_clears():
     session, link = make_session(MODE_LOCAL)
     for ch in "work":
@@ -1558,9 +1680,9 @@ def test_console_f_keys():
     assert decode_key_bytes(b"\x1b[[E") == [KEY_CLEAR]
     assert decode_key_bytes(b"\x1b[[C") == [KEY_SELCLEAR]
     assert decode_key_bytes(b"\x1b[[D") == [KEY_SELTAKE]
-    # остальные ESC[[… консоли в линию не уходят: ESC гасится, скобка
-    # и буква — печатные знаки (безопасныйfallback)
-    assert decode_key_bytes(b"\x1b[[C") == ["KEY_ESC", "[", "[", "C"]
+    # остальные ESC[[… консоли (F1/F2) в линию не уходят: ESC гасится,
+    # скобка и буква — печатные знаки (безопасный fallback)
+    assert decode_key_bytes(b"\x1b[[A") == ["KEY_ESC", "[", "[", "A"]
     # xterm-формы не задеты
     assert decode_key_bytes(b"\x1b[15~") == [KEY_CLEAR]
     assert decode_key_bytes(b"\x1b[13~") == [KEY_SELCLEAR]

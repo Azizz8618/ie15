@@ -134,6 +134,25 @@ def lookup_key(kbd_rom: bytes | None, col: int, row: int) -> int | None:
 
 DEFAULT_LAYOUT = "positional"   # русская раскладка по умолчанию — по позиции ЙЦУКЕН
 
+def ctrl_code(key: str) -> bytes | None:
+    """Управляющий символ по имени нажатия «ctrl+буква».
+
+    Имя приходит от терминала как «ctrl+e» (CSI-u, modifyOtherKeys) или
+    «ctrl+shift+E» — Shift на управляющий символ не влияет, код тот же.
+    Кириллица и прочие не-ASCII — не управляющие символы (None): с ними
+    такого нажатия на 15ВВВ не бывает.
+    """
+    parts = key.split("+")
+    if len(parts) < 2:
+        return None
+    ch = parts[-1]
+    if {p.lower() for p in parts[:-1]} not in ({"ctrl"}, {"ctrl", "shift"}):
+        return None
+    if len(ch) != 1 or not ch.isascii() or not ch.isalpha():
+        return None
+    return bytes([ord(ch.lower()) & 0x1F])
+
+
 def key_to_bytes(key: str, layout: str | None = None,
                  shift_to_rus: bool = False) -> bytes:
     """Нажатие ПК-клавиши → байты внутреннего КОИ7-потока терминала.
@@ -155,8 +174,9 @@ def key_to_bytes(key: str, layout: str | None = None,
     # Ctrl+буква — управляющий символ (Ctrl+A=01 … Ctrl+Z=1A) вне зависимости
     # от раскладки: нажатие с Ctrl всегда даёт код ИТ 0x60+знак (как на
     # 15ВВВ), независимо от того, что клавиша набрала бы без модификатора.
-    if len(key) == 6 and key.startswith("ctrl+") and key[5:].isascii() and key[5:].isalpha():
-        return bytes([ord(key[5].lower()) & 0x1F])
+    ctrl = ctrl_code(key)
+    if ctrl is not None:
+        return ctrl
     if key in ("KEY_BACKSPACE", "\x7f"):
         return b"\x08"
     if key == "KEY_UP":
@@ -355,11 +375,15 @@ def _parse_csi_u(data: bytes, i: int):
 
 
 # Стрелки и функциональные клавиши с модификатором (xterm):
-# ESC [ 1 ; mod A…D, ESC [ n ; mod ~, где mod = 1+shift(1)+alt(2)+ctrl(4).
+# ESC [ 1 ; mod A…Z, ESC [ n ; mod ~, где mod = 1+shift(1)+alt(2)+ctrl(4).
 # Клавиши 15ИЭ (стрелки ВКДа и Ф1–Ф10) без модификаторов, поэтому такие
 # нажатия в линию ничего не отправляют: иначе escape-мусор ушёл бы в
 # ЭВМ («ESC [ 1 ; 2 A»), а её эхо забивало бы кадр — «циклическая прокрутка».
-_MOD_KEY = re.compile(rb"\x1b\[(?:1;(\d+)([A-D])|(\d+);(\d+)~)")
+# Ctrl+буква — исключение: это управляющий символ (Ctrl+E → 05), его ведёт
+# key_to_bytes. Буквы разбираем все, а не только A…D стрелок: иначе
+# «ESC [ 1 ; 5 E» (старая форма modifyOtherKeys) рассыпалась бы в знаки
+# и в набор уходила бы «[» — ровно то, что видно на терминале без CSI-u.
+_MOD_KEY = re.compile(rb"\x1b\[(?:1;(\d+)([A-Za-z])|(\d+);(\d+)~)")
 
 
 # Функциональные клавиши xterm по букве: их тоже можно нажать
@@ -369,10 +393,11 @@ _MOD_LETTER = {"A": KEY_CTRLUP, "B": KEY_CTRLDOWN,          # стрелки: Ct
 
 
 def _parse_mod_key(data: bytes, i: int):
-    """Нажатие клавиши с модификатором (Shift+↑, Ctrl+Home и т. п.).
+    """Нажатие клавиши с модификатором (Shift+↑, Ctrl+Home, Ctrl+E и т. п.).
 
     Shift+стрелки отдаём выделению с клавиатуры (Shift — построчное,
     Shift+Ctrl — поколонное), Ctrl+стрелки — прыжкам по словам/строкам.
+    Ctrl+буква даёт управляющий символ (имя «ctrl+буква» → key_to_bytes).
     Остальные комбинации (Alt+…, Ctrl+F5 и т. п.) гасим: таких клавиш
     у 15ВВВ нет, в линию мусор не идёт.
 
@@ -386,12 +411,20 @@ def _parse_mod_key(data: bytes, i: int):
     if mod < 2:                       # без модификаторов — разбирают ниже
         return None, 0
     mask = mod - 1                    # параметр xterm = 1+shift(1)+alt(2)+ctrl(4)
-    letter = m.group(2)               # «A»…«D» — стрелки (ESC [ 1 ; m X)
+    letter = m.group(2)               # «A»…«Z» — ESC [ 1 ; m X
     if letter:
         if mask & 2:                  # Alt — таких клавиш у 15ВВВ нет
             return "", m.end() - i
         shift, ctrl = bool(mask & 1), bool(mask & 4)
-        base = _MOD_LETTER[letter.decode("ascii")]
+        base = _MOD_LETTER.get(letter.decode("ascii"))
+        if base is None:              # не стрелка — буква с Ctrl/Shift
+            ch = letter.decode("ascii")
+            # сдвинутая буква приходит заглавной и с битом shift; без сдвига
+            # терминалы шлют и строчную, и заглавную — имя приводим к виду
+            # «ctrl+буква», как его даёт CSI-u (имя пишут в [keys])
+            name = _combo_name(ord(ch if shift else ch.lower()),
+                               mask if shift else mask & ~1)
+            return name or "", m.end() - i
         if shift and ctrl:
             return {KEY_CTRLUP: KEY_CTRLSELUP, KEY_CTRLDOWN: KEY_CTRLSELDOWN,
                     KEY_CTRLRIGHT: KEY_CTRLSELRIGHT,
