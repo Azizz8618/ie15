@@ -169,6 +169,25 @@ def test_keys_remap():
     assert apply_conf(ns(), cp).keymap.get("W") == "Ё"
 
 
+def test_shipped_conf_does_not_remap_ctrl_e():
+    # В поставляемом ie15.conf не должно быть привязки \x05: это Ctrl+E,
+    # и перехват печатал вместо него «[». Терминалы без CSI-u (xfce4-terminal,
+    # консоль) присылают именно байт 05.
+    from ie15emu.keyboard import decode_key_bytes, key_to_bytes
+    root = Path(__file__).resolve().parent.parent
+    cp = load_conf(str(root / "ie15.conf"))
+    km = keymap_from_conf(cp)
+    assert "\x05" not in km, f"Ctrl+E перехвачен: {km.get(chr(5))!r}"
+    # остальные привязки русской раскладки на месте
+    for code, want in (("\x11", "<"), ("\x0e", ">"), ("\x18", "["),
+                       ("\x1d", "]"), ("\x1e", "^")):
+        assert km.get(code) == want, code
+    # и Ctrl+E в любой форме даёт управляющий символ
+    for seq in (b"\x05", b"\x1b[101;5u", b"\x1b[27;5;101~"):
+        for k in decode_key_bytes(seq):
+            assert key_to_bytes(k) == b"\x05", (seq, k)
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
