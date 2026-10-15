@@ -21,7 +21,6 @@ from . import COLS, ROWS
 from .charset import (encode_koi7, koi7_display_upper, koi7_raw_upper,
                       normalize_incremental, to_line)
 from .link import LinkError
-                      normalize_incremental, to_line)
 from .keyboard import (DEFAULT_LAYOUT, ctrl_code, is_key_combo, key_to_bytes,
                        KEY_CTRLSELDOWN, KEY_CTRLSELLEFT, KEY_CTRLSELRIGHT,
                        KEY_CTRLSELUP, KEY_SELDOWN, KEY_SELLEFT,
