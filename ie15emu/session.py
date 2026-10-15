@@ -20,6 +20,8 @@ import time
 from . import COLS, ROWS
 from .charset import (encode_koi7, koi7_display_upper, koi7_raw_upper,
                       normalize_incremental, to_line)
+from .link import LinkError
+                      normalize_incremental, to_line)
 from .keyboard import (DEFAULT_LAYOUT, ctrl_code, is_key_combo, key_to_bytes,
                        KEY_CTRLSELDOWN, KEY_CTRLSELLEFT, KEY_CTRLSELRIGHT,
                        KEY_CTRLSELUP, KEY_SELDOWN, KEY_SELLEFT,
@@ -776,7 +778,13 @@ class TerminalSession:
         if data:
             self._note_sent(bytes(data))
         if data and self.link is not None:
-            self.link.send(to_line(bytes(data), self.encoding))
+            try:
+                self.link.send(to_line(bytes(data), self.encoding))
+            except (OSError, LinkError):
+                # Линия разорвалась (TCP/SSH закрыт) — не падаем, просто
+                # прекращаем отправку. Эмулятор остаётся жив, пользователь
+                # может продолжить работу в автономном режиме.
+                pass
 
     def _note_sent(self, data: bytes) -> None:
         """При выключенном эхе: записать в очередь ожидаемого эхо-ответа.
