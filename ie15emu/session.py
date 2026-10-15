@@ -24,7 +24,8 @@ from .link import LinkError
 from .keyboard import (DEFAULT_LAYOUT, ctrl_code, is_key_combo, key_to_bytes,
                        KEY_CTRLSELDOWN, KEY_CTRLSELLEFT, KEY_CTRLSELRIGHT,
                        KEY_CTRLSELUP, KEY_SELDOWN, KEY_SELLEFT,
-                       KEY_SELRIGHT, KEY_SELUP)
+                       KEY_SELRIGHT, KEY_SELUP,
+                       KEY_SELHOME, KEY_SELEND, KEY_SELBSPACE)
 from .screen import HELP, RULE, mk
 from .undo import DEFAULT_UNDO, UndoStack
 
@@ -46,6 +47,8 @@ CONTROL_HINTS = {
     "KEY_INSERT": "INS=ESCb", "KEY_DELETE": "DEL=ESCc",
     "KEY_CTRLRIGHT": "СЛОВО=^→", "KEY_CTRLLEFT": "СЛОВО=^←",
     "KEY_CTRLUP": "СТРОКА=^↑", "KEY_CTRLDOWN": "СТРОКА=^↓",
+    "SELHOME": "ВЫД=^ДОМ", "SELEND": "ВЫД=^КОНЕЦ",
+    "SELBSPACE": "ВК-ВЫДЕЛ",
     "SEND": "SEND", "MODE": "СЕАНС", "CMDSET": "НАБОР", "BLINK": "УПР.СИМВ",
     "ECHO": "ЭХО", "CLEAR": "ОЧИСТКА",
 }
@@ -121,6 +124,10 @@ class TerminalSession:
                                      # на экран; снята — пароли не печатаются
         self.insert_mode = True      # Insert: вставка (True) / замена (False)
         self._buf_pos = 0            # позиция курсора в буфере набора
+        # выделение в буфере набора (Shift+Home/End, Shift+стрелки):
+        # пара (начало, конец) и подсвечивающие его фрагменты кадра
+        self._buf_sel: tuple[int, int] | None = None
+        self._buf_sel_frags: list = []
         self._echo_pending = bytearray()   # эхо-ответ линии, ожидаемый при
                                      # выключенном эхе (срезается с приёма)
         self._echo_top = None        # строка, с которой началось локальное эхо блока
@@ -387,6 +394,7 @@ class TerminalSession:
             # В АВТОНОМНО Home — курсор в начало текущей строки набора
             # (в С ЭВМ остаётся код терминала ESC H — «дом»)
             if self.mode == MODE_LOCAL:
+                self._buf_sel_reset()
                 self._buf_pos = self.buffer.rfind(b"\r", 0, self._buf_pos) + 1
                 if self.echo and self.buffer:
                     self._redraw_echo()
@@ -399,6 +407,7 @@ class TerminalSession:
             # В АВТОНОМНО End — курсор в конец текущей строки набора
             # (в С ЭВМ остаётся код терминала ESC K — «стереть до конца»)
             if self.mode == MODE_LOCAL:
+                self._buf_sel_reset()
                 nxt = self.buffer.find(b"\r", self._buf_pos)
                 self._buf_pos = len(self.buffer) if nxt < 0 else nxt
                 if self.echo and self.buffer:
@@ -414,6 +423,7 @@ class TerminalSession:
             if self.mode == MODE_LOCAL:
                 buf, n = self.buffer, len(self.buffer)
                 pos = self._buf_pos
+                self._buf_sel_reset()
                 if key == "KEY_RIGHT":
                     self._buf_pos = min(pos + 1, n)
                 elif key == "KEY_LEFT":
@@ -445,6 +455,7 @@ class TerminalSession:
                 self._update_service()
                 return None
         if key == "SELCLEAR":                # F3 — снять всё выделение
+            self._buf_sel_reset()
             self.parser.screen.sel_clear()
             self._update_status()           # «ВЫД» в строке состояния
             return None
@@ -476,7 +487,25 @@ class TerminalSession:
             self._update_service()
             return None
         if key == "CLEAR":
-            # экран — в историю, кадр в начало; локальное эхо буфера там же
+            # F5 «ОЧИСТКА»: в АВТОНОМНО удаляет страницу (кадр или историю),
+            # в С ЭВМ — очищает экран с сохранением в историю
+            if self.mode == MODE_LOCAL:
+                sc = self.parser.screen
+                # Если смотрим на историю — удалить страницу из неё
+                if sc.view_top is not None and sc.view_top < len(sc.history):
+                    sc.delete_history_page(sc._view_h)
+                    self.last_key = "УДАЛЕНО"
+                else:
+                    # Обычная очистка экрана (без сохранения в историю)
+                    sc.clear_all()
+                    sc.view_top = None
+                    self.last_key = "ОЧИСТКА"
+                self._buf_sel_reset()
+                self._echo_top = None
+                self._update_service()
+                return None
+            # С ЭВМ: экран в историю, кадр в начало
+            self._buf_sel_reset()
             self.parser.screen.clear_screen_kept()
             self._echo_top = None
             self._update_service()
@@ -511,6 +540,7 @@ class TerminalSession:
                 self._update_service()
                 return None
             self.undo.undo(self.buffer)
+            self._buf_sel_reset()
             # эхо на экране относятся к прежнему содержимому: перерисуем
             self._undo_echo()
             self.last_key = "ОТМЕНА"
@@ -539,6 +569,7 @@ class TerminalSession:
             # навигация ведётся по буферу — иначе курсор на экране разошёлся
             # бы с тем местом, куда встанет следующий знак.
             if self.mode == MODE_LOCAL and self.buffer:
+                self._buf_sel_reset()
                 self._buf_move(key)
                 if self.echo:
                     self._redraw_echo()
@@ -555,6 +586,7 @@ class TerminalSession:
             # выделение снимается следующим Shift+стрелка (начало нового).
             # Курсор при протяжке не двигается: его двигают стрелки
             # без Shift (в С ЭВМ — отдают коды ЭВМ).
+            self._buf_sel_reset()
             sc = self.parser.screen
             dy = -1 if key in (KEY_SELUP, KEY_CTRLSELUP) else \
                 1 if key in (KEY_SELDOWN, KEY_CTRLSELDOWN) else 0
@@ -576,6 +608,67 @@ class TerminalSession:
             self._update_service()
             self._update_status()
             return None
+        if key in (KEY_SELHOME, KEY_SELEND):
+            # Shift+Home / Shift+End. В АВТОНОМНО — выделение части строки
+            # набора от курсора до её начала (Home) или до конца (End):
+            # выделение живёт в буфере (_buf_sel), подсвечено на экране и
+            # удаляется Shift+Backspace. В С ЭВМ клавиш у 15ВВВ нет —
+            # нажатие гасится, в линию слово не уходит.
+            if self.mode == MODE_LOCAL:
+                buf = self.buffer
+                pos = self._buf_pos
+                if key == KEY_SELHOME:
+                    start = buf.rfind(b"\r", 0, pos) + 1    # начало строки
+                    end = pos
+                else:
+                    start = pos
+                    nxt = buf.find(b"\r", pos)             # конец строки
+                    end = len(buf) if nxt < 0 else nxt
+                if end > start:
+                    self._buf_sel = (start, end)
+                    chars = self._buf_sel_show() if self.echo \
+                        else end - start
+                    self.last_key = f"ВЫД: {chars} зн. (Shift+ВК — удалить)"
+                    self._update_service()
+                    self._update_status()
+                    return None
+                self._buf_sel_reset()
+                self.last_key = "ВЫД: пусто"
+                self._update_service()
+                return None
+            self.last_key = "ВЫД: нет (нужен АВТОНОМНО)"
+            self._update_service()
+            return None
+        if key == KEY_SELBSPACE:
+            # АВТОНОМНО: Shift+Backspace — удалить выделенный фрагмент
+            # набора (Shift+Home/End или Shift+стрелки по буферу).
+            # Выделения нет — работает как обычный ВК. В С ЭВМ гасится:
+            # у 15ВВВ такого нажатия нет, в линию слово не уходит.
+            if self.mode != MODE_LOCAL:
+                return None
+            sel = self._buf_sel
+            if sel and sel[1] > sel[0]:
+                a, b = sel
+                self.undo.snapshot(self.buffer)        # отменяемая правка
+                del self.buffer[a:b]
+                self._buf_pos = a
+                self._buf_sel_reset()
+                if self.echo:
+                    self._redraw_echo()
+                self.last_key = "УДАЛЕНО"
+                self._update_service()
+                self._update_status()
+                return None
+            self._buf_sel_reset()
+            if self._buf_pos > 0 and self.buffer[self._buf_pos - 1] != 0x0D:
+                self.undo.snapshot(self.buffer)
+                del self.buffer[self._buf_pos - 1:self._buf_pos]
+                self._buf_pos -= 1
+                if self.echo:
+                    self._redraw_echo()
+                self._update_service()
+                self._update_status()
+            return None
         data = key_to_bytes(key, layout=self.layout,
                             shift_to_rus=self.nabor == "n2")
         if not data:
@@ -590,6 +683,7 @@ class TerminalSession:
         buffered = bool(self.buffer)
         self.undo.snapshot(self.buffer)             # отменяемая правка
         pos = self._buf_pos
+        self._buf_sel_reset()      # любой знак снимает выделение набора
         if key == "KEY_BACKSPACE":
             # ВК: стираем знак слева от курсора. В начале строки ничего
             # не делаем — ПР (разделитель строк) не стирается, иначе
@@ -686,6 +780,80 @@ class TerminalSession:
         # иначе курсор после 80-го знака уезжал бы в конец своей строки
         sc.y = min(sc.rows - 1, self._echo_top + nl + col // COLS)
         sc.x = col % COLS
+        if self._buf_sel:
+            # эхо перепечатано — снимки текста рядов в подсветке выделения
+            # устарели, пересобираем её по новому содержимому кадра
+            self._buf_sel_show()
+
+    # --- выделение в буфере набора (АВТОНОМНО) ------------------------
+    def _buf_pos_to_screen(self, i: int) -> tuple[int, int]:
+        """Позиция в буфере набора → (ряд кадра, знак) на экране.
+
+        Эхо печатается ПР ПС на каждый ПР буфера и переносится по COLS,
+        поэтому экранные координаты считаем по тому же правилу, что и
+        курсор в `_redraw_echo`.
+        """
+        sc = self.parser.screen
+        head = bytes(self.buffer[:i]).replace(b"\r", b"\r\n")
+        nl = head.count(b"\n")                # строк эха выше
+        col = len(head) - (head.rfind(b"\n") + 1)
+        y = min(sc.rows - 1, self._echo_top + nl + col // COLS)
+        return y, col % COLS
+
+    def _buf_sel_hide(self) -> None:
+        """Снять подсветку выделения набора (выделение мышью не трогаем)."""
+        if not self._buf_sel_frags:
+            return
+        sc = self.parser.screen
+        ours = {id(f) for f in self._buf_sel_frags}
+        sc.selections = [f for f in sc.selections if id(f) not in ours]
+        self._buf_sel_frags = []
+        sc.touch()
+
+    def _buf_sel_reset(self) -> None:
+        """Снять выделение набора целиком (подсветка и диапазон)."""
+        self._buf_sel_hide()
+        self._buf_sel = None
+
+    def _buf_sel_show(self) -> int:
+        """Подсветить выделенный фрагмент набора на кадре.
+
+        Диапазон буфера переносится в координаты кадра (с учётом ПР и
+        переноса по COLS) и кладётся в `selections` как фрагменты
+        «frame» — их подсветит отрисовка (инверсия, как у выделения
+        мышью). Возвращает число выделенных знаков.
+        """
+        sc = self.parser.screen
+        self._buf_sel_hide()
+        sel = self._buf_sel
+        if not sel or self._echo_top is None:
+            return 0
+        a, b = sel
+        buf = bytes(self.buffer)
+        a, b = max(0, a), min(len(buf), b)
+        if b <= a:
+            return 0
+        # экранные точки каждого знака выделения; ряд меняется — новый кусок
+        pts = [self._buf_pos_to_screen(i) for i in range(a, b)]
+        pieces: list[tuple] = []
+        start = 0
+        for j in range(1, len(pts) + 1):
+            if j < len(pts) and pts[j][0] == pts[j - 1][0]:
+                continue
+            y, x0 = pts[start]
+            x1 = pts[j - 1][1]
+            text = sc.row_text("frame", y) or ""
+            if text[x0:x1 + 1].strip():       # пустые ряды не подсвечиваем
+                pieces.append(("frame", y, x0, x1, text))
+            start = j
+        if pieces:
+            # selections хранит СПИСКИ кусков (один фрагмент = одна протяжка)
+            frag = pieces
+            sc.selections.append(frag)
+            self._buf_sel_frags.append(frag)
+            sc.sel_kind = "СТР"
+            sc.touch()
+        return b - a
 
     def _undo_echo(self) -> None:
         """Перерисовать набираемое после отмены правки.
@@ -743,14 +911,20 @@ class TerminalSession:
         текст заново — без дублирования внахлёст."""
         if self._echo_top is None:
             return
-        y_end = min(self.parser.screen.y, self.parser.screen.rows - 1)
+        sc = self.parser.screen
+        y_end = min(sc.y, sc.rows - 1)
         top = min(self._echo_top, y_end)   # блок мог убежать при скролле
-        cmd = bytearray()
+        # Стираем ряды ОЗУ напрямую, а не ESC-командами через парсер:
+        # в наборе команд №1 (Н0/Н1) ESC в парсер игнорируется, и
+        # «ESC Y … ESC K» печатался бы в кадр буквально — «Y  K».
         for y in range(top, y_end + 1):
-            cmd += b"\x1bY" + bytes([0x20 + y, 0x20]) + b"\x1bK"
-        cmd += b"\x1bY" + bytes([0x20 + top, 0x20])
+            sc.cells[y] = [0x20] * COLS
+            sc.attr[y] = [0] * COLS
+            sc.row_rev[y] = sc.rev + 1
+        sc.rev += 1
+        sc.x = 0
+        sc.y = top
         self._echo_top = None
-        self.parser.feed(bytes(cmd))
 
     # --- передача буфера --------------------------------------------
     def send(self) -> bytes:
@@ -758,6 +932,7 @@ class TerminalSession:
         data = bytes(self.buffer)
         self.buffer.clear()
         self._buf_pos = 0            # буфер пуст — курсор в начало набора
+        self._buf_sel_reset()        # выделение набора вместе с буфером
         # отданное в линию отменять нечего: буфера уже нет, а следующий
         # набор начинается с чистого листа
         self.undo.clear()

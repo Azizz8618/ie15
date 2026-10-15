@@ -146,6 +146,7 @@ class TCPLink:
     """
 
     banner = True       # ждём баннер tmxr («CONNECTED TO …»)
+    owns_stdin = False  # линия отдельна от клавиатуры: stdin читают только ключи
 
     def __init__(self, host: str, port, timeout: float = 5.0,
                  probe: float = 2.0):
@@ -234,6 +235,7 @@ class SSHLink:
     """
 
     banner = True       # ждём баннер tmxr («CONNECTED TO …»)
+    owns_stdin = False  # линия отдельна от клавиатуры: stdin читают только ключи
 
     def __init__(self, host: str, port, user: str,
                  password: str | None = None, keyfile: str | None = None,
@@ -440,9 +442,16 @@ class SSHLink:
 
 
 class StdioLink:
-    """Локальная линия: поток stdin/stdout (для отладки без сети)."""
+    """Локальная линия: поток stdin/stdout (для отладки без сети).
+
+    Ввод один на клавиатуру и «линию»: главный цикл читает stdin клавишами,
+    поэтому `recv()` здесь НЕ читает поток (см. `owns_stdin`) — иначе хвост
+    escape-последовательности (ESC [ 1 ; 2 F и т. п.) забирался бы из-под
+    разбора клавиш и в кадр попадал бы «мусор» вида «ШХШ1;2Ф».
+    """
 
     banner = False      # баннера tmxr тут нет — «ПРОВЕРЬ ЛИНИЮ!» не показываем
+    owns_stdin = True   # линия читает тот же stdin, что и клавиатура
 
     def __init__(self):
         import sys
@@ -450,7 +459,7 @@ class StdioLink:
         self._out = sys.stdout.buffer
 
     def recv(self, size: int = 4096) -> bytes:
-        return self._in.read1(size) if hasattr(self._in, "read1") else b""
+        return b""       # вход обслуживает цикл клавиш (см. owns_stdin)
 
     def send(self, data: bytes) -> None:
         self._out.write(data)

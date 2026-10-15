@@ -426,7 +426,29 @@ class Screen:
         for row, attr in zip(self.cells, self.attr):
             self._push_history(row, attr)
         self.clear_all()
-        self.view_top = None               # смотреть с начала нового экрана
+        self.view_top = None               # смотрить с начала нового экрана
+
+    def delete_history_page(self, height: int) -> bool:
+        """Удалить видимую страницу из истории (F5 при просмотре истории).
+
+        Возвращает True, если что-то удалили. Если смотрим на кадр
+        (view_top >= len(history)) — ничего не делаем.
+        """
+        if self.view_top is None:
+            return False
+        hist_len = len(self.history)
+        if self.view_top >= hist_len:
+            return False  # смотрим на кадр, а не на историю
+        end = min(self.view_top + height, hist_len)
+        # Удаляем ряды из истории
+        del self.history[self.view_top:end]
+        # Корректируем счётчики
+        self.pushed -= (end - self.view_top)
+        self.dropped += (end - self.view_top)
+        # Сбрасываем view_top — отрисовка сама пересоздаст view_map
+        self.view_top = None
+        self.touch()
+        return True
 
     def set_service(self, text: str) -> None:
         # готовые ряды подвала (каждый — строка, ряды добиты пробелами);

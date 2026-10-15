@@ -446,10 +446,14 @@ def run_line(parser: Parser, url: str, png: str | None,
                 for key in keys:
                     session.emit(session.feed_key(key))
                     dirty = True       # АВТОНОМНО: эхо в ОЗУ без ответа линии
-            data = link.recv()
-            if data:
-                session.handle_line_reply(data)
-                dirty = True
+            if not getattr(link, "owns_stdin", False):
+                # линия stdio:// читает тот же stdin, что и клавиатура: её
+                # recv() забирал бы хвост escape-последовательности («ESC [ 1 ; 2 F»)
+                # из-под разбора клавиш — в кадр попадал бы мусор вида «ШХШ1;2Ф»
+                data = link.recv()
+                if data:
+                    session.handle_line_reply(data)
+                    dirty = True
             now = time.time()
             if now - last_stamp >= 60:  # часы в строке состояния — раз в минуту
                 session._update_status()

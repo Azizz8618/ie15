@@ -86,6 +86,129 @@ def test_local_home_works_on_second_line():
     assert session.pending() == typed("AB") + b"\r" + typed("ZCD")
 
 
+def test_local_shift_end_selects_to_line_end():
+    # АВТОНОМНО: Shift+End — выделение от курсора до конца строки набора,
+    # Shift+Home — от курсора до её начала; выделение видимо на экране
+    session, _ = make_session(MODE_LOCAL)
+    for ch in "ABCDE":
+        session.feed_key(ch)
+    session.feed_key("KEY_HOME")
+    session.feed_key("KEY_RIGHT")
+    session.feed_key("SELEND")
+    assert session._buf_sel == (1, 5)
+    assert session.parser.screen.selections      # подсветка на кадре
+    session.feed_key("KEY_HOME")                 # обычный Home снимает выделение
+    assert session._buf_sel is None
+    assert session.parser.screen.selections == []
+    session.feed_key("KEY_RIGHT")
+    session.feed_key("SELHOME")
+    assert session._buf_sel == (0, 1)
+
+
+def test_local_shift_home_selects_to_line_start():
+    session, _ = make_session(MODE_LOCAL)
+    for ch in "AB":
+        session.feed_key(ch)
+    session.feed_key("KEY_ENTER")
+    for ch in "CD":
+        session.feed_key(ch)
+    session.feed_key("KEY_HOME")                 # в начало второй строки
+    session.feed_key("SELEND")
+    assert session._buf_sel == (3, 5)            # до конца второй строки
+    session.feed_key("KEY_RIGHT")
+    session.feed_key("SELHOME")                   # до её начала
+    assert session._buf_sel == (3, 4)
+    session.feed_key("KEY_HOME")                  # курсор в начало строки
+    session.feed_key("SELHOME")                   # выделять нечего
+    assert session._buf_sel is None
+
+
+def test_shift_home_end_tilde_forms_decode():
+    # Часть терминалов (консоль Linux, старый xterm) шлёт Home/End с
+    # модификатором в форме «ESC [ код ; модификатор ~»
+    from ie15emu.keyboard import decode_key_bytes
+    assert decode_key_bytes(b"\x1b[1;2~") == ["SELHOME"]
+    assert decode_key_bytes(b"\x1b[4;2~") == ["SELEND"]
+    # прочие модификаторы гасятся (имя пустое — в список не попадает)
+    assert decode_key_bytes(b"\x1b[1;5~") == []
+    assert decode_key_bytes(b"\x1b[1;2A") == ["SELUP"]
+
+
+def test_host_mode_selection_keys_send_nothing():
+    # В С ЭВМ Shift+Home/End/Backspace у 15ВВВ нет: нажатие гасится и в
+    # линию не уходит (раньше проваливалось в key_to_bytes и отдавало
+    # слово «SELHOME»/«SELEND»/«SELBSPACE» — мусор в машине)
+    session, link = make_session(MODE_HOST)
+    for ch in "AB":
+        session.feed_key(ch)
+    for key in ("SELHOME", "SELEND", "SELBSPACE"):
+        assert session.feed_key(key) is None, key
+    assert link.sent == []
+    assert session.pending() == b""              # буфера в С ЭВМ нет
+
+
+def test_local_shift_backspace_deletes_selection():
+    # Shift+Home/End выделили фрагмент — Shift+Backspace удаляет его целиком
+    session, _ = make_session(MODE_LOCAL)
+    for ch in "ABCDE":
+        session.feed_key(ch)
+    session.feed_key("KEY_HOME")
+    session.feed_key("SELEND")
+    assert session._buf_sel == (0, 5)
+    session.feed_key("SELBSPACE")
+    assert session.pending() == b""
+    assert session._buf_pos == 0
+    assert session._buf_sel is None
+    assert session.last_key == "УДАЛЕНО"
+
+
+def test_local_shift_backspace_without_selection_is_backspace():
+    session, _ = make_session(MODE_LOCAL)
+    for ch in "AB":
+        session.feed_key(ch)
+    session.feed_key("SELBSPACE")
+    assert session.pending() == typed("A")
+
+
+def test_local_f5_clears_page_without_history():
+    # F5 в АВТОНОМНО удаляет страницу: кадр очищается и в историю НЕ уходит
+    session, _ = make_session(MODE_LOCAL)
+    for ch in "ABC":
+        session.feed_key(ch)
+    session.feed_key("CLEAR")
+    assert session.parser.screen.history == []
+    assert "ABC" not in session.parser.screen.text()
+
+
+def test_local_f5_deletes_page_from_history():
+    # Страница, загруженная в кадр из истории (PgUp), тоже удаляется по F5
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    sc.set_rows(24)
+    for y in range(40):                       # выдача: история заполнится
+        sc.cells[y % 24] = [0x41] * 80
+        sc.scrolled += 0
+    sc.history = [([0x41] * 80, [0] * 80) for _ in range(30)]
+    sc.view_top = 4                           # смотрим на страницу истории
+    assert sc.view_top < len(sc.history)
+    n_hist = len(sc.history)
+    session.feed_key("CLEAR")
+    assert len(sc.history) == n_hist - 24     # страница из истории удалена
+    assert sc.view_top is None
+
+
+def test_local_f5_in_host_mode_keeps_history():
+    # В С ЭВМ F5 по-прежнему уводит экран в историю (не удаляет страницу)
+    session, _ = make_session(MODE_HOST)
+    sc = session.parser.screen
+    for x, code in enumerate(b"ABCDE"):
+        sc.put(code)
+    n_hist = len(sc.history)
+    session.feed_key("CLEAR")
+    assert len(sc.history) > n_hist
+    assert sc.cells[0] == [0x20] * 80          # кадр очищен
+
+
 def test_local_end_goes_to_line_end():
     # End в АВТОНОМНО — курсор в конец строки набора (симметрично Home)
     session, _ = make_session(MODE_LOCAL)

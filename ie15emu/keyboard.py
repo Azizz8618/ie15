@@ -279,6 +279,9 @@ KEY_CTRLRIGHT = "KEY_CTRLRIGHT"     # прыжок по словам: начал
 KEY_CTRLLEFT = "KEY_CTRLLEFT"       # …и текущего слова
 KEY_CTRLUP = "KEY_CTRLUP"           # начало текущей строки
 KEY_CTRLDOWN = "KEY_CTRLDOWN"       # начало строки ниже
+KEY_SELHOME = "SELHOME"             # Shift+Home — выделить до начала строки
+KEY_SELEND = "SELEND"               # Shift+End — выделить до конца строки
+KEY_SELBSPACE = "SELBSPACE"         # Shift+Backspace — удалить выделенное
 
 SPECIAL_KEYS = {"KEY_UNDO": KEY_UNDO, "KEY_SEND": KEY_SEND, "KEY_MODE": KEY_MODE,
                 "KEY_CMDSET": KEY_CMDSET, "KEY_BLINK": KEY_BLINK,
@@ -303,6 +306,8 @@ SEQ_KEYS = {
     b"\x1b[1;2A": KEY_SELUP, b"\x1b[1;2B": KEY_SELDOWN,
     b"\x1b[1;6C": KEY_CTRLSELRIGHT, b"\x1b[1;6D": KEY_CTRLSELLEFT,
     b"\x1b[1;6A": KEY_CTRLSELUP, b"\x1b[1;6B": KEY_CTRLSELDOWN,
+    # Shift+Home/End — выделение до начала/конца строки (АВТОНОМНО)
+    b"\x1b[1;2H": KEY_SELHOME, b"\x1b[1;2F": KEY_SELEND,
     b"\x1b[H": "KEY_HOME", b"\x1b[1~": "KEY_HOME", b"\x1bOH": "KEY_HOME",
     b"\x1b[4~": "KEY_END", b"\x1b[F": "KEY_END", b"\x1bOF": "KEY_END",
     b"\x1b[2~": "KEY_INSERT", b"\x1b[3~": "KEY_DELETE",
@@ -366,10 +371,14 @@ def _parse_csi_u(data: bytes, i: int):
             return None, 0
         mask = (nums[1] - 1) & 0b1101        # xterm: shift=1 ctrl=4 alt=8
         mask = (mask & 1) | (mask & 4) | ((mask & 8) >> 2)
+        if nums[2] == 127 and mask & 1:    # Shift+Backspace (xterm)
+            return KEY_SELBSPACE, k + 1 - i
         return _combo_name(nums[2], mask), k + 1 - i
     if len(nums) == 1:
         return _combo_name(nums[0], 0), k + 1 - i
     if len(nums) == 2:                     # kitty: код;модификаторы
+        if nums[0] == 127 and (nums[1] - 1) & 1:  # Shift+Backspace (kitty)
+            return KEY_SELBSPACE, k + 1 - i
         return _combo_name(nums[0], (nums[1] - 1) & 7), k + 1 - i
     return None, 0
 
@@ -389,7 +398,8 @@ _MOD_KEY = re.compile(rb"\x1b\[(?:1;(\d+)([A-Za-z])|(\d+);(\d+)~)")
 # Функциональные клавиши xterm по букве: их тоже можно нажать
 # с модификатором — и тогда имя собирается как «модификаторы+клавиша».
 _MOD_LETTER = {"A": KEY_CTRLUP, "B": KEY_CTRLDOWN,          # стрелки: Ctrl
-               "C": KEY_CTRLRIGHT, "D": KEY_CTRLLEFT}
+               "C": KEY_CTRLRIGHT, "D": KEY_CTRLLEFT,
+               "H": KEY_SELHOME, "F": KEY_SELEND}           # Shift+Home/End
 
 
 def _parse_mod_key(data: bytes, i: int):
@@ -432,8 +442,14 @@ def _parse_mod_key(data: bytes, i: int):
         if shift:
             return {KEY_CTRLUP: KEY_SELUP, KEY_CTRLDOWN: KEY_SELDOWN,
                     KEY_CTRLRIGHT: KEY_SELRIGHT,
-                    KEY_CTRLLEFT: KEY_SELLEFT}[base], m.end() - i
+                    KEY_CTRLLEFT: KEY_SELLEFT}.get(base, base), m.end() - i
         return base, m.end() - i      # Ctrl без Shift — слова/строки
+    # «~»-форма: ESC [ код ; модификатор ~. Часть терминалов (консоль Linux,
+    # старый xterm) шлёт Home/End именно так: 1 — Home, 4 — End. С Shift —
+    # выделение части строки набора (АВТОНОМНО).
+    code = int(m.group(3))
+    if mask == 1 and code in (1, 4):          # Shift+Home / Shift+End
+        return KEY_SELHOME if code == 1 else KEY_SELEND, m.end() - i
     return "", m.end() - i            # Alt/прочие «~»-формы — гасим
 
 
