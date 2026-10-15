@@ -16,6 +16,51 @@ from __future__ import annotations
 import socket
 import time
 
+try:                       # paramiko может не стоять: SSH-линии не будет
+    from paramiko.ssh_exception import SSHException as _SSHException
+except ImportError:        # заглушка — isinstance-проверки просто не сработают
+    class _SSHException(Exception):
+        pass
+
+
+# Keep-alive линии: без трафика сервер (sshd, туннель, NAT-шлюз) по своему
+# таймауту закрывает простоявшее без дела соединение — сеанс обрывался в
+# АВТОНОМНО, где не шли ничего. Периодичные подтверждения держат линию
+# живой и одновременно обнаруживают уже мёртвого собеседника.
+KEEPALIVE = 30             # секунд между подтверждениями (SSH-транспорт)
+
+
+def _set_tcp_keepalive(sock) -> None:
+    """Сокету TCP — агрессивный keep-alive (для linux-стека сервера)."""
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except OSError:
+        return
+    # Linux/FreeBSD: первый пробный пакет через 30 с простоя, далее раз в
+    # 10 с, трижды — после этого соединение считается мёртвым и падает
+    # в наше исключение, а не висит до вечера
+    for name, value in (("TCP_KEEPIDLE", KEEPALIVE),
+                        ("TCP_KEEPINTVL", 10),
+                        ("TCP_KEEPCNT", 3)):
+        opt = getattr(socket, name, None)
+        if opt is None:
+            continue
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, opt, value)
+        except OSError:
+            pass
+
+
+def _enable_ssh_keepalive(transport) -> bool:
+    """SSH-транспорту — keep-alive: без него сервер по своему таймауту
+    закрывает простоявшее без дела соединение (сеанс в АВТОНОМНО обрывался
+    на холостом ходу). transport — объект paramiko, False если не вышло."""
+    try:
+        transport.set_keepalive(KEEPALIVE)
+    except Exception:
+        return False
+    return True
+
 
 class LinkError(RuntimeError):
     pass
@@ -177,6 +222,7 @@ class TCPLink:
                 busy.append(p)
                 continue
             sock.settimeout(0.2)
+            _set_tcp_keepalive(sock)      # линию держит живой без трафика
             self.sock = sock
             self.port = p
             if first:
@@ -271,6 +317,10 @@ class SSHLink:
                 client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
                 try:
                     client.connect(**kwargs)
+                    # keep-alive SSH-транспорта: без него sshd/шлюз по
+                    # своему таймауту гасит простоявшее без дела соединение
+                    # (сеанс в АВТОНОМНО обрывался на холостом ходу)
+                    _enable_ssh_keepalive(client.get_transport())
                     break
                 except paramiko.SSHException:
                     client.close()
@@ -426,19 +476,34 @@ class SSHLink:
                 return self._iac.feed(chunk)
             if not self.chan.get_transport().active or self.chan.closed:
                 raise LinkError("SSH-соединение разорвано")
+        except LinkError:
+            raise
         except socket.timeout:
             pass
+        except (_SSHException, EOFError, OSError) as e:
+            # транспорт SSH умер (таймаут хоста, разрыв сети): исключение
+            # paramiko НЕ является OSError — в главном цикле его ловило бы
+            # только «except LinkError», и эмулятор падал с трейсбеком.
+            # Все ошибки линии сводим к LinkError — дальше их ведёт вызывающий
+            raise LinkError(f"линия потеряна: {e}") from e
         return b""
 
     def send(self, data: bytes) -> None:
         try:
             self.chan.sendall(data)
-        except OSError as e:          # линия сбросилась во время набора
+        except (_SSHException, EOFError, OSError, socket.timeout) as e:
+            # линия сбросилась во время набора (в т.ч. таймаут SSH)
             raise LinkError(f"SSH-канал закрыт: {e}") from e
 
     def close(self) -> None:
-        self.chan.close()
-        self.client.close()
+        try:
+            self.chan.close()
+        except Exception:
+            pass
+        try:
+            self.client.close()
+        except Exception:
+            pass
 
 
 class StdioLink:

@@ -428,53 +428,74 @@ def run_line(parser: Parser, url: str, png: str | None,
     kb_pending = b""                     # недобранный хвост escape-последовательности
     try:
         while seconds <= 0 or time.time() - t0 < seconds:
-            fds = [link_sock(link)] if link_sock(link) is not None else []
-            if fd is not None:
-                fds.append(fd)
-            if fds:
-                ready, _, _ = select.select(fds, [], [], 0.05)
-            else:
-                ready, _ = [], None
-                time.sleep(0.05)
-            dirty = False
-            if fd is not None and fd in ready:
-                chunk = os.read(fd, 256)
-                # недобранный хвост escape-последовательности ждёт следующих
-                # байтов: os.read отдаёт нажатие по частям, и разорванная
-                # последовательность рассыпалась бы в знаки («[» вместо Ctrl+E)
-                keys, kb_pending = decode_keys(chunk, kb_pending)
-                for key in keys:
-                    session.emit(session.feed_key(key))
-                    dirty = True       # АВТОНОМНО: эхо в ОЗУ без ответа линии
-            if not getattr(link, "owns_stdin", False):
-                # линия stdio:// читает тот же stdin, что и клавиатура: её
-                # recv() забирал бы хвост escape-последовательности («ESC [ 1 ; 2 F»)
-                # из-под разбора клавиш — в кадр попадал бы мусор вида «ШХШ1;2Ф»
-                data = link.recv()
-                if data:
-                    session.handle_line_reply(data)
+            try:
+                fds = [link_sock(link)] if link_sock(link) is not None else []
+                if fd is not None:
+                    fds.append(fd)
+                if fds:
+                    ready, _, _ = select.select(fds, [], [], 0.05)
+                else:
+                    ready, _ = [], None
+                    time.sleep(0.05)
+                dirty = False
+                if fd is not None and fd in ready:
+                    chunk = os.read(fd, 256)
+                    # недобранный хвост escape-последовательности ждёт следующих
+                    # байтов: os.read отдаёт нажатие по частям, и разорванная
+                    # последовательность рассыпалась бы в знаки («[» вместо Ctrl+E)
+                    keys, kb_pending = decode_keys(chunk, kb_pending)
+                    for key in keys:
+                        session.emit(session.feed_key(key))
+                        dirty = True       # АВТОНОМНО: эхо в ОЗУ без ответа линии
+                if not getattr(link, "owns_stdin", False) and not session.line_lost:
+                    # линия stdio:// читает тот же stdin, что и клавиатура: её
+                    # recv() забирал бы хвост escape-последовательности («ESC [ 1 ; 2 F»)
+                    # из-под разбора клавиш — в кадр попадал бы мусор вида «ШХШ1;2Ф»
+                    try:
+                        data = link.recv()
+                    except (LinkError, OSError) as e:
+                        # линия потеряна (таймаут SSH, разрыв сети) — сеанс НЕ
+                        # завершаем: в АВТОНОМНО набор и правка работают без неё,
+                        # в строке состояния горит «ЛИНИЯ=НЕТ»
+                        if not session.line_lost:
+                            say(f"[линия] {e} — сеанс продолжается "
+                                f"(АВТОНОМНО доступен, отправка в линию "
+                                f"выключена)")
+                        session.mark_line_lost(str(e))
+                        data = b""
+                    if data:
+                        session.handle_line_reply(data)
+                        dirty = True
+                now = time.time()
+                if now - last_stamp >= 60:  # часы в строке состояния — раз в минуту
+                    session._update_status()
+                    last_stamp = now
                     dirty = True
-            now = time.time()
-            if now - last_stamp >= 60:  # часы в строке состояния — раз в минуту
-                session._update_status()
-                last_stamp = now
-                dirty = True
-            if dirty:
-                # «правильный масштаб»: окно ровно на кадр 25 + подвал;
-                # проверяем по символу от ЭВМ (и по нажатию) — сбитый
-                # масштаб шрифта возвращается сам
-                dirty = fit.restore(parser) if take_fit else False
-                # Протяжка мышью даёт события десятками в секунду: если ввод
-                # ещё не разобран, кадр дорисуем следующим шагом (иначе
-                # терминал получает поток полных перерисовок). Пропуск
-                # ограничен 15 мс и только когда данные уже ждут.
-                now = time.monotonic()
-                if fd is not None and now - last_draw < DRAW_MIN_GAP:
-                    if select.select([fd], [], [], 0)[0]:
-                        continue
-                OUT.write(text_screen(parser))
-                OUT.flush()
-                last_draw = time.monotonic()
+                if dirty:
+                    # «правильный масштаб»: окно ровно на кадр 25 + подвал;
+                    # проверяем по символу от ЭВМ (и по нажатию) — сбитый
+                    # масштаб шрифта возвращается сам
+                    dirty = fit.restore(parser) if take_fit else False
+                    # Протяжка мышью даёт события десятками в секунду: если ввод
+                    # ещё не разобран, кадр дорисуем следующим шагом (иначе
+                    # терминал получает поток полных перерисовок). Пропуск
+                    # ограничен 15 мс и только когда данные уже ждут.
+                    now = time.monotonic()
+                    if fd is not None and now - last_draw < DRAW_MIN_GAP:
+                        if select.select([fd], [], [], 0)[0]:
+                            continue
+                    OUT.write(text_screen(parser))
+                    OUT.flush()
+                    last_draw = time.monotonic()
+            except (LinkError, OSError) as e:
+                # линия потеряна (таймаут SSH, разрыв сети) — сеанс НЕ
+                # завершаем: в АВТОНОМНО набор и правка буфера работают
+                # и без линии, отправка просто подавляется до восстановления
+                if not session.line_lost:
+                    say(f"[линия] {e} — сеанс продолжается, "
+                        f"в строке состояния ЛИНИЯ=НЕТ")
+                session.mark_line_lost(str(e))
+                time.sleep(0.5)
     except KeyboardInterrupt:
         pass
     except LinkError as e:            # ЭВМ сбросила линию — не трейсбек, а выход
@@ -497,15 +518,22 @@ def run_line(parser: Parser, url: str, png: str | None,
 
 
 def link_sock(link):
-    """Дескриптор линии для select (если он есть)."""
-    sock = getattr(link, "sock", None)
-    if sock is not None:
-        return sock.fileno()
-    chan = getattr(link, "chan", None)
-    if chan is not None and hasattr(chan, "recv_ready"):
-        return None          # SSH-канал опрашивается неблокирующе
-    btn = getattr(link, "_in", None)
-    return btn.fileno() if btn is not None else None
+    """Дескриптор линии для select (если он есть).
+
+    У мёртвой линии дескриптор взять не выйдет (SSH-канал закрыт, сокет
+    обнулён) — тогда просто опрашиваем линию без select.
+    """
+    try:
+        sock = getattr(link, "sock", None)
+        if sock is not None:
+            return sock.fileno()
+        chan = getattr(link, "chan", None)
+        if chan is not None and hasattr(chan, "recv_ready"):
+            return None          # SSH-канал опрашивается неблокирующе
+        btn = getattr(link, "_in", None)
+        return btn.fileno() if btn is not None else None
+    except Exception:
+        return None
 
 
 def text_screen(parser: Parser) -> str:

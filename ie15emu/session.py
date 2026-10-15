@@ -144,6 +144,8 @@ class TerminalSession:
         self.machine = ""            # номер ЭВМ (из конфига, пусто — не показываем)
         self.peer = ""               # адрес, с которого пришли («From …»)
         self.banner_seen = False     # баннер линии («CONNECTED TO …») пришёл
+        self.line_lost = False       # линия потеряна (таймаут/разрыв SSH):
+                                     # сеанс продолжается, отправки подавлены
         self.mouse_on = False   # мышь терминала отдана эмулятору (F-подвал)
         self._banner_tail = b""      # недобранная строка баннера
         self._banner_done = False    # баннер закончился (пошли данные ЭВМ)
@@ -210,6 +212,8 @@ class TerminalSession:
             return mk(label, (value, style or self._flag_style(value)))
 
         line = LINE_LABELS.get(self.encoding, f"ЛИНИЯ={self.encoding}")
+        if self.line_lost:
+            line = "ЛИНИЯ=НЕТ"        # таймаут/разрыв — сеанс продолжается
         last = mk("ПОСЛ: ", (self.last_key, "last"))
         state = [
             # «АВТОНОМНО» — красным и подчёркнутым: набор идёт в буфер
@@ -218,7 +222,8 @@ class TerminalSession:
                "state" if host else "local"),
             
             st("НАБОР=", self.NABOR_LABELS[self.nabor]),
-            st("ЛИНИЯ=", line.split("=", 1)[-1]),
+            st("ЛИНИЯ=", line.split("=", 1)[-1],
+               "off" if self.line_lost else None),
             st("РАСК=", lay),
             st("ЭХО=", "ВКЛ" if self.echo else "ВЫКЛ"),
             st("ВИДЕО=", "ИНВ" if sc.inverse else "НОРМ"),
@@ -472,8 +477,11 @@ class TerminalSession:
                 data = encode_koi7(text + "\n")
                 if self.mode == MODE_HOST:
                     self._note_sent(data)
-                    if self.link is not None:
-                        self.link.send(to_line(data, self.encoding))
+                    if self.link is not None and not self.line_lost:
+                        try:
+                            self.link.send(to_line(data, self.encoding))
+                        except (OSError, LinkError) as e:
+                            self.mark_line_lost(str(e))
                 else:
                     self.undo.snapshot(self.buffer)     # отменяемая правка
                     self.buffer.extend(data)
@@ -943,6 +951,21 @@ class TerminalSession:
         """Ожидает ли буфер передачи (что на реальном терминале гасит РТ)."""
         return bytes(self.buffer)
 
+    def mark_line_lost(self, why: str = "") -> None:
+        """Линия потеряна: сеанс продолжается (АВТОНОМНО работает и без неё).
+
+        Вызывается главным циклом при ошибке приёма/передачи. Флаг гасит
+        дальнейшие отправки и переводит строку состояния в «ЛИНИЯ=НЕТ» —
+        эмулятор не падает и не завершает сеанс, как этого требует работа
+        в автономном режиме.
+        """
+        if self.line_lost:
+            return                       # уже отмечено — сообщение одно
+        self.line_lost = True
+        self.last_key = f"ЛИНИЯ: {why}" if why else "ЛИНИЯ ПОТЕРЯНА"
+        self._update_service()
+        self._update_status()
+
     def emit(self, data: bytes | None) -> None:
         """Фактическая передача в линию: внутренний КОИ7-поток → байты линии.
 
@@ -951,14 +974,14 @@ class TerminalSession:
         """
         if data:
             self._note_sent(bytes(data))
-        if data and self.link is not None:
+        if data and self.link is not None and not self.line_lost:
             try:
                 self.link.send(to_line(bytes(data), self.encoding))
-            except (OSError, LinkError):
-                # Линия разорвалась (TCP/SSH закрыт) — не падаем, просто
-                # прекращаем отправку. Эмулятор остаётся жив, пользователь
-                # может продолжить работу в автономном режиме.
-                pass
+            except (OSError, LinkError) as e:
+                # Линия разорвалась (TCP/SSH, в т.ч. таймаут) — не падаем:
+                # помечаем потерю и продолжаем сеанс. В АВТОНОМНО набор и
+                # правка буфера работают и без линии.
+                self.mark_line_lost(str(e))
 
     def _note_sent(self, data: bytes) -> None:
         """При выключенном эхе: записать в очередь ожидаемого эхо-ответа.
@@ -1165,6 +1188,10 @@ class TerminalSession:
         if not reply:
             return None
         wire = to_line(reply.encode("latin-1"), self.encoding)
-        if self.link is not None:
-            self.link.send(wire)
+        if self.link is not None and not self.line_lost:
+            try:
+                self.link.send(wire)
+            except (OSError, LinkError) as e:
+                self.mark_line_lost(str(e))
+                return None
         return wire
