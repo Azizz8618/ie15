@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 import time
 
-from . import COLS, ROWS
+from . import COLS, ROWS, __version__
 from .charset import (encode_koi7, koi7_display_upper, koi7_raw_upper,
                       normalize_incremental, to_line)
 from .link import LinkError
@@ -495,22 +495,46 @@ class TerminalSession:
             self._update_service()
             return None
         if key == "CLEAR":
-            # F5 «ОЧИСТКА»: в АВТОНОМНО удаляет страницу (кадр или историю),
-            # в С ЭВМ — очищает экран с сохранением в историю
+            # F5 «ОЧИСТКА»: в АВТОНОМНО удаляет страницу — то, что сейчас
+            # на кадре. Набор: видимая страница буфера; загруженная в кадр
+            # страница истории — из истории. В С ЭВМ: экран в историю.
             if self.mode == MODE_LOCAL:
                 sc = self.parser.screen
-                # Если смотрим на историю — удалить страницу из неё
                 if sc.view_top is not None and sc.view_top < len(sc.history):
+                    # на кадре страница из истории — удаляем её
                     sc.delete_history_page(sc._view_h)
-                    self.last_key = "УДАЛЕНО"
+                    self.last_key = "СТР. УДАЛЕНА"
+                    self._buf_sel_reset()
+                    self._update_service()
+                    self._update_status()
+                    return None
+                span = self._buf_page_span()
+                if span and span[1] > span[0]:
+                    # видимая страница набора уходит из буфера: стираем
+                    # от первого отображённого знака до конца, курсор —
+                    # на место удалённого (в пределах буфера)
+                    a, b = span
+                    self.undo.snapshot(self.buffer)     # отменяемая правка
+                    total_before = self._buf_rows_up_to(len(self.buffer))
+                    del self.buffer[a:b]
+                    if self._buf_pos > a:
+                        self._buf_pos = a
+                    self._buf_sel_reset()
+                    if self.echo:
+                        # курсор — на низ старого эха, чтобы стёрлись и
+                        # ряды ниже новой (короткой) печати
+                        top = 0 if self._echo_top is None else self._echo_top
+                        sc.y = min(sc.rows - 1, top + total_before - 1)
+                        self._redraw_echo()
+                    self.last_key = "СТР. УДАЛЕНА"
                 else:
-                    # Обычная очистка экрана (без сохранения в историю)
+                    # печатать нечего — просто чистим кадр
                     sc.clear_all()
                     sc.view_top = None
+                    self._echo_top = None
                     self.last_key = "ОЧИСТКА"
-                self._buf_sel_reset()
-                self._echo_top = None
                 self._update_service()
+                self._update_status()       # счётчик отмены «ОТМЕНА=»
                 return None
             # С ЭВМ: экран в историю, кадр в начало
             self._buf_sel_reset()
@@ -807,6 +831,57 @@ class TerminalSession:
         col = len(head) - (head.rfind(b"\n") + 1)
         y = min(sc.rows - 1, self._echo_top + nl + col // COLS)
         return y, col % COLS
+
+    def _buf_rows_up_to(self, i: int) -> int:
+        """Сколько рядов кадра занимает эхо буфера до позиции i.
+
+        Точно повторяет печать `_redraw_echo`: ПР/ПС дают новый ряд,
+        каждые COLS знаков — перенос (строка в COLS знаков занимает
+        два ряда: ряд печати и ряд после переноса).
+        """
+        rows = run = 0
+        for b in bytes(self.buffer[:i]):
+            if b in (0x0D, 0x0A):
+                rows += run // COLS + 1      # переносы законченной строки + ПС
+                run = 0
+            else:
+                run += 1
+        return rows + run // COLS
+
+    def _buf_page_span(self) -> tuple[int, int] | None:
+        """Позиции буфера, отображённые на кадре (видимая страница набора).
+
+        Кадр показывает хвост печати: если строк больше, чем рядов под
+        эхом, кадр при печати смещается вверх и верхние строки уходят
+        в историю. Возвращает (от, до) — что именно сейчас видно, либо
+        None, если печатать нечего (пустой буфер).
+        """
+        buf = bytes(self.buffer)
+        if not buf:
+            return None
+        sc = self.parser.screen
+        top = 0 if self._echo_top is None \
+            else max(0, min(self._echo_top, sc.rows - 1))
+        available = sc.rows - top            # рядов под эхом
+        if available <= 0:
+            return None
+        total = self._buf_rows_up_to(len(buf))
+        # печать дотягивает последний ряд эха (там стоит курсор) до нижней
+        # кромки кадра — при переполнении кадр смещается вверх на s рядов
+        scrolled = max(0, top + total - (sc.rows - 1))
+        j_start = max(0, scrolled - top)     # первый видимый ряд печати
+        if j_start <= 0:
+            return (0, len(buf))             # влезло целиком
+        row = run = 0
+        for idx, b in enumerate(buf):
+            if row >= j_start:
+                return (idx, len(buf))
+            if b in (0x0D, 0x0A):
+                row += run // COLS + 1
+                run = 0
+            else:
+                run += 1
+        return (len(buf), len(buf))           # удалять нечего
 
     def _buf_sel_hide(self) -> None:
         """Снять подсветку выделения набора (выделение мышью не трогаем)."""
@@ -1118,6 +1193,9 @@ class TerminalSession:
         if self.undo.depth and self.undo.available:
             cells.append(mk(("ОТМЕНА=", "label"),
                             (f"Ctrl+U ({len(self.undo)})", "state")))
+        # версия эмулятора — видно, чем именно работаем (та же цифра в
+        # --version и в строке запуска); перед датой, дата остаётся последней
+        cells.append(mk(("ВЕРСИЯ=", "label"), (__version__, "state")))
         cells.append(mk(f"{when.tm_mday:02d}.{when.tm_mon:02d}.{when.tm_year} "
                         f"{when.tm_hour:02d}:{when.tm_min:02d}:"
                         f"{when.tm_sec:02d}"))

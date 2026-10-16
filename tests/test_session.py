@@ -171,13 +171,67 @@ def test_local_shift_backspace_without_selection_is_backspace():
 
 
 def test_local_f5_clears_page_without_history():
-    # F5 в АВТОНОМНО удаляет страницу: кадр очищается и в историю НЕ уходит
+    # F5 в АВТОНОМНО удаляет страницу: кадр очищается и в историю НЕ уходит,
+    # а сама страница уходит из буфера набора
     session, _ = make_session(MODE_LOCAL)
     for ch in "ABC":
         session.feed_key(ch)
+    assert session.pending()                  # набрано
     session.feed_key("CLEAR")
     assert session.parser.screen.history == []
     assert "ABC" not in session.parser.screen.text()
+    assert session.pending() == b""           # страница удалена из буфера
+    assert session.last_key == "СТР. УДАЛЕНА"
+
+
+def test_local_f5_deletes_page_from_buffer():
+    # F5 в АВТОНОМНО удаляет из буфера ТО, что сейчас на кадре: видимая
+    # страница исчезает, а уехавшие выше строки становятся видимыми
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    for i in range(40):                        # 40 строк — больше кадра
+        for ch in f"L{i:02d}":
+            session.feed_key(ch)
+        session.feed_key("KEY_ENTER")
+    n_bytes = len(session.buffer)
+    assert n_bytes > 0
+    span = session._buf_page_span()
+    assert span and span[0] > 0               # страница — хвост, не всё сразу
+    session.feed_key("CLEAR")
+    assert len(session.buffer) == span[0]     # удалилось ровно видимое
+    assert session.last_key == "СТР. УДАЛЕНА"
+    # отмена возвращает удалённую страницу
+    session.feed_key("UNDO")
+    assert len(session.buffer) == n_bytes
+
+
+def test_local_f5_repeats_until_buffer_empty():
+    # Повторное F5 удаляет следующую страницу — пока буфер не опустеет
+    session, _ = make_session(MODE_LOCAL)
+    for i in range(40):
+        for ch in f"L{i:02d}":
+            session.feed_key(ch)
+        session.feed_key("KEY_ENTER")
+    hist_before = len(session.parser.screen.history)  # растёт при наборе
+    presses = 0
+    while session.pending() and presses < 10:
+        session.feed_key("CLEAR")
+        presses += 1
+    assert session.pending() == b""
+    assert presses <= 3                        # 40 строк — не больше 3 страниц
+    # F5 сама историю не пополняет (строки уходят из буфера, не в историю)
+    assert len(session.parser.screen.history) == hist_before
+
+
+def test_local_f5_keeps_cursor_inside_buffer():
+    # После удаления страницы курсор не выходит за пределы буфера
+    session, _ = make_session(MODE_LOCAL)
+    for i in range(40):
+        for ch in f"L{i:02d}":
+            session.feed_key(ch)
+        session.feed_key("KEY_ENTER")
+    session.feed_key("CLEAR")
+    assert 0 <= session._buf_pos <= len(session.buffer)
 
 
 def test_local_f5_deletes_page_from_history():
