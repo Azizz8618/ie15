@@ -147,6 +147,36 @@ def test_host_mode_selection_keys_send_nothing():
     assert session.pending() == b""              # буфера в С ЭВМ нет
 
 
+def test_host_shift_home_end_select_on_frame():
+    # В С ЭВМ Shift+Home/End выделяют по кадру (как Shift+стрелки):
+    # от курсора до начала/конца строки под ним; кадр принадлежит ЭВМ,
+    # выделение берётся F4, Shift+Backspace только сообщает об АВТОНОМНО
+    session, link = make_session(MODE_HOST)
+    sc = session.parser.screen
+    session.parser.feed(b"HELLO WORLD")
+    sc.view_map = [("frame", y) for y in range(sc.rows)]   # карта после отрисовки
+    sc.x, sc.y = 6, 0                      # курсор на «W» — середина строки
+
+    session.feed_key("SELEND")
+    spans = dict(sc.sel_spans()[0])
+    assert ("frame", 0) in spans, "Shift+End ничего не выделил"
+    a, b = spans[("frame", 0)][0]
+    assert sc.row_text("frame", 0)[a:b + 1] == "WORLD"    # до конца строки
+
+    sc.sel_clear()
+    sc.view_map = [("frame", y) for y in range(sc.rows)]
+    session.feed_key("SELHOME")
+    spans = dict(sc.sel_spans()[0])
+    assert ("frame", 0) in spans, "Shift+Home ничего не выделил"
+    a, b = spans[("frame", 0)][0]
+    assert sc.row_text("frame", 0)[a:b + 1] == "HELLO W"  # до начала строки
+
+    # Shift+Backspace в С ЭВМ ничего не стирает и в линию не шлёт
+    assert session.feed_key("SELBSPACE") is None
+    assert link.sent == []
+    assert "АВТОНОМНО" in session.last_key
+
+
 def test_local_shift_backspace_deletes_selection():
     # Shift+Home/End выделили фрагмент — Shift+Backspace удаляет его целиком
     session, _ = make_session(MODE_LOCAL)

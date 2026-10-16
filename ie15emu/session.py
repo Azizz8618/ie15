@@ -668,15 +668,28 @@ class TerminalSession:
                 self.last_key = "ВЫД: пусто"
                 self._update_service()
                 return None
-            self.last_key = "ВЫД: нет (нужен АВТОНОМНО)"
+            # С ЭВМ: то же выделение, но по кадру — как Shift+стрелки
+            # (кадр принадлежит ЭВМ, выделяется его текст, берётся F4)
+            sc = self.parser.screen
+            self._buf_sel_reset()
+            _kind, idx, _x = sc.cursor_anchor()
+            if sc._drag is None:
+                sc.kbd_sel_begin(block=False)
+            sc.kbd_sel_drag(idx, 0 if key == KEY_SELHOME else COLS - 1)
+            _fr, lines, chars = sc.sel_stats()
+            self.last_key = (f"ВЫД: {lines} стр., {chars} зн. (F4 — взять)"
+                             if lines else "ВЫД: пусто")
             self._update_service()
+            self._update_status()
             return None
         if key == KEY_SELBSPACE:
             # АВТОНОМНО: Shift+Backspace — удалить выделенный фрагмент
             # набора (Shift+Home/End или Shift+стрелки по буферу).
             # Выделения нет — работает как обычный ВК. В С ЭВМ гасится:
-            # у 15ВВВ такого нажатия нет, в линию слово не уходит.
+            # кадр принадлежит ЭВМ, в линию слово не уходит.
             if self.mode != MODE_LOCAL:
+                self.last_key = "ВЫД: удалить — в АВТОНОМНО"
+                self._update_service()
                 return None
             sel = self._buf_sel
             if sel and sel[1] > sel[0]:
