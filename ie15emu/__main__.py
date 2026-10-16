@@ -365,6 +365,8 @@ def run_line(parser: Parser, url: str, png: str | None,
     # справка (ряды-легенды подвала) — по желанию; нижняя строка
     # состояния с полями сеанса остаётся в любом случае
     parser.screen.set_help(show_help)
+    say(f"[15ИЭ] версия {__version__} — эмулятор терминала "
+        f"«Электроника 15ИЭ-00-013»")
     say(f"[линия] {url} — подключено (режим: {mode})")
     say("[клавиши] ввод — в линию/буфер; Shift+стрелки — выделение "
         "(Shift+Ctrl — колонкой), F4 — ВЗЯТЬ выделенное, "
@@ -794,7 +796,9 @@ def main(argv: list[str] | None = None) -> None:
                          "(0 — не ждать)")
     ap.add_argument("--status", action="store_true",
                     help="в --dump добавить строку состояния линии")
-    ap.add_argument("--version", action="version", version=__version__)
+    ap.add_argument("--version", action="version",
+                    version=f"ie15emu {__version__} — Электроника "
+                            f"15ИЭ-00-013 (эмулятор терминала)")
     args = ap.parse_args(argv)
     args = apply_conf(args, load_conf(args.conf))
     args.mode = args.mode or "host"
