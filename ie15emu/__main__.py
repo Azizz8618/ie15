@@ -244,6 +244,19 @@ def _drain_banner(session, timeout: float = 2.0) -> None:
             time.sleep(0.05)
 
 
+def _open_keylog(path: str | None):
+    """Открыть журнал клавиш (--keylog): пишется как есть, при ошибке — None."""
+    if not path:
+        return None
+    try:
+        f = open(path, "a", encoding="utf-8")
+        f.write(f"=== сеанс {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+        f.flush()
+        return f
+    except OSError:
+        return None
+
+
 def _esc(data: bytes) -> None:
     """Управляющая последовательность мимо текстового буфера stdout."""
     sys.stdout.flush()
@@ -346,6 +359,7 @@ def run_line(parser: Parser, url: str, png: str | None,
              take_mouse: bool = True, take_fit: bool = False,
              machine: str = "", show_help: bool = True,
              undo_depth: int = DEFAULT_UNDO,
+             keylog: str | None = None,
              **linkkw) -> None:
     import os
     import select
@@ -428,6 +442,7 @@ def run_line(parser: Parser, url: str, png: str | None,
         _install_winch(fit)         # кадр сам дотягивается до низа окна
     dirty = True                         # первый кадр рисуем сразу
     kb_pending = b""                     # недобранный хвост escape-последовательности
+    keylog = _open_keylog(keylog)        # диагностика клавиш (--keylog)
     try:
         while seconds <= 0 or time.time() - t0 < seconds:
             try:
@@ -445,7 +460,14 @@ def run_line(parser: Parser, url: str, png: str | None,
                     # недобранный хвост escape-последовательности ждёт следующих
                     # байтов: os.read отдаёт нажатие по частям, и разорванная
                     # последовательность рассыпалась бы в знаки («[» вместо Ctrl+E)
+                    pending_before = kb_pending
                     keys, kb_pending = decode_keys(chunk, kb_pending)
+                    if keylog:
+                        # диагностика клавиш: что реально прислал терминал
+                        # и как это разобрано (хвост — на случай разрыва)
+                        keylog.write(f"raw={chunk!r} pending={pending_before!r}"
+                                     f" -> {keys!r} tail={kb_pending!r}\n")
+                        keylog.flush()
                     for key in keys:
                         session.emit(session.feed_key(key))
                         dirty = True       # АВТОНОМНО: эхо в ОЗУ без ответа линии
@@ -514,6 +536,8 @@ def run_line(parser: Parser, url: str, png: str | None,
             sys.stdout.write("\x1b[?25h")
         if old is not None and fd is not None:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        if keylog:
+            keylog.close()
         link.close()
     if png:
         _write_png(png, parser)
@@ -738,6 +762,10 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--seconds", type=float, default=30.0,
                     help="длительность сеанса (0 — до Ctrl-C)")
     ap.add_argument("--png", help="сохранить итоговый экран в PNG")
+    ap.add_argument("--keylog", default=None, metavar="ФАЙЛ",
+                    help="записывать сырые нажатия клавиатуры и их разбор "
+                         "в файл — диагностика, что шлёт терминал "
+                         "(Shift+Home/End и т. п.)")
     ap.add_argument("--roms", default=str(ROM_DEFAULT))
     ap.add_argument("--password", default=None,
                     help="пароль для ssh://-линии (иначе из [ssh])")
@@ -834,6 +862,7 @@ def main(argv: list[str] | None = None) -> None:
                      take_fit=bool(args.fit), machine=args.machine or "",
                      show_help=not bool(args.no_help),
                      undo_depth=int(args.undo),
+                     keylog=args.keylog,
                      password=args.password, keyfile=args.keyfile)
     else:
         run_script(parser, args.png)

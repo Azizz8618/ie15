@@ -375,12 +375,28 @@ def _parse_csi_u(data: bytes, i: int):
             return KEY_SELBSPACE, k + 1 - i
         return _combo_name(nums[2], mask), k + 1 - i
     if len(nums) == 1:
+        # управляющие в CSI-u (kitty/foot/wezterm с включёнными флагами):
+        # Esc=27, Enter=13, Tab=9, Backspace=8/127 — в сыром виде их
+        # «CSI 27 u» разбор бы рассыпал в знаки «[27u»
+        if nums[0] in _CSI_U_CTRL:
+            return _CSI_U_CTRL[nums[0]], k + 1 - i
         return _combo_name(nums[0], 0), k + 1 - i
     if len(nums) == 2:                     # kitty: код;модификаторы
-        if nums[0] == 127 and (nums[1] - 1) & 1:  # Shift+Backspace (kitty)
+        mod = (nums[1] - 1) & 7
+        if nums[0] in (8, 127) and mod & 1:
+            # Shift+Backspace: 127 (DEL) и 8 (BS) — терминалы шлют оба
             return KEY_SELBSPACE, k + 1 - i
-        return _combo_name(nums[0], (nums[1] - 1) & 7), k + 1 - i
+        if nums[0] in _CSI_U_CTRL and not (mod & 2):
+            # Enter/Esc/Tab с Shift — те же клавиши (Alt гасим ниже)
+            return _CSI_U_CTRL[nums[0]], k + 1 - i
+        return _combo_name(nums[0], mod), k + 1 - i
     return None, 0
+
+
+# Управляющие клавиши в кодировке CSI-u (по номеру УП): имя, которое
+# дальше ведёт обычный путь (decode_key_bytes / key_to_bytes)
+_CSI_U_CTRL = {9: "\t", 10: "KEY_ENTER", 13: "KEY_ENTER",
+               27: "KEY_ESC", 8: "KEY_BACKSPACE", 127: "KEY_BACKSPACE"}
 
 
 # Стрелки и функциональные клавиши с модификатором (xterm):
