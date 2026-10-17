@@ -400,18 +400,31 @@ class TerminalSession:
             self.last_key = arrow + f"{key} U+{ord(key):04X}"
             self._update_service()
         if key == "KEY_PAGEUP":
+            # АВТОНОМНО с буфером больше кадра — листаем сам набор (см.
+            # _buf_page_move); иначе — «история» выдачи, как раньше
+            if self._buf_page_move(-1, max(1, self.parser.screen.rows - 1)):
+                self._update_service()
+                return None
             self.parser.screen.scroll_view(-self.parser.screen._view_h + 1)
             self._update_service()
             return None
         if key == "KEY_PAGEDOWN":
+            if self._buf_page_move(+1, max(1, self.parser.screen.rows - 1)):
+                self._update_service()
+                return None
             self.parser.screen.scroll_view(self.parser.screen._view_h - 1)
             self._update_service()
             return None
         if key in ("KEY_WHEELUP", "KEY_WHEELDOWN"):
-            # колесо мыши — то же листание «истории» выдачи, по три ряда
-            # за щелчок; вверх так же запрещено, пока не выдано больше
-            # одной страницы кадра (циклической прокрутки нет)
+            # колесо мыши — то же листание: в АВТОНОМНО с длинным буфером
+            # по три строки набора, иначе — «истории» выдачи по три ряда
+            # (вверх так же запрещено, пока не выдано больше одной страницы
+            # кадра — циклической прокрутки нет)
             step = WHEEL_STEP * (-1 if key == "KEY_WHEELUP" else 1)
+            if self._buf_page_move(
+                    -1 if key == "KEY_WHEELUP" else +1, WHEEL_STEP):
+                self._update_service()
+                return None
             self.parser.screen.scroll_view(step)
             self._update_service()
             return None
@@ -941,19 +954,11 @@ class TerminalSession:
         rows, col = self._buf_rowcol(i)
         return max(0, min(sc.rows - 1, top + rows)), col
 
-    def _buf_window(self, buf: bytes, avail: int) -> tuple[int, int, int]:
-        """Окно эха, когда буфер больше кадра: (с чего, до куда, рядов сверху).
-
-        Печать «с нуля» и до конца буфера уезжала вверх: строки над
-        курсором и сам курсор уходили за край кадра, и знак вставлялся
-        не под курсором. Поэтому печатается не больше `avail` рядов:
-          * курсор у конца — виден хвост буфера (как раньше);
-          * курсор высоко — окно вокруг его строки, хвост не печатается
-            (он не нужен: важен знак под курсором).
-        Кадр при печати не смещается — печать влезает в окно целиком.
+    def _buf_starts(self, buf: bytes) -> tuple[list[int], int]:
+        """Начала рядов печати и число рядов: starts[r] — индекс буфера,
+        с которого начинается ряд r. Границы считаются как в `_buf_rowcol`:
+        ПР/ПС даёт новый ряд, каждые COLS знаков — перенос.
         """
-        # starts[r] — индекс буфера, с которого начинается ряд r
-        # (границы строк и переносов считаются так же, как в _buf_rowcol)
         starts = [0]
         rows = run = 0
         line_start = 0
@@ -971,7 +976,64 @@ class TerminalSession:
         for j in range(1, run // COLS + 1):           # хвост незакрытой строки
             rows += 1
             starts.append(line_start + j * COLS)
-        total = rows                                  # рядов до конца буфера
+        return starts, rows
+
+    def _buf_pos_at_row(self, row: int, col: int) -> int:
+        """Позиция буфера: начало ряда `row` плюс колонка (в границах ряда)."""
+        buf = bytes(self.buffer)
+        starts, _total = self._buf_starts(buf)
+        row = max(0, min(row, len(starts) - 1))
+        start = starts[row]
+        nxt = starts[row + 1] if row + 1 < len(starts) else len(buf)
+        # зажимаемся в границы ряда: до ПС/переноса, у последнего ряда — до конца
+        return start if nxt <= start else min(start + col, nxt - 1)
+
+    def _buf_page_move(self, direction: int, rows: int) -> bool:
+        """АВТОНОМНО: листание страницы по буферу набора (PgUp/PgDn/колесо).
+
+        Здесь нет «истории» выдачи (эхо в автономном режиме кадр вверх не
+        сдвигает — печать влезает в окно), поэтому листать нужно сам набор:
+        курсор уходит на `rows` строк вверх (−1) или вниз (+1), а окно
+        печати следует за ним — экран показывает предыдущие/следующие
+        страницы буфера.
+
+        False — листать нечего (буфер влезает в кадр, либо курсор уже у
+        границы): тогда листание уходит в обычную «историю» — она может
+        быть от прошлой работы в режиме С ЭВМ.
+        """
+        if self.mode != MODE_LOCAL:
+            return False
+        buf = bytes(self.buffer)
+        total = self._buf_rows_up_to(len(buf))
+        if total <= self.parser.screen.rows - 1:
+            return False                      # весь буфер влезает в кадр
+        row, col = self._buf_rowcol(self._buf_pos)
+        target = min(total, max(0, row + direction * rows))
+        if target == row:
+            return False                      # у границы — дальше история
+        self._buf_sel_reset()
+        self._buf_pos = self._buf_pos_at_row(target, col)
+        # листание перешло к набору — закреплённый просмотр истории (если
+        # был из С ЭВМ) снимается, кадр показывает буфер
+        self.parser.screen.view_top = None
+        if self.echo:
+            self._redraw_echo()
+        return True
+
+    def _buf_window(self, buf: bytes, avail: int) -> tuple[int, int, int]:
+        """Окно эха, когда буфер больше кадра: (с чего, до куда, рядов сверху).
+
+        Печать «с нуля» и до конца буфера уезжала вверх: строки над
+        курсором и сам курсор уходили за край кадра, и знак вставлялся
+        не под курсором. Поэтому печатается не больше `avail` рядов:
+          * курсор у конца — виден хвост буфера (как раньше);
+          * курсор высоко — окно вокруг его строки, хвост не печатается
+            (он не нужен: важен знак под курсором).
+        Кадр при печати не смещается — печать влезает в окно целиком.
+        """
+        # starts[r] — индекс буфера, с которого начинается ряд r
+        # (границы строк и переносов считаются так же, как в _buf_rowcol)
+        starts, total = self._buf_starts(buf)
 
         def row_of(i: int) -> int:
             # бинарный поиск по монотонной таблице
@@ -1424,9 +1486,8 @@ class TerminalSession:
             victims.insert(0, cell)          # первая жертва — ОТМЕНА
         # версия эмулятора — видно, чем именно работаем (та же цифра в
         # --version и в строке запуска); перед датой, дата остаётся последней
-        ver_cell = mk(("ВЕРСИЯ=", "label"), (__version__, "state"))
-        cells.append(ver_cell)
-        victims.extend((mouse_cell, ver_cell))   # после подсказок
+        cells.append(mk(("ВЕРСИЯ=", "label"), (__version__, "state")))
+        victims.append(mouse_cell)             # ВЕРСИЯ не жертвуется
         # индикатор сообщений ЭВМ в АВТОНОМНО (см. _note_incoming): кадр занят
         # набором, поэтому текст показываем здесь — хвост последних знаков,
         # а в скобках — сколько сообщений пришло с начала режима

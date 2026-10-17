@@ -235,7 +235,8 @@ def test_help_toggles_during_session():
     # прижата к правому краю верхней строки состояния
     from ie15emu.keyboard import decode_key_bytes
     session, link = make_session(MODE_LOCAL)
-    sc = session.parser.screen
+    session.banner_seen = True                  # баннер пришёл — «КВУ»,
+    sc = session.parser.screen                  # строка состояния реалистична
     assert sc.show_help is True
     assert "СБРОС=F3" in panel_text(sc)          # легенда видна
     assert session.feed_key("HELP") is None      # в линию не уходит
@@ -383,6 +384,83 @@ def test_local_f5_keeps_cursor_inside_buffer():
     assert 0 <= session._buf_pos <= len(session.buffer)
 
 
+def test_local_pages_page_through_buffer():
+    # В АВТОНОМНО у буфера своей «истории» нет (эхо кадр вверх не сдвигает),
+    # поэтому PgUp/PgDn листают сам набор: курсор уходит на страницу
+    # вверх/вниз, кадр показывает те строки набора
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    for i in range(40):                        # 40 строк > кадра (25)
+        for ch in f"L{i:02d}":
+            session.feed_key(ch)
+        session.feed_key("KEY_ENTER")
+
+    def line_on_cursor():
+        buf = bytes(session.buffer)
+        pos = session._buf_pos
+        start = buf.rfind(b"\r", 0, pos) + 1
+        nxt = buf.find(b"\r", pos)
+        end = len(buf) if nxt < 0 else nxt
+        return "".join(decode_koi7(bytes([c & 0x7F for c in buf[start:end]])))
+
+    # конец: хвост на кадре
+    assert (sc.x, sc.y) == (0, 24)
+    # страница вверх — курсор и кадр показывают строки выше
+    session.feed_key("KEY_PAGEUP")
+    pos1 = session._buf_pos
+    assert pos1 < len(session.buffer), "PgUp не увёл курсор с конца"
+    buf = bytes(session.buffer)
+    start = buf.rfind(b"\r", 0, pos1) + 1
+    # курсор стоит на своей строке, и она видна на кадре
+    row = "".join(decode_koi7(bytes([sc.cells[sc.y][x] for x in range(80)])))
+    assert row.rstrip() == line_on_cursor(), (row.rstrip(), line_on_cursor())
+    # страница вниз — возврат к концу
+    for _ in range(5):
+        session.feed_key("KEY_PAGEDOWN")
+    assert session._buf_pos == len(session.buffer)
+    # до верха — курсор у первой строки, кадр показывает начало
+    while session._buf_pos:
+        session.feed_key("KEY_PAGEUP")
+        if session._buf_pos == 0:
+            break
+    assert session._buf_pos == 0
+    row0 = "".join(decode_koi7(bytes([sc.cells[0][x] for x in range(80)])))
+    assert row0.rstrip() == line_on_cursor()
+    # у границы повторный PgUp не ломает (листает историю — её тут нет)
+    session.feed_key("KEY_PAGEUP")
+    assert session._buf_pos == 0
+    # колесо — три строки за щелчок, вниз обратно
+    session.feed_key("KEY_PAGEDOWN")
+    pos_before = session._buf_pos
+    session.feed_key("KEY_WHEELDOWN")
+    assert session._buf_pos > pos_before
+    session.feed_key("KEY_WHEELUP")
+    assert session._buf_pos == pos_before
+
+
+def test_local_pages_fall_back_to_history_for_short_buffer():
+    # Короткий буфер влезает в кадр — PgUp листает «историю» выдачи
+    # (её нет — ничего не происходит), курсор не двигается
+    session, _ = make_session(MODE_LOCAL)
+    for ch in "AB":
+        session.feed_key(ch)
+    pos = session._buf_pos
+    session.feed_key("KEY_PAGEUP")
+    assert session._buf_pos == pos
+    assert session.parser.screen.view_top is None
+
+
+def test_host_pages_still_use_history():
+    # В С ЭВМ PgUp по-прежнему листает историю машинной выдачи
+    session, _ = make_session(MODE_HOST)
+    sc = session.parser.screen
+    for i in range(60):
+        session.parser.feed(f"H{i:02d}\r\n".encode())
+    assert sc.page_printed()
+    session.feed_key("KEY_PAGEUP")
+    assert sc.view_top is not None and sc.view_top > 0
+
+
 def test_pulse_sends_space_once_per_interval():
     # «Пробел поддержки»: раз в интервал в линию уходит пробел, чтобы
     # программы БЭСМ-6 не считали сеанс уснувшим
@@ -461,6 +539,8 @@ def test_incoming_in_autonomous_shown_as_indicator():
     from ie15emu.charset import encode_koi7
     session, _ = make_session(MODE_LOCAL)
     sc = session.parser.screen
+    session.banner_seen = True                  # «КВУ», а не «ПРОВЕРЬ ЛИНИЮ!»
+    session.link.port = None                    # без КАНАЛ= — строка уже
     for ch in "ABC":
         session.feed_key(ch)
     frame_before = [row[:] for row in sc.cells]
@@ -514,6 +594,8 @@ def test_status_line_always_fits_panel_width():
         "ОЧЕНЬ ДЛИННОЕ СООБЩЕНИЕ ЭВМ ЧТОБЫ ЗАПОЛНИТЬ СТРОКУ\r\n".encode())
     assert len(_status(session)) <= COLS, _status(session)
     assert "ОТ ЭВМ=" in _status(session)        # индикатор приоритетнее подсказок
+    # версия не жертвуется ради индикатора — остаётся всегда
+    assert "ВЕРСИЯ=" in _status(session), _status(session)
 
 
 def test_local_f5_deletes_page_from_history():
