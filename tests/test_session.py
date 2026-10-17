@@ -1255,6 +1255,23 @@ def test_host_uppercase_utf8_line():
     assert link.sent == ["М".encode("utf-8")]
 
 
+def test_h2_upper_russian_equals_lower_on_line():
+    # Н2: заглавная русская НЕ превращается в латиницу позиции (дефект:
+    # «ДЕКАБРЬ» уходил на линию как «LTRF,HM» — мусор в файлах КРАБа):
+    # строка ЭВМ одно-регистровая, «Д» и «д» дают один код, линия
+    # получает одно и то же независимо от регистра ввода
+    def line(text):
+        session, link = make_session(MODE_HOST)
+        session.encoding = "utf8"
+        for ch in text:
+            session.emit(session.feed_key(ch))
+        return b"".join(link.sent)
+
+    assert line("ДЕКАБРЬ") == line("декабрь")
+    assert line("ДЕКАБРЬ") == "ДЕКАБРЬ".encode("utf-8")
+    assert line("КРАБ") == "КРАБ".encode("utf-8")
+
+
 def test_banner_sets_encoding():
     # баннер SIMH задаёт направление передачи; для UTF-8 решение
     # остаётся открытым — «Connected to DKS» способно опоздать
@@ -1282,10 +1299,9 @@ def test_dks_line_raw_with_cr_eol():
     assert session.enc_decided
     session.emit(session.feed_key("в"))
     assert link.sent == [b"w"]
-    # в Н2 Shift на русской раскладке меняет алфавит: «В» — клавиша d,
-    # значит её верхний регистр печатает латинскую D
+    # в Н2 регистр ввода не важен: «В» и «в» дают один код (0x97 → 0x77)
     session.emit(session.feed_key("В"))
-    assert link.sent[-1] == b"D"
+    assert link.sent[-1] == b"w"
     session.emit(session.feed_key("KEY_ENTER"))      # ПР ПС → один ПР
     assert link.sent[-1] == b"\r"
     raw = bytes(0x60 + RUS7.index(c) for c in "ВЫД")  # «wyd» от машины
