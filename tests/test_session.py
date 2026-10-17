@@ -200,6 +200,27 @@ def test_local_shift_backspace_without_selection_is_backspace():
     assert session.pending() == typed("A")
 
 
+def test_local_plain_backspace_deletes_selection():
+    # xterm (и часть терминалов) не различает Shift+ВК и обычный ВК —
+    # шлёт для обоих \x7f. Поэтому обычный ВК при открытом выделении
+    # удаляет выделенное (как в любом редакторе), а не знак слева
+    session, _ = make_session(MODE_LOCAL)
+    for ch in "ABCDE":
+        session.feed_key(ch)
+    session.feed_key("KEY_HOME")
+    session.feed_key("KEY_RIGHT")
+    session.feed_key("SELEND")               # выделено от позиции 1 до конца
+    assert session._buf_sel == (1, 5)
+    session.feed_key("KEY_BACKSPACE")        # обычный ВК — а удаляет выделение
+    assert session.pending() == typed("A")
+    assert session._buf_pos == 1
+    assert session._buf_sel is None
+    assert session.last_key == "УДАЛЕНО"
+    # выделения больше нет — следующий ВК стирает знак слева
+    session.feed_key("KEY_BACKSPACE")
+    assert session.pending() == b""
+
+
 def test_local_f5_clears_page_without_history():
     # F5 в АВТОНОМНО удаляет страницу: кадр очищается и в историю НЕ уходит,
     # а сама страница уходит из буфера набора

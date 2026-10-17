@@ -691,15 +691,7 @@ class TerminalSession:
                 self.last_key = "ВЫД: удалить — в АВТОНОМНО"
                 self._update_service()
                 return None
-            sel = self._buf_sel
-            if sel and sel[1] > sel[0]:
-                a, b = sel
-                self.undo.snapshot(self.buffer)        # отменяемая правка
-                del self.buffer[a:b]
-                self._buf_pos = a
-                self._buf_sel_reset()
-                if self.echo:
-                    self._redraw_echo()
+            if self._buf_del_selection():
                 self.last_key = "УДАЛЕНО"
                 self._update_service()
                 self._update_status()
@@ -720,6 +712,14 @@ class TerminalSession:
             return None
         if self.mode == MODE_HOST:
             return data        # очередь эхо-ответа ведёт emit()
+        # АВТОНОМНО: обычный ВК при открытом выделении удаляет его (как в
+        # редакторах). Это же закрывает терминалы, где Shift+Backspace не
+        # различим: xterm шлёт для Shift+ВК и обычного ВК один \x7f.
+        if key == "KEY_BACKSPACE" and self._buf_del_selection():
+            self.last_key = "УДАЛЕНО"
+            self._update_service()
+            self._update_status()
+            return None
         # АВТОНОМНО: набор правится по позиции курсора в буфере — вставка
         # (Insert, по умолчанию) сдвигает хвост вправо, замена пишет поверх
         # знака под курсором; Home/Enter/Bks двигают и экранный курсор.
@@ -910,6 +910,24 @@ class TerminalSession:
         """Снять выделение набора целиком (подсветка и диапазон)."""
         self._buf_sel_hide()
         self._buf_sel = None
+
+    def _buf_del_selection(self) -> bool:
+        """Удалить выделенный фрагмент набора (Shift+Home/End и т.п.).
+
+        True — фрагмент был и удалён. Отдельный снимок для отмены делает
+        сама (в общий путь правки её уже вставил вызывающий).
+        """
+        sel = self._buf_sel
+        if not sel or sel[1] <= sel[0]:
+            return False
+        a, b = sel
+        self.undo.snapshot(self.buffer)          # отменяемая правка
+        del self.buffer[a:b]
+        self._buf_pos = a
+        self._buf_sel_reset()
+        if self.echo:
+            self._redraw_echo()
+        return True
 
     def _buf_sel_show(self) -> int:
         """Подсветить выделенный фрагмент набора на кадре.
