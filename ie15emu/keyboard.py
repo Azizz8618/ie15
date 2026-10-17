@@ -52,6 +52,7 @@
 """
 from __future__ import annotations
 
+import base64
 import re
 from pathlib import Path
 
@@ -496,6 +497,35 @@ def _parse_mod_key(data: bytes, i: int):
     return "", m.end() - i            # Alt/прочие «~»-формы — гасим
 
 
+def _parse_osc52(data: bytes, i: int):
+    """Ответ терминала на запрос буфер обмена (OSC 52): base64 → текст.
+
+    Вставка из внешнего источника (Ctrl+Shift+V): эмулятор шлёт
+    «ESC ] 52 ; c ; ? », терминал отвечает «ESC ] 52 ; c ; <base64> BEL»
+    (или ST). Текст возвращается как нажатие — дальше он проходит ту же
+    перекодировку, что и ручной набор (encode_koi7 → линия/буфер).
+
+    Возвращает (текст, сколько байт съели); текст «» — ответ съеден,
+    но пуст (терминал буфер отдать не захотел), None/0 — это не он.
+    """
+    for term in (b"\x07", b"\x1b\\"):         # BEL или ST
+        m = re.match(rb"\x1b\]52;[^;\x07\x1b]*;"
+                     rb"([^\x07\x1b]*)" + re.escape(term), data[i:])
+        if m:
+            payload = m.group(1)
+            if not payload:
+                return "", m.end() - i        # терминал не отдал буфер
+            try:
+                text = base64.b64decode(payload, validate=True).decode("utf-8")
+            except Exception:
+                return "", m.end() - i        # мусор — гасим молча
+            # управляющие из буфера обмена не заводим: ESC сломал бы
+            # разбор эха, ПР ПС приводим к одному разделителю буфера
+            text = text.replace("\x1b", "").replace("\r\n", "\n")
+            return text, m.end() - i
+    return None, 0
+
+
 def _parse_mouse(data: bytes, i: int):
     """Мышь терминала, отданная приложению.
 
@@ -582,6 +612,24 @@ def normalize_combo(s: str) -> str:
     return "+".join([m for m in _COMBO_MODS if m in mods] + [rest])
 
 
+def _utf8_tail(data: bytes) -> bytes:
+    """Недобор многобайтового символа UTF-8 в конце куска (если есть).
+
+    Вставка из внешнего источника (буфер обмена) — UTF-8, и `os.read`
+    рвёт её где угодно: без удержания хвоста вторая половина буквы
+    уезжала бы в набор отдельными байтами («Ð¼» вместо «м»).
+    """
+    for back in range(1, 4):
+        if back > len(data):
+            break
+        b = data[-back]
+        if 0xC2 <= b <= 0xF4:               # начало 2..4-байтовой формы
+            need = 2 if b < 0xE0 else 3 if b < 0xF0 else 4
+            if back < need:                 # продолжений не хватает — ждём
+                return data[-back:]
+    return b""
+
+
 def split_incomplete(data: bytes) -> tuple[bytes, bytes]:
     """Разделить данные на разобранное и недобранный хвост escape-последовательности.
 
@@ -595,28 +643,38 @@ def split_incomplete(data: bytes) -> tuple[bytes, bytes]:
     Правило: у CSI финальный байт — 0x40…0x7E, а всё до него параметры
     (0x20…0x3F). Пока параметры идут и финального байта нет — ждём. Отдельно
     «ESC [ M»: это старая мышь X10, за ней обязательно ещё три байта.
+    Аналогично ждём завершителя OSC (BEL/ST) и недобор многобайтовой
+    буквы UTF-8 (вставка из буфера обмена).
 
     Возвращает (полная часть, хвост).
     """
-    i = data.rfind(b"\x1b")
+    hold = _utf8_tail(data)                 # недобор UTF-8-буквы в конце
+    core = data[:len(data) - len(hold)] if hold else data
+    i = core.rfind(b"\x1b")
     if i < 0:
-        return data, b""
-    tail = data[i:]
+        return core, hold
+    tail = core[i:]
     n = len(tail)
     if n == 1:                          # ждём знака после ESC
-        return data[:-1], tail
+        return core[:-1], tail + hold
     if tail[:2] == b"\x1b[":
         rest = tail[2:]
         if not rest or all(0x20 <= c <= 0x3F for c in rest):
-            return data[:-n], tail       # параметры идут, финального нет
+            return core[:-n], tail + hold   # параметры идут, финального нет
         if rest[0] == 0x4D and n < 6:    # «ESC [ M» + код,x,y — мышь X10
-            return data[:-n], tail
-        return data, b""                 # финальный байт есть — разбираем
+            return core[:-n], tail + hold
+        return core, hold                 # финальный байт есть — разбираем
+    if tail[:2] == b"\x1b]":
+        # OSC-ответ (буфер обмена OSC52): ждём завершителя BEL или ST
+        body = tail[2:]
+        if b"\x07" in body or b"\x1b\\" in body:
+            return core, hold
+        return core[:-n], tail + hold
     if tail[:2] == b"\x1bO":
-        return data, b""                 # SS3 («ESC O A») приходит целиком
+        return core, hold                 # SS3 («ESC O A») приходит целиком
     if n < 8 and any(seq.startswith(tail) for seq in SEQ_KEYS):
-        return data[:-n], tail           # префикс известной последовательности
-    return data, b""
+        return core[:-n], tail + hold       # префикс известной последовательности
+    return core, hold
 
 
 def decode_keys(data: bytes, pending: bytes = b"") -> tuple[list[str], bytes]:
@@ -658,6 +716,12 @@ def decode_key_bytes(data: bytes) -> list[str]:
             if name is not None:               # событие мыши (SGR)
                 if name:
                     out.append(name)
+                i += adv
+                continue
+            name, adv = _parse_osc52(data, i)
+            if name is not None:               # ответ на запрос буфера ОС
+                if name:
+                    out.append(name)           # текст вставки → перекодировка
                 i += adv
                 continue
             name, adv = _parse_csi_u(data, i)

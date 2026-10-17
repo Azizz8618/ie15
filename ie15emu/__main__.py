@@ -411,6 +411,9 @@ def run_line(parser: Parser, url: str, png: str | None,
     mouse = False
     if fd is not None:
         tty.setcbreak(fd)
+        # управляющие последовательности терминалу (буфер обмена OSC52):
+        # тот же вывод, которым ниже включаются мышь и CSI-u
+        session.term_write = _esc
         # экран собирается абсолютной позицией — настоящая каретка не нужен
         sys.stdout.write("\x1b[?25l")
         # Мышь — приложению: 1000 (кнопки) + 1002 (движение при нажатой

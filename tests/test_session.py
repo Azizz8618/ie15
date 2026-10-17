@@ -647,6 +647,112 @@ def test_notice_line_only_in_autonomous():
     assert session.parser.screen.notice == ""
 
 
+# --- вставка из внешнего источника (буфер обмена ОС) --------------------
+
+def test_paste_utf8_split_recodes():
+    # Вставка из внешнего источника — UTF-8, а os.read рвёт её где угодно:
+    # вторая половина многобайтовой буквы не должна уезжать в набор
+    # отдельным байтом («Ð¼» вместо «м»)
+    from ie15emu.keyboard import decode_keys
+    text = "привет, мир! строка вставки"
+    data = text.encode()
+    cut = data.index("м".encode()) + 1         # разрез посреди буквы
+    k1, tail = decode_keys(data[:cut])
+    k2, tail2 = decode_keys(data[cut:], tail)
+    assert tail2 == b""
+    assert "".join(k1 + k2) == text, "".join(k1 + k2)
+    # и итоговая перекодировка в буфер — обратима
+    session, _ = make_session(MODE_LOCAL)
+    for k in k1 + k2:
+        session.feed_key(k)
+    from ie15emu.charset import decode_koi7
+    # Н2 — одно-регистровая строка: строчные хранятся/показываются
+    # заглавными (семантика набора); важно, что мусора («Ð¼») нет
+    assert decode_koi7(bytes(session.buffer)) == text.upper()
+
+
+def test_osc52_reply_pastes_with_recoding():
+    # Ответ терминала на запрос буфера (OSC 52) → текст проходит обычную
+    # перекодировку: в АВТОНОМНО — в буфер набора, откуда и уходит по SEND
+    import base64
+    from ie15emu.charset import decode_koi7
+    from ie15emu.keyboard import decode_keys
+    text = "вставка: Привет!"
+    payload = base64.b64encode(text.encode()).decode()
+    keys, tail = decode_keys(f"\x1b]52;c;{payload}\x07".encode())
+    assert keys == [text] and tail == b"", (keys, tail)
+    session, _ = make_session(MODE_LOCAL)
+    session.feed_key(keys[0])
+    assert decode_koi7(bytes(session.buffer)) == text
+    assert "ВСТАВКА" in session.last_key
+    # ответ, разорванный между чтениями, тоже собирается
+    full = f"\x1b]52;c;{payload}\x07".encode()
+    k1, t1 = decode_keys(full[:9])
+    k2, t2 = decode_keys(full[9:], t1)
+    assert k1 + k2 == [text]
+    # мусорный base64 — молча гасится
+    assert decode_keys(b"\x1b]52;c;!!!\x07")[0] == []
+
+
+def test_clipboard_combos_never_reach_line():
+    # Ctrl+Shift+C/V: без этого нажатие разбиралось бы как УП Ctrl+C/Ctrl+V
+    # (0x03/0x16) и уходило в линию мусором
+    session, link = make_session(MODE_HOST)
+    session.feed_key("ctrl+shift+c")
+    session.feed_key("ctrl+shift+v")
+    assert link.sent == []
+    assert "OSC52" in session.last_key or "ВЫД" in session.last_key
+    # с подключённым терминалом уходят команды буфера обмена (SET и GET)
+    session, link = make_session(MODE_LOCAL)
+    sent = []
+    session.term_write = sent.append
+    session.parser.screen.selections = [[("frame", 0, 0, 4, "ВЫД")]]
+    session.feed_key("ctrl+shift+c")
+    session.feed_key("ctrl+shift+v")
+    assert any(s.startswith(b"\x1b]52;c;") and not s.endswith(b"?\x07")
+               for s in sent), sent          # копирование выделенного
+    assert any(s.endswith(b"?\x07") for s in sent), sent   # запрос вставки
+    assert link.sent == []                    # в линию — тишина
+    # без term_write (headless/тесты) — молча, без исключений
+    session2, _ = make_session(MODE_LOCAL)
+    session2.feed_key("ctrl+shift+v")
+    assert "не поддерживает" in session2.last_key
+
+
+def test_echo_starts_below_machine_content():
+    # При переходе в АВТОНОМНО набор НЕ стирает уже имеющееся на кадре
+    # (вывод ЭВМ) — эхо «спускается» ниже последней занятой строки; если
+    # места внизу нет, кадр сдвигается вверх и строки уходят в историю
+    session, _ = make_session(MODE_HOST)
+    sc = session.parser.screen
+    session.handle_line_reply("СТРОКА ПЕРВАЯ ЭВМ\r\n".encode())
+    session.handle_line_reply("ВТОРАЯ СТРОКА ЭВМ\r\n".encode())
+    top_text = (session.parser.screen.row_text("frame", 0),
+                session.parser.screen.row_text("frame", 1))
+    session.toggle_mode()                       # → АВТОНОМНО
+    session.feed_key("X")
+    assert session.parser.screen.row_text("frame", 0) == top_text[0], \
+        "первая строка ЭВМ уничтожена набором"
+    assert session.parser.screen.row_text("frame", 1) == top_text[1], \
+        "вторая строка ЭВМ уничтожена набором"
+    assert session.buffer                         # набор состоялся
+    assert session._echo_top == sc.last_used() - 1 or session._echo_top >= 2
+
+    # кадр целиком занят — набор сдвигает кадр, строки ЭВМ в истории
+    session2, _ = make_session(MODE_HOST)
+    sc2 = session2.parser.screen
+    for i in range(sc2.rows):              # кадр занят целиком, включая
+        # строку под курсором (без ПС в конце — иначе останется пустой
+        # ряд, куда набор влезет и кадр не сдвинется)
+        end = "" if i == sc2.rows - 1 else "\r\n"
+        session2.handle_line_reply(f"СТРОКА {i:02d}{end}".encode())
+    hist_before = len(sc2.history)
+    session2.toggle_mode()
+    session2.feed_key("Y")
+    assert session2.buffer, "набор при полном кадре не состоялся"
+    assert len(sc2.history) > hist_before, "строки ЭВМ не ушли в историю"
+
+
 def test_incoming_drawn_in_host_mode():
     # в С ЭВМ ничего не изменилось: сообщение идёт в кадр, индикатора нет
     from ie15emu.charset import encode_koi7

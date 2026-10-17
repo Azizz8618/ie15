@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import base64
 import re
 import time
 
@@ -202,6 +203,10 @@ class TerminalSession:
         self.pulse_interval = PULSE_INTERVAL
         self._pulse_next = time.time() + PULSE_INTERVAL
         self._pulse_echo_until = 0.0
+        # запись управляющих последовательностей НАПРЯМУЮ терминалу
+        # (буфер обмена OSC52: копирование/вставка); ставит run_line,
+        # None — писать некуда (тесты, headless)
+        self.term_write = None
         self.mouse_on = False   # мышь терминала отдана эмулятору (F-подвал)
         self._banner_tail = b""      # недобранная строка баннера
         self._banner_done = False    # баннер закончился (пошли данные ЭВМ)
@@ -415,6 +420,15 @@ class TerminalSession:
             # ВК, F-клавиши…) заканчивает текущий шаг отмены — следующая
             # правка начнёт новый, а Ctrl+U откатит до этой границы
             self.undo.step()
+        if key.lower() in ("ctrl+shift+c", "ctrl+shift+v"):
+            # копирование/вставка из внешних источников (буфер обмена ОС).
+            # Без этого ветки нажатие разбиралось бы как УП Ctrl+C/Ctrl+V
+            # (0x03/0x16) и уходило бы в линию мусором; сами по себе
+            # терминалы эти клавиши перехватывают (обычно Ctrl+Shift+V и
+            # вставляет текст — тогда приходит уже текст, он и
+            # перекодируется ниже по обычному пути)
+            self._ext_clip(key)
+            return None
         arrow = "" if orig == key else f"{orig}→"
         hint = CONTROL_HINTS.get(key)
         if hint:
@@ -436,6 +450,13 @@ class TerminalSession:
                 return None
         elif len(key) == 1:
             self.last_key = arrow + f"{key} U+{ord(key):04X}"
+            self._update_service()
+        elif len(key) > 1 and not is_key_combo(key) \
+                and not key.startswith(("KEY_", "MOUSE", "ctrl+MOUSE")):
+            # многосимвольное нажатие — вставка из буфера обмена (OSC52)
+            # или --feed: идёт обычной перекодировкой, в подвале — размер
+            # (имена KEY_/MOUSE сюда не попадают — у них свои подсказки)
+            self.last_key = f"ВСТАВКА: {len(key)} зн."
             self._update_service()
         if key == "KEY_PAGEUP":
             # АВТОНОМНО с буфером больше кадра — листаем сам набор (см.
@@ -853,7 +874,30 @@ class TerminalSession:
             self.undo.step()
         if self.echo:
             if not buffered:
-                self._echo_top = self.parser.screen.y
+                # Первая строка набора НЕ стирает уже имеющееся на кадре
+                # (вывод ЭВМ из режима С ЭВМ, оставшийся после перехода
+                # в АВТОНОМНО): эхо начинается ниже последней ЗАНЯТОЙ
+                # строки — «спускается» вниз (пустой кадр — с обычного
+                # места курсора). Если место внизу кончилось, кадр
+                # сдвигается вверх — ушедшие строки ЭВМ уходят в
+                # «историю», а не пропадают.
+                sc = self.parser.screen
+                bottom = 0
+                for y in range(sc.rows - 1, -1, -1):
+                    if any(c != 0x20 for c in sc.cells[y]):
+                        bottom = y + 1
+                        break
+                top = max(sc.y, bottom)
+                while top >= sc.rows:
+                    sc.scroll_up()
+                    # содержимое сдвинулось вверх — низ ищем заново
+                    bottom = 0
+                    for y in range(sc.rows - 1, -1, -1):
+                        if any(c != 0x20 for c in sc.cells[y]):
+                            bottom = y + 1
+                            break
+                    top = max(sc.y, bottom)
+                self._echo_top = top
             self._redraw_echo()
         self._update_service()
         self._update_status()       # счётчик отмены «ОТМЕНА=» в строке
@@ -1260,12 +1304,15 @@ class TerminalSession:
         if self._echo_top is None:
             return
         sc = self.parser.screen
-        # ряд до которой стираем: курсор или нижний край напечатанного
-        # блока (содержимое могло быть длиннее — уехало при печати)
+        # верх: `_echo_top` может быть и НИЖЕ курсора — первый набор после
+        # перехода в АВТОНОМНО начинается под уже имеющимся выводом ЭВМ,
+        # прижимать его к курсору (к строке ЭВМ) нельзя — стёрли бы её
+        top = max(0, min(self._echo_top, sc.rows - 1))
+        # низ стирания: курсор или нижний край напечатанного блока
+        # (содержимое могло быть длиннее — уехало при печати)
         y_end = min(max(sc.y, self._echo_bottom or 0), sc.rows - 1)
-        # верх: `_echo_top` считается от нулевого знака буфера и может
-        # быть отрицательным (печать уезжала вверх) — кадр начинается с нуля
-        top = max(0, min(self._echo_top, y_end))
+        if y_end < top:
+            y_end = top
         # Стираем ряды ОЗУ напрямую, а не ESC-командами через парсер:
         # в наборе команд №1 (Н0/Н1) ESC в парсер игнорируется, и
         # «ESC Y … ESC K» печатался бы в кадр буквально — «Y  K».
@@ -1294,6 +1341,40 @@ class TerminalSession:
     def pending(self) -> bytes:
         """Ожидает ли буфер передачи (что на реальном терминале гасит РТ)."""
         return bytes(self.buffer)
+
+    def _ext_clip(self, key: str) -> None:
+        """Копирование/вставка с внешним буфером обмена (OSC52).
+
+        Ctrl+Shift+C — выделенное (КОИ7 → Unicode → base64) уходит в буфер
+        обмена ОС; Ctrl+Shift+V — запрос в буфер ОС: терминал отвечает
+        текстом, ответ разбирает `_parse_osc52`, а дальше текст идёт
+        обычным путём вставки — с полной перекодировкой (encode_koi7 →
+        линия в С ЭВМ, буфер в АВТОНОМНО).
+
+        Если терминал такие клавиши перехватывает сам (обычно и вставляет
+        сам — тогда приходит уже текст) или протокол не поддерживает —
+        молчим с подсказкой, в линию ничего не уходит.
+        """
+        want_paste = key.lower().endswith("+v")
+        if not want_paste:
+            text = self.parser.screen.sel_text()
+            if not text:
+                self.last_key = "ВЫД: пусто — копировать нечего"
+            elif self.term_write:
+                payload = base64.b64encode(
+                    text.replace("\r\n", "\n").encode("utf-8")).decode()
+                self.term_write(f"\x1b]52;c;{payload}\x07".encode())
+                self.last_key = f"В БУФЕРЕ ОС: {len(text)} зн."
+            else:
+                self.last_key = "КОПИЯ: терминал не поддерживает OSC52"
+        else:
+            if self.term_write:
+                self.term_write(b"\x1b]52;c;?\x07")
+                self.last_key = "ЗАПРОС ВСТАВКИ ИЗ ОС"
+            else:
+                self.last_key = "ВСТАВКА: терминал не поддерживает OSC52"
+        self._update_service()
+        self._update_status()
 
     def mark_line_lost(self, why: str = "") -> None:
         """Линия потеряна: сеанс продолжается (АВТОНОМНО работает и без неё).
