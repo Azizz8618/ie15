@@ -26,7 +26,7 @@ from .keyboard import (DEFAULT_LAYOUT, ctrl_code, is_key_combo, key_to_bytes,
                        KEY_CTRLSELDOWN, KEY_CTRLSELLEFT, KEY_CTRLSELRIGHT,
                        KEY_CTRLSELUP, KEY_SELDOWN, KEY_SELLEFT,
                        KEY_SELRIGHT, KEY_SELUP,
-                       KEY_SELHOME, KEY_SELEND, KEY_SELBSPACE)
+                       KEY_SELHOME, KEY_SELEND, KEY_SELBSPACE, KEY_HELP)
 from .screen import HELP, RULE, cell_text, mk
 from .undo import DEFAULT_UNDO, UndoStack
 
@@ -51,7 +51,7 @@ CONTROL_HINTS = {
     "SELHOME": "ВЫД=^ДОМ", "SELEND": "ВЫД=^КОНЕЦ",
     "SELBSPACE": "ВК-ВЫДЕЛ",
     "SEND": "SEND", "MODE": "СЕАНС", "CMDSET": "НАБОР", "BLINK": "УПР.СИМВ",
-    "ECHO": "ЭХО", "CLEAR": "ОЧИСТКА",
+    "ECHO": "ЭХО", "CLEAR": "ОЧИСТКА", "HELP": "СПРАВКА=F12",
 }
 
 
@@ -254,6 +254,12 @@ class TerminalSession:
             st("БУФЕР=", str(len(self.buffer)) if self.buffer else "ПУСТО"),
             st("УПР.СИМВ=", "ВКЛ" if self.parser.show_ctrl else "ВЫКЛ"),
             last,                                   # «ПОСЛ» — свой ряд
+        ]
+        # справка скрыта — подсказка, как её вернуть: эта ячейка живёт в
+        # зоне состояний (до RULE/HELP) и вместе со справкой не прячется
+        if not sc.show_help:
+            state.append(mk(("СПРАВКА=F12", "edit")))
+        state += [
             RULE,                                 # состояние от справки
             HELP,                                 # дальше — справка (можно убрать)
             # F-клавиши — верхним рядом справки, по порядку F5…F10
@@ -621,6 +627,16 @@ class TerminalSession:
             return None
         if key == "BLINK":
             self.parser.show_ctrl = not self.parser.show_ctrl
+            self._update_service()
+            return None
+        if key == KEY_HELP:
+            # F12 — справка подвала в ходе сеанса: прячет/показывает
+            # ряды-легенды (состояние и «ПОСЛ» не трогаются). При скрытой
+            # справке подвал сам подсказывает, как её вернуть («СПРАВКА=F12»)
+            sc_help = self.parser.screen
+            sc_help.set_help(not sc_help.show_help)
+            self.last_key = "СПРАВКА ВКЛ" if sc_help.show_help \
+                else "СПРАВКА СКРЫТА"
             self._update_service()
             return None
         move = {"KEY_CTRLRIGHT": "word_right", "KEY_CTRLLEFT": "word_left",

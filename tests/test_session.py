@@ -229,6 +229,30 @@ def test_local_plain_backspace_deletes_selection():
     assert session.pending() == b""
 
 
+def test_help_toggles_during_session():
+    # F12 прячет/показывает справку подвала в ходе сеанса; состояния
+    # и «ПОСЛ» при этом остаются на месте
+    from ie15emu.keyboard import decode_key_bytes
+    session, link = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    assert sc.show_help is True
+    assert "СБРОС=F3" in panel_text(sc)          # легенда видна
+    assert session.feed_key("HELP") is None      # в линию не уходит
+    assert sc.show_help is False
+    assert "СБРОС=F3" not in panel_text(sc)      # легенда скрыта
+    assert "СЕТЬ=" in panel_text(sc)             # состояние осталось
+    assert link.sent == []
+    # пока справка скрыта — подвал подсказывает, как её вернуть
+    assert "СПРАВКА=F12" in panel_text(sc)
+    session.feed_key("HELP")                     # второй раз — обратно
+    assert sc.show_help is True
+    assert "СБРОС=F3" in panel_text(sc)
+    assert "СПРАВКА=F12" not in panel_text(sc)
+    # F12 (и запасная форма F1) распознаются из байтов терминала
+    for seq in (b"\x1b[24~", b"\x1b[11~", b"\x1bOP", b"\x1b[[A"):
+        assert decode_key_bytes(seq) == ["HELP"], seq
+
+
 def test_local_f5_clears_page_without_history():
     # F5 в АВТОНОМНО удаляет страницу: кадр очищается и в историю НЕ уходит,
     # а сама страница уходит из буфера набора
@@ -2066,18 +2090,21 @@ def test_clear_key_clears_visible_page_in_wide_window(monkeypatch):
 
 def test_console_f_keys():
     # Linux-консоль (TERM=linux, KEYMAP ruwin-*) шлёт F1–F5 старым
-    # форматом ESC[[A…E: F5 — ОЧИСТКА, F3/F4 — снятие/взятие выделения
+    # форматом ESC[[A…E: F1 — справка подвала, F5 — ОЧИСТКА,
+    # F3/F4 — снятие/взятие выделения
     from ie15emu.keyboard import (KEY_CLEAR, KEY_SELCLEAR, KEY_SELTAKE,
-                                  decode_key_bytes)
+                                  KEY_HELP, decode_key_bytes)
     assert decode_key_bytes(b"\x1b[[E") == [KEY_CLEAR]
     assert decode_key_bytes(b"\x1b[[C") == [KEY_SELCLEAR]
     assert decode_key_bytes(b"\x1b[[D") == [KEY_SELTAKE]
-    # остальные ESC[[… консоли (F1/F2) в линию не уходят: ESC гасится,
+    assert decode_key_bytes(b"\x1b[[A") == [KEY_HELP]   # консольное F1
+    # остальная ESC[[… консоли (F2) в линию не уходит: ESC гасится,
     # скобка и буква — печатные знаки (безопасный fallback)
-    assert decode_key_bytes(b"\x1b[[A") == ["KEY_ESC", "[", "[", "A"]
-    # xterm-формы не задеты
+    assert decode_key_bytes(b"\x1b[[B") == ["KEY_ESC", "[", "[", "B"]
+    # xterm-формы не задеты; F12 — основная клавиша справки
     assert decode_key_bytes(b"\x1b[15~") == [KEY_CLEAR]
     assert decode_key_bytes(b"\x1b[13~") == [KEY_SELCLEAR]
+    assert decode_key_bytes(b"\x1b[24~") == [KEY_HELP]
 
 
 def test_kbd_selection_shift_arrows(monkeypatch):
