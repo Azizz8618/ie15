@@ -21,7 +21,7 @@ from pathlib import Path
 
 from . import COLS, ROWS, __version__
 from .charset import Charset, encode_koi7
-from .keyboard import DEFAULT_LAYOUT, decode_keys, key_to_bytes
+from .keyboard import DEFAULT_LAYOUT, decode_keys, group_paste, key_to_bytes
 from .link import LinkError, open_link
 from .parser import Parser
 from .render import to_png_bytes, to_text
@@ -409,8 +409,13 @@ def run_line(parser: Parser, url: str, png: str | None,
     old = termios.tcgetattr(fd) if fd is not None else None
     csi_u = False
     mouse = False
+    bracketed = False           # вставка в квадратных скобках (2004)
+    kb_head = b""               # ввод, съеденный пробой CSI-u (см. ниже)
     if fd is not None:
-        tty.setcbreak(fd)
+        # TCSADRAIN, а не TCSAFLUSH: сброс входящего ввода на старте
+        # затирал всё, что пользователь успел ввести/вставить до cbreak
+        # (вставка «в первые мгновения» терялась целиком)
+        tty.setcbreak(fd, termios.TCSADRAIN)
         # управляющие последовательности терминалу (буфер обмена OSC52):
         # тот же вывод, которым ниже включаются мышь и CSI-u
         session.term_write = _esc
@@ -426,6 +431,12 @@ def run_line(parser: Parser, url: str, png: str | None,
             session.mouse_on = True
             session._update_service()
             session._update_status()      # «МЫШЬ=ВКЛ» в строке состояния
+        # Bracketed paste: терминал оборачивает вставку из буфера обмена
+        # (Ctrl+Shift+V) в «ESC [ 200 ~ … ESC [ 201 ~» — границы вставки
+        # видны точно, без тайминговой догадки (group_paste остаётся
+        # запасным путём для терминалов без такой поддержки)
+        _esc(b"\x1b[?2004h")
+        bracketed = True
         # Опрос протокола CSI-u: kitty/foot/wezterm/alacritty отвечают
         # «ESC [ ? флаги u» — тогда просим кодировать нажатия с
         # модификаторами отдельно (ctrl+Б перестаёт дублировать знак)
@@ -438,6 +449,12 @@ def run_line(parser: Parser, url: str, png: str | None,
                     sys.stdout.buffer.write(b"\x1b[>1u")
                     sys.stdout.buffer.flush()
                     csi_u = True
+                elif probe:
+                    # это не ответ протокола, а НАСТОЯЩИЙ ввод —
+                    # пользователь уже печатает/вставляет. Проба не должна
+                    # его съедать (в т.ч. начало вставки с меткой 200~):
+                    # возвращаем в разбор клавиш
+                    kb_head = probe
         except OSError:
             pass
         say("[клавиши] " + (
@@ -456,12 +473,44 @@ def run_line(parser: Parser, url: str, png: str | None,
         _install_winch(fit)         # кадр сам дотягивается до низа окна
     dirty = True                         # первый кадр рисуем сразу
     kb_pending = b""                     # недобранный хвост escape-последовательности
+    paste_until = 0.0                    # до какого срока чтение — вставка
     keylog = _open_keylog(keylog)        # диагностика клавиш (--keylog)
     end_reason = ""                      # чем закончился сеанс (в журнал)
+
+    def _key_chunk(chunk: bytes) -> None:
+        """Одно чтение клавиш: разбор (с недобранными хвостами), счёт
+        вставки, запись в --keylog и отдача ключей сессии."""
+        nonlocal kb_head, kb_pending, paste_until, dirty
+        if kb_head:                 # ввод, съеденный пробой CSI-u
+            chunk, kb_head = kb_head + chunk, b""
+        # недобранный хвост escape-последовательности ждёт следующих
+        # байтов: os.read отдаёт нажатие по частям, и разорванная
+        # последовательность рассыпалась бы в знаки («[» вместо Ctrl+E)
+        pending_before = kb_pending
+        decoded, kb_pending = decode_keys(chunk, kb_pending)
+        # Взрыв знаков одного чтения — буфер обмена терминала
+        # (своя вставка Ctrl+Shift+V), а не набор: одним ключом,
+        # чтобы Н2 не портил заглавные посимвольной сменой
+        # алфавита («ВНИМАНИЕ» → «DYBVFYBT» — мусор)
+        keys, paste_until = group_paste(decoded, time.monotonic(), paste_until)
+        if keylog:
+            # диагностика клавиш: что реально прислал терминал
+            # и как это разобрано (хвост — на случай разрыва)
+            line = (f"raw={chunk!r} pending={pending_before!r}"
+                    f" -> {decoded!r} tail={kb_pending!r}")
+            if keys != decoded:
+                line += f" grouped={keys!r}"   # вставка
+            keylog.write(line + "\n")
+            keylog.flush()
+        for key in keys:
+            session.emit(session.feed_key(key))
+            dirty = True           # АВТОНОМНО: эхо в ОЗУ без ответа линии
+
     try:
         while seconds <= 0 or time.time() - t0 < seconds:
             try:
-                fds = [link_sock(link)] if link_sock(link) is not None else []
+                link_fd = link_sock(link)
+                fds = [link_fd] if link_fd is not None else []
                 if fd is not None:
                     fds.append(fd)
                 if fds:
@@ -470,41 +519,41 @@ def run_line(parser: Parser, url: str, png: str | None,
                     ready, _ = [], None
                     time.sleep(0.05)
                 dirty = False
-                if fd is not None and fd in ready:
-                    chunk = os.read(fd, 256)
-                    # недобранный хвост escape-последовательности ждёт следующих
-                    # байтов: os.read отдаёт нажатие по частям, и разорванная
-                    # последовательность рассыпалась бы в знаки («[» вместо Ctrl+E)
-                    pending_before = kb_pending
-                    keys, kb_pending = decode_keys(chunk, kb_pending)
-                    if keylog:
-                        # диагностика клавиш: что реально прислал терминал
-                        # и как это разобрано (хвост — на случай разрыва)
-                        keylog.write(f"raw={chunk!r} pending={pending_before!r}"
-                                     f" -> {keys!r} tail={kb_pending!r}\n")
-                        keylog.flush()
-                    for key in keys:
-                        session.emit(session.feed_key(key))
-                        dirty = True       # АВТОНОМНО: эхо в ОЗУ без ответа линии
+                kb_ready = fd is not None and fd in ready
+                if kb_ready:
+                    # Дочитать весь накопившийся ввод за эту итерацию:
+                    # по 256 байт на шаг вставка шла бы ползком — каждый
+                    # шаг оплачивался ожиданием link.recv() (блокирующий
+                    # таймаут сокета линии), ~150 мс на чтение
+                    while True:
+                        chunk = os.read(fd, 256)
+                        if not chunk:
+                            break
+                        _key_chunk(chunk)
+                        if not select.select([fd], [], [], 0)[0]:
+                            break
                 if not getattr(link, "owns_stdin", False) and not session.line_lost:
                     # линия stdio:// читает тот же stdin, что и клавиатура: её
                     # recv() забирал бы хвост escape-последовательности («ESC [ 1 ; 2 F»)
-                    # из-под разбора клавиш — в кадр попадал бы мусор вида «ШХШ1;2Ф»
-                    try:
-                        data = link.recv()
-                    except (LinkError, OSError) as e:
-                        # линия потеряна (таймаут SSH, разрыв сети) — сеанс НЕ
-                        # завершаем: в АВТОНОМНО набор и правка работают без неё,
-                        # в строке состояния горит «ЛИНИЯ=НЕТ»
-                        if not session.line_lost:
-                            say(f"[линия] {e} — сеанс продолжается "
-                                f"(АВТОНОМНО доступен, отправка в линию "
-                                f"выключена)")
-                        session.mark_line_lost(str(e))
-                        data = b""
-                    if data:
-                        session.handle_line_reply(data)
-                        dirty = True
+                    # из-под разбора клавиш — в кадр попадал бы мусор вида «ШХШ1;2Ф».
+                    # recv() — блокирующий (таймаут сокета): пока ввод льётся
+                    # (вставка), его пропускаем — линию дочитаем на холостом ходу
+                    if link_fd is None or link_fd in ready or not kb_ready:
+                        try:
+                            data = link.recv()
+                        except (LinkError, OSError) as e:
+                            # линия потеряна (таймаут SSH, разрыв сети) — сеанс НЕ
+                            # завершаем: в АВТОНОМНО набор и правка работают без неё,
+                            # в строке состояния горит «ЛИНИЯ=НЕТ»
+                            if not session.line_lost:
+                                say(f"[линия] {e} — сеанс продолжается "
+                                    f"(АВТОНОМНО доступен, отправка в линию "
+                                    f"выключена)")
+                            session.mark_line_lost(str(e))
+                            data = b""
+                        if data:
+                            session.handle_line_reply(data)
+                            dirty = True
                 now = time.time()
                 if now - last_stamp >= 60:  # часы в строке состояния — раз в минуту
                     session._update_status()
@@ -555,6 +604,8 @@ def run_line(parser: Parser, url: str, png: str | None,
         if fd is not None:
             if mouse:
                 _esc(b"\x1b[?1006l\x1b[?1002l\x1b[?1000l")
+            if bracketed:
+                _esc(b"\x1b[?2004l")     # bracketed paste — выкл
             if csi_u:
                 sys.stdout.write("\x1b[<1u")
             sys.stdout.write("\x1b[?25h")

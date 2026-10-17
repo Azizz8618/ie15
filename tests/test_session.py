@@ -719,6 +719,102 @@ def test_clipboard_combos_never_reach_line():
     assert "не поддерживает" in session2.last_key
 
 
+def test_terminal_own_paste_is_faithful():
+    # Терминал со СВОЕЙ вставкой (Ctrl+Shift+V уровня терминала) шлёт
+    # буфер обмена обычным потоком знаков: в Н2 каждый заглавный уходит
+    # посимвольной сменой алфавита (правило клавиатуры) — копирование
+    # в буфер ОС возвращается мусором «DYBVFYBT…». Группировка взрыва
+    # (group_paste) собирает чтение одним ключом — перекодировка верная.
+    from ie15emu.charset import decode_koi7, encode_koi7
+    from ie15emu.keyboard import group_paste, key_to_bytes
+
+    text = "ВНИМАНИЕ: ТЕРМ-20 ОТКЛЮЧЕН"
+    session, _ = make_session(MODE_LOCAL)
+    keys, _ = group_paste(list(text), 0.0, 0.0)
+    assert keys == [text]                   # один ключ вставки
+    for k in keys:
+        session.feed_key(k)
+    assert decode_koi7(bytes(session.buffer)) == text, \
+        "вставка одним ключом дала мусор"
+    assert "ВСТАВКА" in session.last_key     # подвал показывает вставку
+
+    # посимвольно (как было до группировки) — вот он, мусор:
+    broken, _ = make_session(MODE_LOCAL)
+    for ch in text:
+        broken.feed_key(ch)
+    assert decode_koi7(bytes(broken.buffer)) != text
+    assert decode_koi7(bytes(broken.buffer)) == \
+        decode_koi7(b"".join(key_to_bytes(c, None, True) for c in text))
+
+    # в С ЭВМ вставка уходит в линию одним куском (не посимвольно):
+    # feed_key возвращает байты, отправляет их emit() — как в run_line
+    from ie15emu.charset import to_line
+    session_h, link_h = make_session(MODE_HOST)
+    for k in keys:
+        session_h.emit(session_h.feed_key(k))
+    assert len(link_h.sent) == 1, link_h.sent
+    assert b"".join(link_h.sent) == to_line(encode_koi7(text),
+                                            session_h.encoding)
+
+
+def test_f3_clears_selection_then_buffer():
+    # F3: первое нажатие — снять выделение (как раньше); повторное,
+    # когда выделения нет, — очистить буфер набора целиком, НЕ удаляя
+    # текст с экрана (эхо остаётся, следующий набор спустится ниже)
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    for ch in "ПРИВЕТ":
+        session.feed_key(ch)
+    frame_before = [sc.row_text("frame", y) for y in range(sc.rows)]
+    # 1) выделение набора есть — F3 снимает его, буфер не трогает
+    session._buf_sel = (0, 3)
+    session.feed_key("SELCLEAR")
+    assert session._buf_sel is None
+    assert bytes(session.buffer) != b""          # буфер цел
+    assert "ВЫДЕЛЕНИЕ" in session.last_key
+    # 1б) выделение кадра (мышь) — тоже снимается
+    session2, _ = make_session(MODE_LOCAL)
+    sc2 = session2.parser.screen
+    sc2.selections = [[("frame", 0, 0, 4, "ВЫД")]]
+    session2.feed_key("SELCLEAR")
+    assert not sc2.sel_text()
+    assert "ВЫДЕЛЕНИЕ" in session2.last_key
+    # 2) выделения нет — повторный F3 очищает буфер, экран не меняется
+    session.feed_key("SELCLEAR")
+    assert bytes(session.buffer) == b"" and session._buf_pos == 0
+    assert "БУФЕР ОЧИЩЕН" in session.last_key
+    frame_after = [sc.row_text("frame", y) for y in range(sc.rows)]
+    assert frame_after == frame_before, "текст на экране пропал при очистке"
+    # 3) очистка отменяется Ctrl+U — буфер возвращается
+    session.feed_key("UNDO")
+    assert bytes(session.buffer) != b"", "очистка не отменилась"
+    # 4) после очистки новый набор спускается ниже оставшегося эха
+    session3, _ = make_session(MODE_LOCAL)
+    for ch in "ПРИВЕТ":
+        session3.feed_key(ch)
+    session3.feed_key("SELCLEAR")           # выделения нет — очистка
+    echo_bottom = session3.parser.screen.last_used()
+    session3.feed_key("X")
+    assert session3._echo_top == echo_bottom + 1, \
+        "набор после очистки налез на оставшийся текст"
+
+
+def test_bracketed_paste_in_session():
+    # Сквозной путь: «ESC [ 200 ~ текст ESC [ 201 ~» → буфер набора
+    # без перекодировочных потерь (маршрут тот же, что у вставки из ОС)
+    from ie15emu.charset import encode_koi7
+    from ie15emu.keyboard import decode_keys
+    text = "Приказ 5: вставка\nв два ряда, Строчная строка"
+    keys, tail = decode_keys(f"\x1b[200~{text}\x1b[201~".encode())
+    assert keys == [text.replace("\n", "\r")] and tail == b""
+    session, _ = make_session(MODE_LOCAL)
+    for k in keys:
+        session.feed_key(k)
+    # в буфере разделитель строк — ПР (0x0D), как у ВК
+    assert bytes(session.buffer) == encode_koi7(text.replace("\n", "\r"))
+    assert "ВСТАВКА" in session.last_key
+
+
 def test_echo_starts_below_machine_content():
     # При переходе в АВТОНОМНО набор НЕ стирает уже имеющееся на кадре
     # (вывод ЭВМ) — эхо «спускается» ниже последней занятой строки; если

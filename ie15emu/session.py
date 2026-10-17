@@ -336,7 +336,9 @@ class TerminalSession:
         может быть несколько — каждый следующий протяг добавляет свой.
         С нажатым Ctrl выделение идёт колонкой (прямоугольник знаков),
         без Ctrl — строчное, от нажатой строки до отпущенной.
-        Клавиши F3/F4 снимают и забирают выделение (см. `feed_key`).
+        Клавиши F3/F4: F3 снимает выделение, а без выделения — очищает
+        буфер набора (экран не трогая); F4 забирает выделенное
+        (см. `feed_key`).
         Ничего не уходит в линию: выделение — только чтение экрана.
         """
         block = key.startswith("ctrl+")
@@ -563,10 +565,28 @@ class TerminalSession:
                 self.last_key = CONTROL_HINTS.get(key, "")
                 self._update_service()
                 return None
-        if key == "SELCLEAR":                # F3 — снять всё выделение
+        if key == "SELCLEAR":                # F3
+            had_sel = (bool(self._buf_sel)
+                       or bool(self.parser.screen.sel_text()))
             self._buf_sel_reset()
             self.parser.screen.sel_clear()
-            self._update_status()           # «ВЫД» в строке состояния
+            if had_sel:
+                # первое нажатие — снять выделение (как и раньше)
+                self.last_key = "ВЫДЕЛЕНИЕ СНЯТО"
+                self._update_service()
+                self._update_status()       # «ВЫД» в строке состояния
+                return None
+            # Повторное нажатие (выделения нет) — очистить буфер набора
+            # целиком. Экран НЕ трогаем: текст остаётся как есть (в т.ч.
+            # локальное эхо) — следующий набор «спустится» ниже, как после
+            # вывода ЭВМ. Очистка отменяема (Ctrl+U вернёт буфер).
+            self.undo.snapshot(self.buffer)
+            self.buffer.clear()
+            self._buf_pos = 0
+            self.undo.step()
+            self.last_key = "БУФЕР ОЧИЩЕН"
+            self._update_service()
+            self._update_status()           # БУФЕР=ПУСТО, счётчик отмены
             return None
         if key == "SELTAKE":                  # F4 — взять выделенное в буфер
             sc = self.parser.screen
@@ -672,8 +692,11 @@ class TerminalSession:
             return data
         if key == "UNDO":
             # отмена правки набора (АВТОНОМНО): вернуть буферу состояние
-            # до последней правки. В С ЭВМ буфера нет — отменять нечего
-            if self.mode == MODE_HOST or not self.buffer:
+            # до последней правки. В С ЭВМ буфера нет — отменять нечего.
+            # Пустой буфер не помеха: очистка F3 как раз отменяется —
+            # Ctrl+U вернёт очищенное содержимое (решает стек, а не то,
+            # что сейчас в буфере)
+            if self.mode == MODE_HOST or not self.undo.available:
                 self.last_key = "ОТМЕНА: пусто"
                 self._update_service()
                 return None

@@ -10,7 +10,8 @@ from ie15emu.charset import encode_koi7
 from ie15emu.keyboard import (DEFAULT_LAYOUT, KEY_BLINK, KEY_CMDSET, KEY_CTRLUP,
                               KEY_MODE, KEY_SEND, KEY_WHEELDOWN, KEY_WHEELUP,
                               ctrl_code, decode_key_bytes, decode_keys,
-                              is_key_combo, key_to_bytes, normalize_combo)
+                              group_paste, is_key_combo, key_to_bytes,
+                              normalize_combo)
 
 
 def test_mouse_sgr_wheel():
@@ -269,6 +270,96 @@ def test_shift_to_rus_h2():
     # без флага (Н0/Н1 вне раскладки) — как раньше
     assert key_to_bytes("W", None) == b"W"
     assert key_to_bytes("w", None) == b"w"
+
+# --- вставка: взрыв знаков одного чтения = буфер обмена -----------------
+
+def test_group_paste_burst():
+    # Терминал со СВОЕЙ вставкой шлёт буфер одним чтением: ≥3 разных
+    # знака — вставка, одним ключом (иначе Н2 портит заглавные:
+    # «ВНИМАНИЕ» → «DYBVFYBT» — мусор)
+    text = "ВНИМАНИЕ: ТЕРМ-20"
+    keys, until = group_paste(list(text), 100.0, 0.0)
+    assert keys == [text]
+    assert until > 100.0                      # признак живёт ещё gap сек
+    # обычный набор (клавиши по одной) — посимвольно
+    keys, until = group_paste(["a", "б"], 100.0, 0.0)
+    assert keys == ["a", "б"] and until == 0.0
+    # автоповтор одной клавиши — это набор, не вставка
+    keys, until = group_paste(["X", "X", "X"], 100.0, 0.0)
+    assert keys == ["X", "X", "X"] and until == 0.0
+    # ВК и управляющие рвут строку: знаки до и после — свои ключи
+    keys, _ = group_paste(["П", "Р", "И", "KEY_ENTER", "В", "Е", "Т"],
+                          100.0, 0.0)
+    assert keys == ["ПРИ", "KEY_ENTER", "ВЕТ"]
+    # события мыши и прочие имена не группируются
+    keys, _ = group_paste(["MOUSEDRAG@3,4", "а", "б"], 100.0, 0.0)
+    assert keys == ["MOUSEDRAG@3,4", "а", "б"]
+
+
+def test_group_paste_tail_within_gap():
+    # Хвост вставки, пришедший отдельным чтением (буфер > 256 байт):
+    # короткий, но в промежутке gap — продолжает вставку; после паузы
+    # набор снова посимвольный
+    keys, until = group_paste(list("ВНИ"), 100.0, 0.0)        # первая половина
+    assert keys == ["ВНИ"] and until == 100.15
+    keys, until2 = group_paste(list("МАНИ"), 100.10, until)   # чтение впритык
+    assert keys == ["МАНИ"] and until2 >= 100.20
+    # одна буква хвостом в окне — тоже вставка (ключ не портится)
+    keys, until3 = group_paste(["Е"], 100.12, until2)
+    assert keys == ["Е"] and until3 >= 100.25
+    # после паузы признак погашен — обычный набор
+    keys, until4 = group_paste(["З", "н"], 101.0, until3)
+    assert keys == ["З", "н"] and until4 == 0.0
+
+
+def test_group_paste_keeps_esc_sequences_whole():
+    # распознанные последовательности (стрелки и т.п.) уходят как есть —
+    # group_paste видит их после decode_keys, но и сырые имена не трогает
+    keys, _ = group_paste(["KEY_UP", "a", "b", "c"], 100.0, 0.0)
+    assert keys == ["KEY_UP", "abc"]
+    keys, _ = group_paste(["ctrl+shift+x", "д", "е", "ж"], 100.0, 0.0)
+    assert keys == ["ctrl+shift+x", "деж"]
+
+
+# --- bracketed paste (режим терминала 2004) -----------------------------
+
+def test_bracketed_paste():
+    # Метки вставки: весь текст одним ключом, метки съедены (не дают
+    # мусора вида KEY_?200)
+    from ie15emu.keyboard import decode_keys
+    text = "ВНИМАНИЕ: ТЕРМ-20\nстрочная строка"
+    data = f"\x1b[200~{text}\x1b[201~".encode()
+    keys, tail = decode_keys(data)
+    # перевод строки — ПР (0x0D), как у ВК: разделитель строк и буфера, и линии
+    assert keys == [text.replace("\n", "\r")] and tail == b"", (keys, tail)
+    # пустая вставка — метки съедены, ключей нет
+    assert decode_keys(b"\x1b[200~\x1b[201~")[0] == []
+    # один конец без начала (съеденный пробой начало) — гасится молча,
+    # в набор «KEY_ESC [201~» не утекает
+    assert decode_keys(b"\x1b[201~")[0] == []
+    keys = decode_keys("до".encode() + b"\x1b[201~" + "после".encode())[0]
+    assert "".join(keys) == "допосле" and "KEY_ESC" not in keys, keys
+    # «\r\n» из буферов Windows — один ПР, «\r» тоже
+    assert decode_keys(b"\x1b[200~a\r\nb\rc\x1b[201~")[0] == ["a\rb\rc"]
+    # управляющие из буфера вычищаются (ESC сломал бы разбор эха)
+    assert decode_keys(b"\x1b[200~a\x1b[7mb\x1b[201~")[0] == ["a[7mb"]
+    # group_paste вставку-одним-ключом не трогает
+    assert group_paste([text], 0.0, 0.0)[0] == [text]
+
+
+def test_bracketed_paste_split_across_reads():
+    # Вставка приходит чтениями (os.read 256 байт): до метки конца
+    # split_incomplete держит хвост, итог — один ключ целиком
+    from ie15emu.keyboard import decode_keys
+    text = "длинная вставка " * 200               # килобайты > 256 байт
+    whole = f"\x1b[200~{text}\x1b[201~".encode()
+    got: list = []
+    pending = b""
+    while whole:
+        chunk, whole = whole[:256], whole[256:]
+        ks, pending = decode_keys(chunk, pending)
+        got.extend(ks)
+    assert pending == b"" and got == [text], (len(got), got[:1])
 
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):

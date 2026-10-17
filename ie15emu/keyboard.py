@@ -497,6 +497,35 @@ def _parse_mod_key(data: bytes, i: int):
     return "", m.end() - i            # Alt/прочие «~»-формы — гасим
 
 
+def _parse_bracket_paste(data: bytes, i: int):
+    """Вставка в квадратных скобках (bracketed paste): «ESC [ 200 ~ текст
+    ESC [ 201 ~» → весь текст одним ключом.
+
+    Эмулятор включает режим терминала 2004 (см. run_line), и терминал
+    оборачивает вставку из буфера обмена (Ctrl+Shift+V) этими метками:
+    границы вставки видны точно, без тайминговой догадки group_paste
+    (та остаётся запасным путём для терминалов без поддержки).
+
+    Управляющие из буфера обмена не заводим: ESC сломал бы разбор эха,
+    «\r\n»/«\r» приводим к одному разделителю (как в OSC52).
+
+    Возвращает (текст, сколько байт съели); метки нет — (None, 0).
+    """
+    if data[i:i + 6] == b"\x1b[201~":
+        return "", 6                     # один конец без начала — гасим
+    if data[i:i + 6] != b"\x1b[200~":
+        return None, 0
+    j = data.find(b"\x1b[201~", i + 6)
+    if j < 0:
+        return None, 0                  # хвост доберёт split_incomplete
+    text = data[i + 6:j].decode("utf-8", "replace")
+    # управляющие не заводим: ESC сломал бы разбор эха, перевод строки —
+    # ПР (0x0D), как у ВК: это разделитель строк и буфера, и линии
+    text = (text.replace("\x1b", "").replace("\r\n", "\n")
+            .replace("\n", "\r"))
+    return text, (j + 6) - i
+
+
 def _parse_osc52(data: bytes, i: int):
     """Ответ терминала на запрос буфер обмена (OSC 52): base64 → текст.
 
@@ -520,8 +549,9 @@ def _parse_osc52(data: bytes, i: int):
             except Exception:
                 return "", m.end() - i        # мусор — гасим молча
             # управляющие из буфера обмена не заводим: ESC сломал бы
-            # разбор эха, ПР ПС приводим к одному разделителю буфера
-            text = text.replace("\x1b", "").replace("\r\n", "\n")
+            # разбор эха; перевод строки — ПР (0x0D), как у ВК
+            text = (text.replace("\x1b", "").replace("\r\n", "\n")
+                    .replace("\n", "\r"))
             return text, m.end() - i
     return None, 0
 
@@ -657,6 +687,12 @@ def split_incomplete(data: bytes) -> tuple[bytes, bytes]:
     n = len(tail)
     if n == 1:                          # ждём знака после ESC
         return core[:-1], tail + hold
+    if tail.startswith(b"\x1b[200~"):
+        # bracketed paste: держим до метки конца «ESC [ 201 ~» — вставка
+        # приходит чтениями по 256 байт и целиком разобрать её нельзя
+        if core[i + 6:].find(b"\x1b[201~") >= 0:
+            return core, hold           # метка есть — разбираем целиком
+        return core[:-n], tail + hold
     if tail[:2] == b"\x1b[":
         rest = tail[2:]
         if not rest or all(0x20 <= c <= 0x3F for c in rest):
@@ -688,6 +724,64 @@ def decode_keys(data: bytes, pending: bytes = b"") -> tuple[list[str], bytes]:
     return decode_key_bytes(whole), tail
 
 
+# Взрыв знаков одного чтения = вставка, а не набор
+PASTE_RUN = 3            # ≥3 разных знаков за одно os.read — буфер обмена
+PASTE_GAP = 0.15         # сек: чтения впритык — продолжение той же вставки
+
+
+def group_paste(keys: list[str], now: float, paste_until: float,
+                min_len: int = PASTE_RUN, gap: float = PASTE_GAP
+                ) -> tuple[list[str], float]:
+    """Собрать подряд идущие знаки одного чтения в один ключ вставки.
+
+    Терминал со СВОЕЙ вставкой (Ctrl+Shift+V на уровне терминала)
+    присылает буфер обмена обычным потоком знаков, и набор разбирает его
+    послойно: в Н2 каждая ЗАГЛАВНАЯ уходит сменой алфавита по позиции
+    (правило клавиатуры, key_to_bytes) — «ВНИМАНИЕ» превращается в
+    «DYBVFYBT», и весь скопированный текст становится мусором. Поэтому
+    взрыв знаков одним чтением считается вставкой и уходит одним ключом
+    (feed_key → key_to_bytes → encode_koi7 — верная перекодировка).
+
+    За одно чтение набрать ≥min_len РАЗНЫХ знаков нельзя: автоповтор
+    той же клавиши — не в счёт (клавиатура). Далее вставкой считается
+    всё, что идёт впритык (gap сек) — хвост после разрыва чтения может
+    быть коротким, но состояние передаётся вызывающему (paste_until).
+
+    KEY_*/мыши/управляющие — не знаки: они рвут строку и уходят сами
+    (ВК посреди вставки — это нажатие, а не её часть).
+
+    Возвращает (ключи, paste_until) — момент, до которого действует
+    признак вставки.
+    """
+    out: list[str] = []
+    run: list[str] = []
+    active = now < paste_until
+
+    def flush() -> None:
+        nonlocal active, paste_until
+        if not run:
+            return
+        if active or (len(run) >= min_len and len(set(run)) > 1):
+            # один ключ — верная перекодировка; перевод строки из буфера
+            # обмена — ПР (0x0D), как у ВК, а не LF
+            out.append("".join(run).replace("\n", "\r"))
+            active = True
+            paste_until = now + gap         # хвост чтения тоже вставка
+        else:
+            out.extend(run)                # обычный набор — посимвольно
+        run.clear()
+
+    for key in keys:
+        if (len(key) == 1
+                and (key.isprintable() or key in "\n\t")):
+            run.append(key)
+            continue
+        flush()
+        out.append(key)
+    flush()
+    return out, (paste_until if active else 0.0)
+
+
 def decode_key_bytes(data: bytes) -> list[str]:
     """Распарсить байты нажатий в имена клавиш/символы для feed_key().
 
@@ -712,6 +806,12 @@ def decode_key_bytes(data: bytes) -> list[str]:
             i += 1
             continue
         if b == 0x1B:
+            name, adv = _parse_bracket_paste(data, i)
+            if name is not None:               # вставка в квадратных скобках
+                if name:
+                    out.append(name)           # весь текст одним ключом
+                i += adv
+                continue
             name, adv = _parse_mouse(data, i)
             if name is not None:               # событие мыши (SGR)
                 if name:
