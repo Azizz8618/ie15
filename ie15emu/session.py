@@ -18,7 +18,8 @@ import re
 import time
 
 from . import COLS, ROWS, __version__
-from .charset import (encode_koi7, koi7_display_upper, koi7_raw_upper,
+from .charset import (decode_koi7, encode_koi7, koi7_display_upper,
+                      koi7_raw_upper,
                       normalize_incremental, to_line)
 from .link import LinkError
 from .keyboard import (DEFAULT_LAYOUT, ctrl_code, is_key_combo, key_to_bytes,
@@ -26,7 +27,7 @@ from .keyboard import (DEFAULT_LAYOUT, ctrl_code, is_key_combo, key_to_bytes,
                        KEY_CTRLSELUP, KEY_SELDOWN, KEY_SELLEFT,
                        KEY_SELRIGHT, KEY_SELUP,
                        KEY_SELHOME, KEY_SELEND, KEY_SELBSPACE)
-from .screen import HELP, RULE, mk
+from .screen import HELP, RULE, cell_text, mk
 from .undo import DEFAULT_UNDO, UndoStack
 
 MODE_LOCAL = "local"      # «АВТОНОМНО»
@@ -155,6 +156,11 @@ class TerminalSession:
         self.banner_seen = False     # баннер линии («CONNECTED TO …») пришёл
         self.line_lost = False       # линия потеряна (таймаут/разрыв SSH):
                                      # сеанс продолжается, отправки подавлены
+        # сообщение от ЭВМ в АВТОНОМНО: кадр занят набором — рисовать его
+        # нельзя (эхо перетрёт), поэтому индикатор в строке состояния:
+        # текст (последние 120 знаков) и сколько их пришло
+        self.incoming = ""
+        self.incoming_n = 0
         # «пробел поддержки»: интервал (сек), когда следующий уйдёт и до
         # какого срока ждём его эхо, чтобы снять с экрана
         self.pulse_interval = PULSE_INTERVAL
@@ -171,11 +177,15 @@ class TerminalSession:
         if mode not in (MODE_LOCAL, MODE_HOST):
             raise ValueError(f"неизвестный режим: {mode!r}")
         self.mode = mode
+        # смена режима закрывает индикатор «ОТ ЭВМ»: в С ЭВМ сообщения
+        # идут в кадр по-старому, накопленное в АВТОНОМНО больше не нужно
+        self.incoming = ""
+        self.incoming_n = 0
         self._update_service()
+        self._update_status()
 
     def toggle_mode(self) -> str:
-        self.mode = MODE_HOST if self.mode == MODE_LOCAL else MODE_LOCAL
-        self._update_service()
+        self.set_mode(MODE_HOST if self.mode == MODE_LOCAL else MODE_LOCAL)
         return self.mode
 
     # --- НАБОР: три режима терминала 15ИЭ (клавиша F8) -------------------
@@ -1281,17 +1291,24 @@ class TerminalSession:
         if self.line_mode:
             cells.append(mk("РЕЖИМ=", (self.line_mode, "state")))
         # мышь терминала отдана эмулятору? (выделение текста, колесо)
-        cells.append(mk(("МЫШЬ=", "label"),
+        mouse_cell = mk(("МЫШЬ=", "label"),
                         ("ВКЛ" if self.mouse_on else "ВЫКЛ",
-                         "on" if self.mouse_on else "off")))
+                         "on" if self.mouse_on else "off"))
+        cells.append(mouse_cell)
         # размер выделения мышью: видно сразу, выбрана одна строка или,
         # скажем, пол-экрана. Строка состояния — вне кадра, места в кадре
         # это не занимает.
         frags, rows_n, chars = self.parser.screen.sel_stats()
+        # кого можно пожертвовать ради индикатора «ОТ ЭВМ» и в каком
+        # порядке (первая в списке — первая жертва): подсказки, затем
+        # справочные МЫШЬ и ВЕРСИЯ. Без индикатора эта очередь не трогается
+        victims: list = []
         if frags:
-            cells.append(mk(("ВЫД=", "label"),
-                            (f"{self.parser.screen.sel_kind} "
-                             f"{frags}фр {rows_n}с {chars}зн", "state")))
+            cell = mk(("ВЫД=", "label"),
+                      (f"{self.parser.screen.sel_kind} "
+                       f"{frags}фр {rows_n}с {chars}зн", "state"))
+            cells.append(cell)
+            victims.insert(0, cell)
         # отмена правок набора (АВТОНОМНО): «ОТМЕНА=Ctrl+U» — клавиша, а рядом
         # число — сколько шагов ещё можно вернуть. В подвале для этого
         # нет места (каждая группа уже занята, лишний ряд съел бы кадр),
@@ -1299,15 +1316,55 @@ class TerminalSession:
         # только когда отменять есть что: на пустом буфере строка состояния
         # не должна лишней мигать
         if self.undo.depth and self.undo.available:
-            cells.append(mk(("ОТМЕНА=", "label"),
-                            (f"Ctrl+U ({len(self.undo)})", "state")))
+            cell = mk(("ОТМЕНА=", "label"),
+                      (f"Ctrl+U ({len(self.undo)})", "state"))
+            cells.append(cell)
+            victims.insert(0, cell)          # первая жертва — ОТМЕНА
         # версия эмулятора — видно, чем именно работаем (та же цифра в
         # --version и в строке запуска); перед датой, дата остаётся последней
-        cells.append(mk(("ВЕРСИЯ=", "label"), (__version__, "state")))
-        cells.append(mk(f"{when.tm_mday:02d}.{when.tm_mon:02d}.{when.tm_year} "
-                        f"{when.tm_hour:02d}:{when.tm_min:02d}:"
-                        f"{when.tm_sec:02d}"))
-        self.parser.screen.set_status(cells)
+        ver_cell = mk(("ВЕРСИЯ=", "label"), (__version__, "state"))
+        cells.append(ver_cell)
+        victims.extend((mouse_cell, ver_cell))   # после подсказок
+        # индикатор сообщений ЭВМ в АВТОНОМНО (см. _note_incoming): кадр занят
+        # набором, поэтому текст показываем здесь — хвост последних знаков,
+        # а в скобках — сколько сообщений пришло с начала режима
+        ind_txt = None
+        if self.mode == MODE_LOCAL and self.incoming:
+            tail = self.incoming[-27:]
+            ind_txt = "…" + tail if len(self.incoming) > 27 else tail
+            if self.incoming_n > 1:
+                ind_txt = f"{ind_txt} ({self.incoming_n})"
+        date_cell = mk(f"{when.tm_mday:02d}.{when.tm_mon:02d}.{when.tm_year} "
+                       f"{when.tm_hour:02d}:{when.tm_min:02d}:"
+                       f"{when.tm_sec:02d}")
+
+        def width(cs) -> int:
+            # длина строки состояния с разделителями « | »
+            return sum(len(cell_text(c)) for c in cs) + 4 * (len(cs) - 1)
+
+        def grown() -> list:
+            tail = [date_cell]
+            if ind_txt is not None:
+                tail.insert(0, mk(("ОТ ЭВМ=", "label"), (ind_txt, "state")))
+            return cells + tail
+
+        # строка состояния обязана влезть в ширину подвала: длиннее —
+        # терминал перенесёт её на второй ряд и сдвинет кадр ЭВМ. Жертвы —
+        # только ради индикатора: по очереди (см. victims) уходят подсказки
+        # и справочные ячейки, потом сокращается сам индикатор. Без
+        # индикатора строка ведёт себя как прежде — как и до него
+        panel_w = self.parser.screen.panel_cols
+        if ind_txt is not None:
+            while width(grown()) > panel_w:
+                if victims:
+                    cells.remove(victims.pop(0))
+                    continue
+                cut = width(grown()) - panel_w
+                if len(ind_txt) <= cut:
+                    ind_txt = None          # места нет вовсе — без него
+                    break
+                ind_txt = "…" + ind_txt[cut + 1:]
+        self.parser.screen.set_status(grown())
 
     def _detect_encoding(self, data: bytes) -> None:
         """Кодировки приёма/передачи по баннеру линии SIMH.
@@ -1339,6 +1396,30 @@ class TerminalSession:
             self.enc_decided = True
         if self.encoding != was:
             self._update_service()   # табло разрядов следует за конфигурацией
+
+    def _note_incoming(self, stream: bytes) -> None:
+        """Сообщение ЭВМ в АВТОНОМНО — в индикатор, а не в кадр.
+
+        Кадр занят локальным набором: строка сообщения легла бы в строки
+        эха и исчезла бы при следующей правке (`_redraw_echo` перетирает
+        блок эха целиком). Вместо этого текст копится в поле «ОТ ЭВМ=»
+        строки состояния. Поток бывает двух форм: внутренняя (с битом
+        алфавита — управляющие отдельно от букв) и сырая 7-разрядная
+        КОИ7 (заглавные в 0x00..0x1E, где ПР/ПС неотличимы от «М»/«Й»):
+        в первой управляющие схлопываем в пробелы, во второй трогаем
+        только разрывы строк. Хранится хвост последних 120 знаков.
+        """
+        if any(b >= 0x80 for b in stream):
+            clean = bytes(b if b >= 0x20 else 0x20 for b in stream)
+        else:
+            clean = bytes(b if b not in (0x0D, 0x0A) else 0x20
+                          for b in stream)
+        text = " ".join(decode_koi7(clean).split())
+        if not text:
+            return
+        self.incoming = (self.incoming + text)[-120:]
+        self.incoming_n += 1
+        self._update_status()
 
     def handle_line_reply(self, data: bytes) -> bytes | None:
         """Приём из линии (ответ ЭВМ); возможный ответ терминала — ESC/ и т.п.
@@ -1372,8 +1453,18 @@ class TerminalSession:
         if stream:
             # эхо «пробела поддержки» (см. pulse_tick) — на экран не выводим
             stream = self._strip_pulse_echo(stream)
-        reply = self.parser.feed(stream)
-        self._update_service()         # ИНВ/ЗВН могли измениться разбором
+        if self.mode == MODE_LOCAL:
+            # АВТОНОМНО: кадр занят набором — сообщение ЭВМ в него не
+            # рисуем (эхо перетёрло бы его при первой же правке), а
+            # показываем индикатором «ОТ ЭВМ=…» в строке состояния.
+            # Служебный ответ (ESC Z — идентификация) уходит в линию как
+            # у настоящего терминала: без него ОС сочла бы сеанс мёртвым.
+            self._note_incoming(stream)
+            reply = "\x1b/" if (b"\x1bZ" in stream or b"\x1b[Z" in stream) \
+                else None
+        else:
+            reply = self.parser.feed(stream)
+            self._update_service()     # ИНВ/ЗВН могли измениться разбором
         if not reply:
             return None
         wire = to_line(reply.encode("latin-1"), self.encoding)

@@ -357,6 +357,75 @@ def test_pulse_echo_stripping_window():
     assert session._strip_pulse_echo(b" ") == b" "
 
 
+# --- сообщение ЭВМ в АВТОНОМНО: индикатор «ОТ ЭВМ» -------------------
+
+def _status(s) -> str:
+    import re
+    return re.sub(r"\x1b\[[0-9;]*m", "", s.parser.screen.status_line())
+
+
+def test_incoming_in_autonomous_shown_as_indicator():
+    # Сообщение от ЭВМ в АВТОНОМНО не рисуется в кадр (эхо перетёрло бы
+    # его при первой же правке), а показывается индикатором в строке
+    # состояния; буфер набора не затрагивается
+    from ie15emu.charset import encode_koi7
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    for ch in "ABC":
+        session.feed_key(ch)
+    frame_before = [row[:] for row in sc.cells]
+    session.handle_line_reply("ВВЕДИТЕ ИМЯ ФАЙЛА\r\n".encode())
+    # кадр не тронут, буфер цел
+    assert [row[:] for row in sc.cells] == frame_before
+    assert session.incoming.startswith("ВВЕДИТЕ ИМЯ ФАЙЛА")
+    assert "МЙ" not in session.incoming          # ПР/ПС не декодированы в буквы
+    assert "ОТ ЭВМ=" in _status(session)
+    assert session.pending()                     # набор не пропал
+    # второе сообщение — счётчик
+    session.handle_line_reply("ПОВТОР\r\n".encode())
+    assert session.incoming_n == 2
+    assert "(2)" in _status(session)
+
+
+def test_incoming_indicator_cleared_on_mode_switch():
+    from ie15emu.charset import encode_koi7
+    session, _ = make_session(MODE_LOCAL)
+    session.handle_line_reply("ПРОСЬБА\r\n".encode())
+    assert session.incoming
+    session.toggle_mode()                        # F9 → С ЭВМ
+    assert session.mode == MODE_HOST
+    assert session.incoming == ""
+    assert "ОТ ЭВМ=" not in _status(session)
+
+
+def test_incoming_drawn_in_host_mode():
+    # в С ЭВМ ничего не изменилось: сообщение идёт в кадр, индикатора нет
+    from ie15emu.charset import encode_koi7
+    session, _ = make_session(MODE_HOST)
+    session.handle_line_reply("ЭХО В КАДР".encode())
+    assert session.incoming == ""
+    assert "ОТ ЭВМ=" not in _status(session)
+    assert session.parser.screen.row_text("frame", 0)
+
+
+def test_status_line_always_fits_panel_width():
+    # строка состояния обязана влезать в ширину подвала (80): иначе
+    # терминал перенесёт её на второй ряд и сдвинет кадр ЭВМ
+    from ie15emu.charset import encode_koi7
+    from ie15emu import COLS
+    session, _ = make_session(MODE_LOCAL)
+    session.banner_seen = True                  # линия отошла — «КВУ», не
+    session.link.port = None                    # «ПРОВЕРЬ ЛИНИЮ», без КАНАЛ=
+    for ch in "ABC":
+        session.feed_key(ch)                    # появляется ОТМЕНА=…
+    session.parser.screen.selections = [[("frame", 0, 0, 5, "АБВ")] ]
+    session._update_status()                    # и ВЫД=…
+    session.handle_line_reply(
+        "ОЧЕНЬ ДЛИННОЕ СООБЩЕНИЕ ЭВМ ЧТОБЫ ЗАПОЛНИТЬ СТРОКУ\r\n".encode())
+    assert len(_status(session)) <= COLS, _status(session)
+    assert "ОТ ЭВМ=" in _status(session)        # индикатор приоритетнее подсказок
+
+
 def test_local_f5_deletes_page_from_history():
     # Страница, загруженная в кадр из истории (PgUp), тоже удаляется по F5
     session, _ = make_session(MODE_LOCAL)
@@ -1286,7 +1355,7 @@ def test_mouse_selection_from_frame_and_history(monkeypatch):
     session, link = make_session(MODE_LOCAL)
     sc = session.parser.screen
     for n in range(6):
-        session.handle_line_reply(f"line{n:02d} text\r\n".encode())
+        session.parser.feed(f"line{n:02d} text\r\n".encode())
     m.text_screen(session.parser)              # первая отрисовка: карта рядов
 
     def drag(col0, row0, col1, row1=None):
@@ -1300,7 +1369,7 @@ def test_mouse_selection_from_frame_and_history(monkeypatch):
     assert sc.sel_text() == "ne00 te"
     assert len(sc.selections) == 1
     for n in range(6, 60):                        # history + кадр
-        session.handle_line_reply(f"line{n:02d} more\r\n".encode())
+        session.parser.feed(f"line{n:02d} more\r\n".encode())
     m.text_screen(session.parser)
     for _ in range(4):                             # листаем в историю
         session.feed_key("KEY_WHEELUP")
@@ -1371,7 +1440,7 @@ def test_selection_drag_is_fast_and_complete(monkeypatch):
     import ie15emu.__main__ as m
     monkeypatch.setattr(m.os, "get_terminal_size",
                         lambda: os.terminal_size((120, 40)))
-    session, link = make_session(MODE_LOCAL)
+    session, link = make_session(MODE_HOST)
     sc = session.parser.screen
     session.mouse_on = True
     for n in range(20):
@@ -1419,8 +1488,8 @@ def test_selection_stays_on_one_line(monkeypatch):
                         lambda: os.terminal_size((100, 40)))
     session, _ = make_session(MODE_LOCAL)
     sc = session.parser.screen
-    session.handle_line_reply(b"pervaya stroka\r\n")
-    session.handle_line_reply(b"vtoraya stroka\r\n")
+    session.parser.feed(b"pervaya stroka\r\n")
+    session.parser.feed(b"vtoraya stroka\r\n")
     sc.y = 20                       # между строками — пустые ряды кадра
     m.text_screen(session.parser)
     for k in ("MOUSEDOWN@1,4", "MOUSEDRAG@16,4", "MOUSEUP@16,4"):
@@ -1444,7 +1513,7 @@ def test_selection_highlights_one_of_identical_rows(monkeypatch):
     session, _ = make_session(MODE_LOCAL)
     sc = session.parser.screen
     for _ in range(10):
-        session.handle_line_reply(b">>\r\n")
+        session.parser.feed(b">>\r\n")
     sc.x = sc.y = 10                            # курсор в стороне
     m.text_screen(session.parser)
     for k in ("MOUSEDOWN@1,4", "MOUSEDRAG@3,4", "MOUSEUP@3,4"):
@@ -1465,13 +1534,13 @@ def test_selection_follows_row_into_visible_history(monkeypatch):
     sc = session.parser.screen
     m.text_screen(session.parser)
     for n in range(sc.rows + 5):                # заполняем кадр
-        session.handle_line_reply(f"stroka {n:02d}\r\n".encode())
+        session.parser.feed(f"stroka {n:02d}\r\n".encode())
     m.text_screen(session.parser)
     for k in ("MOUSEDOWN@1,4", "MOUSEDRAG@9,4", "MOUSEUP@9,4"):
         session.feed_key(k)
     assert sc.sel_text() == "stroka 06"
     for _ in range(3):                          # кадр уезжает в историю
-        session.handle_line_reply(b"novye dannye\r\n")
+        session.parser.feed(b"novye dannye\r\n")
     session.feed_key("KEY_PAGEUP")              # листаем к истории
     assert _inverted_rows(m.text_screen(session.parser)) == ["stroka 06"]
 
@@ -1486,11 +1555,11 @@ def test_selection_keeps_row_even_if_it_left_the_window(monkeypatch):
     session, _ = make_session(MODE_LOCAL)
     sc = session.parser.screen
     for n in range(20):
-        session.handle_line_reply(f"stroka {n:02d}\r\n".encode())
+        session.parser.feed(f"stroka {n:02d}\r\n".encode())
     m.text_screen(session.parser)
     session.feed_key("MOUSEDOWN@1,5")             # строка «stroka 01»
     for _ in range(sc.rows + 3):                  # уходит за верх окна
-        session.handle_line_reply(b"more text\r\n")
+        session.parser.feed(b"more text\r\n")
     m.text_screen(session.parser)
     session.feed_key("MOUSEDRAG@9,5")
     session.feed_key("MOUSEUP@9,5")
@@ -1510,12 +1579,12 @@ def test_selection_anchor_found_after_scroll_with_old_history(monkeypatch):
     sc = session.parser.screen
     m.text_screen(session.parser)                 # кадр мал, выдача уже в истории
     for n in range(20):
-        session.handle_line_reply(f"stroka {n:02d}  kol\r\n".encode())
+        session.parser.feed(f"stroka {n:02d}  kol\r\n".encode())
     m.text_screen(session.parser)
     session.feed_key("MOUSEDOWN@1,6")             # строка «stroka 02  kol»
     pressed = sc.row_text(*sc.view_map[6 - sc.view_top_row])
     for _ in range(sc.rows + 3):
-        session.handle_line_reply(b"more text\r\n")
+        session.parser.feed(b"more text\r\n")
     m.text_screen(session.parser)
     session.feed_key("MOUSEDRAG@8,6")
     session.feed_key("MOUSEUP@8,6")
@@ -1526,12 +1595,12 @@ def test_selection_anchor_found_after_scroll_with_old_history(monkeypatch):
     sc = session.parser.screen
     m.text_screen(session.parser)
     for n in range(20):
-        session.handle_line_reply(f"stroka {n:02d}  kol\r\n".encode())
+        session.parser.feed(f"stroka {n:02d}  kol\r\n".encode())
     m.text_screen(session.parser)
     session.feed_key("ctrl+MOUSEDOWN@1,6")
     pressed = sc.row_text(*sc.view_map[6 - sc.view_top_row])
     for _ in range(sc.rows + 3):
-        session.handle_line_reply(b"more text\r\n")
+        session.parser.feed(b"more text\r\n")
     m.text_screen(session.parser)
     session.feed_key("ctrl+MOUSEDRAG@8,6")
     session.feed_key("ctrl+MOUSEUP@8,6")
@@ -1548,7 +1617,7 @@ def test_selection_end_position_from_mouseup(monkeypatch):
                         lambda: os.terminal_size((100, 40)))
     session, _ = make_session(MODE_LOCAL)
     sc = session.parser.screen
-    session.handle_line_reply(b"stroka proverki\r\n")
+    session.parser.feed(b"stroka proverki\r\n")
     m.text_screen(session.parser)
     session.feed_key("MOUSEDOWN@1,4")
     session.feed_key("MOUSEUP@40,4")              # без MOUSEDRAG
@@ -1565,11 +1634,11 @@ def test_selection_anchor_follows_content_not_view(monkeypatch):
     session, _ = make_session(MODE_LOCAL)
     sc = session.parser.screen
     for n in range(20):
-        session.handle_line_reply(f"stroka {n:02d}\r\n".encode())
+        session.parser.feed(f"stroka {n:02d}\r\n".encode())
     m.text_screen(session.parser)
     session.feed_key("MOUSEDOWN@1,5")             # вторая строка кадра
     for _ in range(sc.rows + 4):                  # кадр уезжает в историю
-        session.handle_line_reply(b"more text\r\n")
+        session.parser.feed(b"more text\r\n")
     m.text_screen(session.parser)
     session.feed_key("MOUSEDRAG@6,5")
     session.feed_key("MOUSEUP@6,5")
@@ -1587,7 +1656,7 @@ def test_selection_survives_drag_over_panel(monkeypatch):
     session, _ = make_session(MODE_LOCAL)
     sc = session.parser.screen
     for n in range(4):
-        session.handle_line_reply(f"stroka {n}\r\n".encode())
+        session.parser.feed(f"stroka {n}\r\n".encode())
     m.text_screen(session.parser)
     for k in ("MOUSEDOWN@1,4", "MOUSEDRAG@8,5", "MOUSEUP@8,5"):
         session.feed_key(k)
@@ -1609,7 +1678,7 @@ def test_selection_column_mode(monkeypatch):
     sc = session.parser.screen
     for t in ("kolokol    12   340", "stol       3   1200",
               "spalnya     7    890"):
-        session.handle_line_reply((t + "\r\n").encode())
+        session.parser.feed((t + "\r\n").encode())
     sc.x = sc.y = 0
     m.text_screen(session.parser)
     # колонка: знаки 1-3 в рядах 4-6
@@ -1645,7 +1714,7 @@ def test_selection_on_one_row_ignores_drag_direction(monkeypatch):
                         lambda: os.terminal_size((100, 40)))
     session, _ = make_session(MODE_LOCAL)
     sc = session.parser.screen
-    session.handle_line_reply(b"kolokol    12   340\r\n")
+    session.parser.feed(b"kolokol    12   340\r\n")
     sc.x = sc.y = 0
     m.text_screen(session.parser)
     for name, keys in (
@@ -1673,7 +1742,7 @@ def test_selection_size_shown_in_status_line(monkeypatch):
     sc = session.parser.screen
     session.mouse_on = True
     for n in range(5):
-        session.handle_line_reply(f"stroka {n}\r\n".encode())
+        session.parser.feed(f"stroka {n}\r\n".encode())
     m.text_screen(session.parser)
     assert "ВЫД=" not in re.sub(r"\x1b\[[0-9;]*m", "", sc.status_line())
     for k in ("MOUSEDOWN@1,4", "MOUSEDRAG@9,4", "MOUSEUP@9,4"):
@@ -1697,7 +1766,7 @@ def test_selection_highlight_while_dragging(monkeypatch):
     session, _ = make_session(MODE_LOCAL)
     sc = session.parser.screen
     for n in range(3):
-        session.handle_line_reply(f"stroka {n}\r\n".encode())
+        session.parser.feed(f"stroka {n}\r\n".encode())
     sc.x = sc.y = 0                                # курсор в стороне
     m.text_screen(session.parser)
     session.feed_key("MOUSEDOWN@1,4")
