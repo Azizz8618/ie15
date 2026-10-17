@@ -566,6 +566,85 @@ def test_incoming_indicator_cleared_on_mode_switch():
     assert session.mode == MODE_HOST
     assert session.incoming == ""
     assert "ОТ ЭВМ=" not in _status(session)
+    assert session.parser.screen.notice == ""    # выпадающая строка тоже
+
+
+# --- выпадающая строка сообщения ЭВМ ------------------------------------
+
+def _render(session, width: int = 100) -> str:
+    """Отрисовать кадр как в реальном окне (текстовый вывод)."""
+    import os as _os
+    import ie15emu.__main__ as m
+    old = m.os.get_terminal_size
+    m.os.get_terminal_size = lambda: _os.terminal_size((width, 30))
+    try:
+        return m.text_screen(session.parser)
+    finally:
+        m.os.get_terminal_size = old
+
+
+def _notice_row(out: str) -> str:
+    """Вторая строка окна: выпадающая строка сообщения либо черта."""
+    import re as _re
+    seg = out.split("\x1b[2;1H")[1].split("\x1b[3;1H")[0]
+    return _re.sub(r"\x1b\[[0-9;]*m", "", seg)
+
+
+def test_notice_line_shown_until_first_key():
+    # Сообщение ЭВМ в АВТОНОМНО показывается отдельной (инверсной) строкой
+    # под состоянием — до первого нажатия клавиши; кадр на это время
+    # сдвигается вниз на ряд, после гашения возвращается
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    for ch in "ABC":
+        session.feed_key(ch)
+    out = _render(session)
+    assert _notice_row(out).startswith("-"), "до сообщения на месте черта"
+    assert "\x1b[4;1H" in out              # кадр с четвёртого ряда
+
+    session.handle_line_reply("ВНИМАНИЕ: ПРОГРАММА ЖДЁТ ОТВЕТА\r\n".encode())
+    out = _render(session)
+    row2 = _notice_row(out)
+    assert "ВНИМАНИЕ: ПРОГРАММА" in row2, row2
+    assert "\x1b[7m" in out.split("\x1b[2;1H")[1].split("\x1b[3;1H")[0] \
+        or "ВНИМАНИЕ" in row2               # строка показана
+    assert sc.notice                          # поле заполнено
+    assert "\x1b[5;1H" in out                # кадр сдвинулся на ряд
+    assert "\x1b[3;1H-" in out               # черта ушла на третий ряд
+
+    session.feed_key("X")                     # первая клавиша гасит строку
+    out = _render(session)
+    assert "ВНИМАНИЕ" not in out
+    assert sc.notice == ""
+    assert "\x1b[4;1H" in out                # кадр вернулся на четвёртый ряд
+
+
+def test_notice_line_update_and_truncate():
+    # Новое сообщение показывается снова (счётчик растёт), длинное
+    # обрезается по ширине окна — строка не переносится на второй ряд
+    session, _ = make_session(MODE_LOCAL)
+    session.handle_line_reply("ПЕРВОЕ\r\n".encode())
+    session.feed_key("X")
+    session.handle_line_reply("ВТОРОЕ\r\n".encode())
+    out = _render(session, width=100)
+    assert "ВТОРОЕ" in _notice_row(out)
+    assert session.incoming_n == 2            # счётчик в индикаторе
+    session.feed_key("Y")
+    session.handle_line_reply(
+        ("ОЧЕНЬ ДЛИННОЕ СООБЩЕНИЕ ОТ ЭВМ " * 5).encode())
+    out = _render(session, width=100)
+    row2 = _notice_row(out)
+    assert len(row2.rstrip()) <= 100, len(row2.rstrip())
+
+
+def test_notice_line_only_in_autonomous():
+    # В С ЭВМ сообщение идёт в кадр — выпадающей строки нет
+    session, _ = make_session(MODE_HOST)
+    session.handle_line_reply("В КАДР ЭВМ".encode())
+    out = _render(session)
+    assert _notice_row(out).startswith("-")
+    assert "В КАДР ЭВМ" in out.split("\x1b[4;1H")[1][:200]
+    assert session.parser.screen.notice == ""
 
 
 def test_incoming_drawn_in_host_mode():
