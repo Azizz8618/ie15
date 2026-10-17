@@ -279,8 +279,8 @@ KEY_CTRLRIGHT = "KEY_CTRLRIGHT"     # прыжок по словам: начал
 KEY_CTRLLEFT = "KEY_CTRLLEFT"       # …и текущего слова
 KEY_CTRLUP = "KEY_CTRLUP"           # начало текущей строки
 KEY_CTRLDOWN = "KEY_CTRLDOWN"       # начало строки ниже
-KEY_SELHOME = "SELHOME"             # Shift+Home — выделить до начала строки
-KEY_SELEND = "SELEND"               # Shift+End — выделить до конца строки
+KEY_SELHOME = "SELHOME"             # выделить до начала строки (Ctrl+Home)
+KEY_SELEND = "SELEND"               # …до конца строки (Ctrl+End)
 KEY_SELBSPACE = "SELBSPACE"         # Shift+Backspace — удалить выделенное
 
 SPECIAL_KEYS = {"KEY_UNDO": KEY_UNDO, "KEY_SEND": KEY_SEND, "KEY_MODE": KEY_MODE,
@@ -306,8 +306,9 @@ SEQ_KEYS = {
     b"\x1b[1;2A": KEY_SELUP, b"\x1b[1;2B": KEY_SELDOWN,
     b"\x1b[1;6C": KEY_CTRLSELRIGHT, b"\x1b[1;6D": KEY_CTRLSELLEFT,
     b"\x1b[1;6A": KEY_CTRLSELUP, b"\x1b[1;6B": KEY_CTRLSELDOWN,
-    # Shift+Home/End — выделение до начала/конца строки (АВТОНОМНО)
-    b"\x1b[1;2H": KEY_SELHOME, b"\x1b[1;2F": KEY_SELEND,
+    # Shift+Home/End СОЗНАТЕЛЬНО не привязываются: ОС перехватывает их
+    # на листание вывода и в приложение они не доходят; где доходят —
+    # гасит _parse_mod_key. Выделение строки — за Ctrl+Home/Ctrl+End
     b"\x1b[H": "KEY_HOME", b"\x1b[1~": "KEY_HOME", b"\x1bOH": "KEY_HOME",
     b"\x1b[4~": "KEY_END", b"\x1b[F": "KEY_END", b"\x1bOF": "KEY_END",
     b"\x1b[2~": "KEY_INSERT", b"\x1b[3~": "KEY_DELETE",
@@ -439,12 +440,21 @@ def _parse_mod_key(data: bytes, i: int):
     mask = mod - 1                    # параметр xterm = 1+shift(1)+alt(2)+ctrl(4)
     letter = m.group(2)               # «A»…«Z» — ESC [ 1 ; m X
     if letter:
+        ch = letter.decode("ascii")
+        base = _MOD_LETTER.get(ch)
+        shift, ctrl = bool(mask & 1), bool(mask & 4)
+        if base in (KEY_SELHOME, KEY_SELEND):
+            # Home/End с модификатором. Shift+Home/End блокируем: ОС
+            # перехватывает их на листание вывода и в приложение они не
+            # доходят, а где доходят — гасим, чтобы поведение не зависело
+            # от терминала. Выделение строки набора — за Ctrl+Home/End
+            # (та же клавиша в форме «ESC [ 1 ; 5 H»).
+            if shift or mask & 2:
+                return "", m.end() - i
+            return base, m.end() - i
         if mask & 2:                  # Alt — таких клавиш у 15ВВВ нет
             return "", m.end() - i
-        shift, ctrl = bool(mask & 1), bool(mask & 4)
-        base = _MOD_LETTER.get(letter.decode("ascii"))
         if base is None:              # не стрелка — буква с Ctrl/Shift
-            ch = letter.decode("ascii")
             # сдвинутая буква приходит заглавной и с битом shift; без сдвига
             # терминалы шлют и строчную, и заглавную — имя приводим к виду
             # «ctrl+буква», как его даёт CSI-u (имя пишут в [keys])
@@ -462,10 +472,12 @@ def _parse_mod_key(data: bytes, i: int):
         return base, m.end() - i      # Ctrl без Shift — слова/строки
     # «~»-форма: ESC [ код ; модификатор ~. Часть терминалов (консоль Linux,
     # старый xterm) шлёт Home/End именно так: 1 — Home, 4 — End. С Shift —
-    # выделение части строки набора (АВТОНОМНО).
+    # блокируем (см. выше), с Ctrl — выделение строки набора.
     code = int(m.group(3))
-    if mask == 1 and code in (1, 4):          # Shift+Home / Shift+End
-        return KEY_SELHOME if code == 1 else KEY_SELEND, m.end() - i
+    if code in (1, 4):
+        if mask == 4:                 # Ctrl+Home / Ctrl+End
+            return KEY_SELHOME if code == 1 else KEY_SELEND, m.end() - i
+        return "", m.end() - i        # Shift/прочие — блок
     return "", m.end() - i            # Alt/прочие «~»-формы — гасим
 
 

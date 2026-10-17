@@ -30,9 +30,15 @@ SEQ = {
     "right": ESC + b"[C",
     "shift+home": ESC + b"[1;2H",
     "shift+end": ESC + b"[1;2F",
+    # выделение строки — за Ctrl+Home/End (Shift+Home/End заблокированы:
+    # ОС перехватывает их на листание вывода)
+    "ctrl+home": ESC + b"[1;5H",
+    "ctrl+end": ESC + b"[1;5F",
     # форма консоли Linux/старого xterm: ESC [ код ; модификатор ~
     "shift+home~": ESC + b"[1;2~",
     "shift+end~": ESC + b"[4;2~",
+    "ctrl+home~": ESC + b"[1;5~",
+    "ctrl+end~": ESC + b"[4;5~",
     "shift+backspace": ESC + b"[127;2u",     # kitty CSI-u
     "shift+backspace-xterm": ESC + b"[27;2;127~",
     "F5": ESC + b"[15~",
@@ -227,12 +233,13 @@ def main() -> int:
     if not row0.startswith("АБЦДЕФГХ"):
         fails.append(f"эхо набора не показано: {row0!r}")
 
-    # 2. Home, затем Shift+End — выделение от курсора до конца строки
+    # 2. Home, затем Ctrl+End — выделение от курсора до конца строки
+    # (Shift+Home/End заблокированы — см. проверку ниже)
     t.send(SEQ["home"])
-    t.send(SEQ["shift+end"])
-    show("Home, Shift+End — выделение до конца строки", t)
+    t.send(SEQ["ctrl+end"])
+    show("Home, Ctrl+End — выделение до конца строки", t)
     if marks(t.row(0)) != 8:
-        fails.append(f"Shift+End: подсвечено {marks(t.row(0))} знаков, ждали 8")
+        fails.append(f"Ctrl+End: подсвечено {marks(t.row(0))} знаков, ждали 8")
 
     # 3. Shift+Backspace (kitty CSI-u) — фрагмент удалён целиком
     t.send(SEQ["shift+backspace"])
@@ -242,14 +249,14 @@ def main() -> int:
     if without_cursor(t.row(0)).strip():
         fails.append(f"Shift+Backspace: строка не очищена: {t.row(0)!r}")
 
-    # 4. Shift+Home — выделение от курсора до начала строки (один знак)
+    # 4. Home, →, Ctrl+Home — выделение от курсора до начала строки (один знак)
     t.send(b"ABCDE")
     t.send(SEQ["home"])
     t.send(SEQ["right"])
-    t.send(SEQ["shift+home"])
-    show("Home, →, Shift+Home — выделение до начала строки", t)
+    t.send(SEQ["ctrl+home"])
+    show("Home, →, Ctrl+Home — выделение до начала строки", t)
     if sel_chars(t.row(0)) != 1 or not t.row(0).startswith("▒"):
-        fails.append(f"Shift+Home: подсвечено {sel_chars(t.row(0))}, ждали 1")
+        fails.append(f"Ctrl+Home: подсвечено {sel_chars(t.row(0))}, ждали 1")
 
     # 5. Shift+Backspace в форме xterm modifyOtherKeys
     t.send(SEQ["shift+backspace-xterm"])
@@ -263,13 +270,13 @@ def main() -> int:
     if not t.row(0).startswith("БЦДЕ"):
         fails.append(f"Shift+Backspace (xterm): строка {t.row(0)!r}")
 
-    # 6. Вторая строка набора: Shift+End выделяет остаток второй строки
+    # 6. Вторая строка набора: Ctrl+Home выделяет остаток второй строки
     t.send(SEQ["home"])
     t.send(SEQ["right"])
     t.send(b"\r")                          # Enter — новая строка набора
     t.send(b"XY")
-    t.send(SEQ["shift+home"])              # выделение до начала строки
-    show("вторая строка набора: Shift+Home", t)
+    t.send(SEQ["ctrl+home"])               # выделение до начала строки
+    show("вторая строка набора: Ctrl+Home", t)
     if sel_chars(t.row(1)) != 2:
         fails.append(f"вторая строка: подсвечено {sel_chars(t.row(1))}, ждали 2")
 
@@ -284,32 +291,49 @@ def main() -> int:
         fails.append(f"в строке меньше двух знаков: {text!r}")
     t.send(SEQ["home"])
     t.send(SEQ["right"])
-    t.send(SEQ["shift+end~"])
+    t.send(SEQ["ctrl+end~"])
     row = cursor_row(t)
-    show("Shift+End форма ESC [ 4 ; 2 ~", t)
+    show("Ctrl+End форма ESC [ 4 ; 5 ~", t)
     span = sel_span(row)
     if span != (1, len(text) - 1):
-        fails.append(f"Shift+End (~): подсвечен {span}, ждали "
+        fails.append(f"Ctrl+End (~): подсвечен {span}, ждали "
                      f"{(1, len(text) - 1)}")
     t.send(SEQ["shift+backspace"])
     t.send(SEQ["end"])
     t.read(0.4)
     show("после удаления фрагмента", t)
     if without_cursor(cursor_row(t)) != text[0]:
-        fails.append(f"Shift+End (~): остались "
+        fails.append(f"Ctrl+End (~): остались "
                      f"{without_cursor(cursor_row(t))!r}, ждали {text[0]!r}")
     t.send(SEQ["home"])
     t.send(SEQ["right"])
-    t.send(SEQ["shift+home~"])
+    t.send(SEQ["ctrl+home~"])
     row = cursor_row(t)
-    show("Shift+Home форма ESC [ 1 ; 2 ~", t)
+    show("Ctrl+Home форма ESC [ 1 ; 5 ~", t)
     if sel_chars(row) != 1:
-        fails.append(f"Shift+Home (~): подсвечено {sel_chars(row)}, ждали 1")
+        fails.append(f"Ctrl+Home (~): подсвечено {sel_chars(row)}, ждали 1")
     t.send(SEQ["shift+backspace"])
     t.send(SEQ["end"])
     t.read(0.4)
     if without_cursor(cursor_row(t)):
-        fails.append(f"Shift+Home (~) не удалил фрагмент: {cursor_row(t)!r}")
+        fails.append(f"Ctrl+Home (~) не удалил фрагмент: {cursor_row(t)!r}")
+
+    # 8. Shift+Home/End БЛОКИРОВАНЫ: нажатие приходит, но ничего не делает
+    # (ОС перехватывает их на листание вывода — везде гасим одинаково)
+    t.send(SEQ["home"])
+    t.send(SEQ["right"])
+    before = cursor_row(t)
+    t.send(SEQ["shift+home"])
+    t.send(SEQ["shift+end"])
+    t.send(SEQ["shift+home~"])
+    t.send(SEQ["shift+end~"])
+    t.read(0.4)
+    row = cursor_row(t)
+    show("Shift+Home/End — блокированы (ничего не изменилось)", t)
+    if sel_chars(row):
+        fails.append(f"Shift+Home/End: выделение появилось — не блок: {row!r}")
+    if row != before:
+        fails.append(f"Shift+Home/End изменили экран: {before!r} → {row!r}")
 
     # 8. F5 — страница удаляется: подсветка и текст исчезают
     t.send(SEQ["F5"])

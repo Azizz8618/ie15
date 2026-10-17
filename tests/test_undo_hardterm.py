@@ -24,6 +24,7 @@ def test_undo_stack_depth_limit():
     stack = UndoStack(3)
     buf = bytearray()
     for ch in b"abcdefgh":
+        stack.step()                 # каждый знак — свой шаг (граница слова)
         stack.snapshot(buf)
         buf += bytes([ch])
     assert len(stack) == 3
@@ -32,6 +33,20 @@ def test_undo_stack_depth_limit():
         assert bytes(buf) == want
     assert stack.undo(buf) is False            # дальше отменять нечего
     assert bytes(buf) == b"abcde"
+
+
+def test_undo_stack_coalesces_within_word():
+    # Пока шаг не закрыт, снимок не кладётся: откат идёт к началу слова,
+    # а не к прошлому знаку
+    stack = UndoStack(20)
+    buf = bytearray()
+    stack.snapshot(buf)              # шаг открыт (первый снимок) — ложим
+    buf += b"he"
+    stack.snapshot(buf)              # шаг тот же — не кладём
+    buf += b"llo"
+    assert len(stack) == 1           # один шаг = одно слово
+    stack.undo(buf)
+    assert bytes(buf) == b""
 
 
 def test_undo_stack_ignores_unchanged_buffer():
@@ -63,9 +78,9 @@ def test_default_undo_depth_is_20():
 
 # --- отмена в сеансе ------------------------------------------------
 
-def test_undo_returns_last_typed_char():
-    # Ctrl+U (UNDO) убирает последний набранный знак — и из буфера,
-    # и с экрана: на экране не остаётся «хвоста» отменённого
+def test_undo_returns_last_typed_word():
+    # Ctrl+U (UNDO) убирает последнее набранное СЛОВО целиком — и из
+    # буфера, и с экрана: на экране не остаётся «хвоста» отменённого
     session, link = make_session(MODE_LOCAL)
     sc = session.parser.screen
     for ch in "abc":
@@ -73,17 +88,37 @@ def test_undo_returns_last_typed_char():
     assert bytes(session.buffer) == b"ABC"
     assert sc.text().strip() == "ABC"
     assert session.feed_key("UNDO") is None
-    assert bytes(session.buffer) == b"AB"
-    assert sc.text().strip() == "AB"
+    assert bytes(session.buffer) == b""
+    assert sc.text().strip() == ""
     assert link.sent == []                 # в линию отмена не уходит
 
 
 def test_undo_step_by_step():
-    # Несколько отмен подряд — по одному шагу назад
+    # Шаг откала — слово: каждый Ctrl+U снимает последнее слово
+    # (разделители остаются: шаг закрывается ПОСЛЕ пробела)
     session, _ = make_session(MODE_LOCAL)
-    for ch in "abcde":
+    for ch in "ab cd ef":
         session.feed_key(ch)
-    for want in (b"ABCD", b"ABC", b"AB", b"A", b""):
+    for want in (b"AB CD ", b"AB ", b""):
+        session.feed_key("UNDO")
+        assert bytes(session.buffer) == want
+
+
+def test_undo_boundary_on_enter_and_navigation():
+    # ПР и навигация тоже закрывают шаг: набор после них — новый шаг
+    session, _ = make_session(MODE_LOCAL)
+    for ch in "ab":
+        session.feed_key(ch)
+    session.feed_key("KEY_ENTER")
+    for ch in "cd":
+        session.feed_key(ch)
+    session.feed_key("KEY_HOME")               # навигация — граница шага
+    session.feed_key("x")
+    assert bytes(session.buffer) == b"AB\rXCD"
+    for want in (b"AB\rCD",                  # снялся «x»
+                 b"AB\r",                    # потом слово «cd»
+                 b"AB",                      # потом ПР
+                 b""):                       # и первое слово
         session.feed_key("UNDO")
         assert bytes(session.buffer) == want
 
@@ -97,15 +132,18 @@ def test_undo_when_nothing_to_undo():
 
 
 def test_undo_respects_configured_depth():
-    # Глубина из конфига: 8 знаков, отмена на 2 шага
+    # Глубина из конфига: три слова набраны, отмена держит только два шага
     session, _ = make_session(MODE_LOCAL)
     session.undo = UndoStack(2)
-    for ch in "abcdefgh":
-        session.feed_key(ch)
+    for word in ("ab", "cd", "ef"):
+        for ch in word:
+            session.feed_key(ch)
+        session.feed_key(" ")                   # разделитель — граница шага
     session.feed_key("UNDO")
+    assert bytes(session.buffer) == b"AB CD "    # третье слово снято
     session.feed_key("UNDO")
-    assert bytes(session.buffer) == b"ABCDEF"
-    assert session.undo.available is False
+    assert bytes(session.buffer) == b"AB "       # второе
+    assert session.undo.available is False       # глубина исчерпана
 
 
 def test_undo_disabled_by_zero_depth():
@@ -143,7 +181,7 @@ def test_send_clears_undo_history():
     session, link = make_session(MODE_LOCAL)
     for ch in "abc":
         session.feed_key(ch)
-    assert len(session.undo) == 3
+    assert len(session.undo) == 1       # одно слово — один шаг отката
     assert session.feed_key("SEND") == b"ABC\r\n"
     assert bytes(session.buffer) == b""
     assert len(session.undo) == 0
@@ -168,7 +206,7 @@ def test_ctrl_u_arrives_as_undo():
         session.feed_key(ch)
     for key in decode_key_bytes(b"\x15"):
         session.feed_key(key)
-    assert bytes(session.buffer) == b"AB"
+    assert bytes(session.buffer) == b""    # слово снимается целиком
 
 
 def test_undo_counter_shown_in_status_line():
@@ -183,9 +221,9 @@ def test_undo_counter_shown_in_status_line():
     assert "ОТМЕНА" not in status()        # пустой буфер — не мигаем
     for ch in "abc":
         session.feed_key(ch)
-    assert "ОТМЕНА=Ctrl+U (3)" in status()
+    assert "ОТМЕНА=Ctrl+U (1)" in status() # слово = один шаг
     session.feed_key("UNDO")
-    assert "ОТМЕНА=Ctrl+U (2)" in status()
+    assert "ОТМЕНА" not in status()        # шагов не осталось
 
 
 def test_undo_with_echo_off_leaves_screen_alone():

@@ -123,15 +123,23 @@ def test_local_shift_home_selects_to_line_start():
     assert session._buf_sel is None
 
 
-def test_shift_home_end_tilde_forms_decode():
-    # Часть терминалов (консоль Linux, старый xterm) шлёт Home/End с
-    # модификатором в форме «ESC [ код ; модификатор ~»
+def test_shift_home_end_blocked_ctrl_works():
+    # Shift+Home/End блокированы: ОС перехватывает их на листание вывода
+    # и в приложение они не доходят; там, где доходят — эмулятор их гасит,
+    # чтобы поведение не зависело от терминала
     from ie15emu.keyboard import decode_key_bytes
-    assert decode_key_bytes(b"\x1b[1;2~") == ["SELHOME"]
-    assert decode_key_bytes(b"\x1b[4;2~") == ["SELEND"]
-    # прочие модификаторы гасятся (имя пустое — в список не попадает)
-    assert decode_key_bytes(b"\x1b[1;5~") == []
+    for seq in (b"\x1b[1;2H", b"\x1b[1;2F",      # xterm-форма
+                b"\x1b[1;2~", b"\x1b[4;2~",      # форма «ESC [ n ; m ~»
+                b"\x1b[1;6H", b"\x1b[1;3H"):     # Ctrl+Shift+ (раньше падал!)
+        assert decode_key_bytes(seq) == [], seq
+    # рабочая альтернатива — Ctrl+Home/End (обе формы)
+    assert decode_key_bytes(b"\x1b[1;5H") == ["SELHOME"]
+    assert decode_key_bytes(b"\x1b[1;5F") == ["SELEND"]
+    assert decode_key_bytes(b"\x1b[1;5~") == ["SELHOME"]
+    assert decode_key_bytes(b"\x1b[4;5~") == ["SELEND"]
+    # стрелки не блокируем — Shift/Ctrl-стрелки работают как прежде
     assert decode_key_bytes(b"\x1b[1;2A") == ["SELUP"]
+    assert decode_key_bytes(b"\x1b[1;5C") == ["KEY_CTRLRIGHT"]
 
 
 def test_host_mode_selection_keys_send_nothing():

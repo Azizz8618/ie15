@@ -359,6 +359,11 @@ class TerminalSession:
                 self.last_key = f"{orig}→гашение"
                 self._update_service()
                 return None
+        if len(key) != 1:
+            # откат по слову: любая не-знаковая клавиша (навигация, Enter,
+            # ВК, F-клавиши…) заканчивает текущий шаг отмены — следующая
+            # правка начнёт новый, а Ctrl+U откатит до этой границы
+            self.undo.step()
         arrow = "" if orig == key else f"{orig}→"
         hint = CONTROL_HINTS.get(key)
         if hint:
@@ -499,6 +504,7 @@ class TerminalSession:
                 else:
                     self.undo.snapshot(self.buffer)     # отменяемая правка
                     self.buffer.extend(data)
+                    self.undo.step()          # взятое — свой шаг отката
             self._update_service()
             self._update_status()           # «ВЫД» в строке состояния
             return None
@@ -531,6 +537,7 @@ class TerminalSession:
                     self.undo.snapshot(self.buffer)     # отменяемая правка
                     total_before = self._buf_rows_up_to(len(self.buffer))
                     del self.buffer[a:b]
+                    self.undo.step()          # страница — свой шаг отката
                     if self._buf_pos > a:
                         self._buf_pos = a
                     self._buf_sel_reset()
@@ -715,6 +722,7 @@ class TerminalSession:
                 self.undo.snapshot(self.buffer)
                 del self.buffer[self._buf_pos - 1:self._buf_pos]
                 self._buf_pos -= 1
+                self.undo.step()
                 if self.echo:
                     self._redraw_echo()
                 self._update_service()
@@ -764,6 +772,10 @@ class TerminalSession:
         else:                                # замена в конце строки = добавление
             self.buffer[pos:pos] = data
             self._buf_pos = pos + len(data)
+        # откат по слову: граница шага — после разделителя (пробел, точка,
+        # ПР) и после ВК — дальше набор идёт новым словом/строкой
+        if data in (b" ", b".", b"\r") or key == "KEY_BACKSPACE":
+            self.undo.step()
         if self.echo:
             if not buffered:
                 self._echo_top = self.parser.screen.y
@@ -937,6 +949,7 @@ class TerminalSession:
         a, b = sel
         self.undo.snapshot(self.buffer)          # отменяемая правка
         del self.buffer[a:b]
+        self.undo.step()                         # удалённое — шаг целиком
         self._buf_pos = a
         self._buf_sel_reset()
         if self.echo:
