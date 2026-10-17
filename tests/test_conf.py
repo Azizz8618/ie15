@@ -98,6 +98,20 @@ def test_undo_depth_from_conf():
     assert apply_conf(ns(undo="7"), cp_from(conf)).undo == "7"
 
 
+def test_help_hidden_by_default():
+    # Справка подвала по умолчанию СКРЫТА: включается [terminal] help = on,
+    # флагом --show-help; --no-help её гасит. F12 переключает в сеансе.
+    assert apply_conf(ns(), cp_from(CONF)).no_help is True
+    assert apply_conf(ns(), cp_from(CONF + "help = on\n")).no_help is False
+    assert apply_conf(ns(), cp_from(CONF + "help = off\n")).no_help is True
+    conf = CONF + "\nhelp = on\n"
+    assert apply_conf(ns(no_help=True), cp_from(conf)).no_help is True
+    assert apply_conf(ns(show_help=True), cp_from(CONF)).no_help is False
+    # --show-help сильнее конфига с выключенной справкой
+    assert apply_conf(ns(show_help=True),
+                      cp_from(CONF + "help = off\n")).no_help is False
+
+
 def test_cli_wins_over_conf():
     cp = cp_from(CONF)
     got = apply_conf(ns(line="tcp://127.0.0.1:4202", mode="host", sets="2",

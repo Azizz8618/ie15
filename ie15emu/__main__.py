@@ -182,10 +182,14 @@ def apply_conf(ns, cp: configparser.ConfigParser):
         # мышь терминала отдана эмулятору: колесо листает «историю» выдачи
         # (циклической прокрутки нет); mouse = off — листает сам терминал
         ns.mouse = cp.getboolean("terminal", "mouse", fallback=True)
-    if not getattr(ns, "no_help", None):
+    if getattr(ns, "show_help", None):
+        # --show-help задан явно: справка видна при старте
+        ns.no_help = False
+    elif not getattr(ns, "no_help", None):
         # справка подвала (легенда клавиш): [terminal] help = on/off;
+        # по умолчанию СКРЫТА — включается --show-help, help = on или F12;
         # в ns.no_help хранится ОБРАТНОЕ («--no-help»), поэтому инверсия
-        ns.no_help = not cp.getboolean("terminal", "help", fallback=True)
+        ns.no_help = not cp.getboolean("terminal", "help", fallback=False)
     if not getattr(ns, "machine", None):
         # номер ЭВМ в строке состояния над кадром (пусто — не показываем)
         ns.machine = (cp.get("line", "machine", fallback="") or "").strip()
@@ -836,6 +840,10 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--no-help", action="store_true", default=None,
                     help="убрать из подвала ряды-справку (легенду клавиш); "
                          "нижняя строка состояния остаётся")
+    ap.add_argument("--show-help", action="store_true", default=None,
+                    help="показать ряды-справку при старте (по умолчанию "
+                         "она скрыта; включается также [terminal] help = on "
+                         "и клавишей F12 в ходе сеанса)")
     ap.add_argument("--fit", action="store_true", default=None,
                     help="подогнать окно терминала ровно на «25 рядов кадра + "
                          "подвал» (по умолчанию окно не трогаем: кадр ЭВМ "
