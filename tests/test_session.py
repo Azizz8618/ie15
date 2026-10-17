@@ -285,6 +285,70 @@ def test_local_f5_keeps_cursor_inside_buffer():
     assert 0 <= session._buf_pos <= len(session.buffer)
 
 
+def test_pulse_sends_space_once_per_interval():
+    # «Пробел поддержки»: раз в интервал в линию уходит пробел, чтобы
+    # программы БЭСМ-6 не считали сеанс уснувшим
+    session, link = make_session(MODE_LOCAL)
+    session.pulse_interval = 60.0
+    session._pulse_next = 0.0                      # интервал «настал»
+    assert session.pulse_tick() is True
+    assert link.sent == [b" "]
+    # до следующего интервала — повторов нет
+    assert session.pulse_tick() is False
+    assert link.sent == [b" "]
+
+
+def test_pulse_disabled_and_line_lost():
+    session, link = make_session(MODE_LOCAL)
+    session.pulse_interval = 0.0                   # выключено конфигом
+    session._pulse_next = 0.0
+    assert session.pulse_tick() is False
+    assert link.sent == []
+    session.pulse_interval = 60.0
+    session.mark_line_lost("обрыв")
+    assert session.pulse_tick() is False           # линия потеряна
+    assert link.sent == []
+
+
+def test_pulse_echo_not_drawn_on_screen():
+    # эхо пробела (машинное) не попадает на экран: знак не печатается,
+    # курсор не двигается — иначе весь следующий вывод съезжал бы на
+    # колонку вправо
+    session, link = make_session(MODE_HOST)
+    session.pulse_interval = 60.0
+    session._pulse_next = 0.0
+    session.pulse_tick()
+    assert link.sent == [b" "]
+    sc = session.parser.screen
+    before = [row[:] for row in sc.cells], (sc.x, sc.y)
+    session.handle_line_reply(b" ")                # машина эхит пробел
+    after = [row[:] for row in sc.cells], (sc.x, sc.y)
+    assert after == before, "эхо пробела изменило экран"
+    # а чужой пробел спустя срок гасить уже нельзя
+    session._pulse_echo_until = 0.0
+    session.handle_line_reply(b"A B")
+    text = "".join(session.parser.screen.row_text("frame", 0) or "")
+    assert "A B" in text                          # пробел сохранён
+
+
+def test_pulse_echo_stripping_window():
+    # гасим только своё эхо и только в коротком окне: спустя срок пробел
+    # в выводе — уже чужой, трогать его нельзя. Окно живёт до первого
+    # успешного снятия — перед каждым случаем его переставляем
+    import time as _t
+    session, _ = make_session(MODE_LOCAL)
+    arm = lambda: setattr(session, "_pulse_echo_until", _t.time() + 5.0)
+
+    arm(); assert session._strip_pulse_echo(b" ") == b""          # своё — прочь
+    arm(); assert session._strip_pulse_echo(b"\r\n ") == b"\r\n"  # после ПС
+    arm(); assert session._strip_pulse_echo(b"  ") == b" "        # один за окно
+    arm(); assert session._strip_pulse_echo(b"A B") == b"A B"     # чужой не трогаем
+    session._pulse_echo_until = 0.0                               # не ждём эхо
+    assert session._strip_pulse_echo(b" ") == b" "
+    session._pulse_echo_until = _t.time() - 1.0                   # срок истёк
+    assert session._strip_pulse_echo(b" ") == b" "
+
+
 def test_local_f5_deletes_page_from_history():
     # Страница, загруженная в кадр из истории (PgUp), тоже удаляется по F5
     session, _ = make_session(MODE_LOCAL)

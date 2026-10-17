@@ -61,6 +61,15 @@ WHEEL_STEP = 3       # рядов выдачи на щелчок колеса м
 # разделители слова для прыжков Ctrl+←/→ по набору (АВТОНОМНО)
 WORD_DELIMS = b" ."
 
+# «Пробел поддержки»: программы БЭСМ-6, ждущие ввода с терминала, по
+# тишине на линии считают сеанс уснувшим и сбрасывают его. Раз в минуту
+# шлём в линию пробел — линия не молчит, а на экран он не попадает:
+# эхо пробела снимается до разбора (см. _strip_pulse_echo).
+PULSE_CHAR = b" "          # что шлём
+PULSE_INTERVAL = 60.0      # секунд между пробелами (0 — выключено)
+PULSE_ECHO_TTL = 5.0       # с: сколько ждём эхо своего пробела; позже —
+                           # не гасим (чтобы не съесть чужой пробел в выводе)
+
 
 # Баннер tmxr/telnet SIMH: «CONNECTED TO THE PDP-11/70 SIMULATOR TTY
 # DEVICE, LINE 3», «ENCODING IS RAW», «WRU …», дата-время, «From 10.0.0.1».
@@ -146,6 +155,11 @@ class TerminalSession:
         self.banner_seen = False     # баннер линии («CONNECTED TO …») пришёл
         self.line_lost = False       # линия потеряна (таймаут/разрыв SSH):
                                      # сеанс продолжается, отправки подавлены
+        # «пробел поддержки»: интервал (сек), когда следующий уйдёт и до
+        # какого срока ждём его эхо, чтобы снять с экрана
+        self.pulse_interval = PULSE_INTERVAL
+        self._pulse_next = time.time() + PULSE_INTERVAL
+        self._pulse_echo_until = 0.0
         self.mouse_on = False   # мышь терминала отдана эмулятору (F-подвал)
         self._banner_tail = b""      # недобранная строка баннера
         self._banner_done = False    # баннер закончился (пошли данные ЭВМ)
@@ -1072,6 +1086,56 @@ class TerminalSession:
         self._update_service()
         self._update_status()
 
+    def pulse_tick(self) -> bool:
+        """Раз в минуту — пробел в линию (поддержание программ БЭСМ-6).
+
+        Программа, ждущая ввода с терминала, по тишине считает сеанс
+        уснувшим; пробел без ПР не заканчивает строку, поэтому вводом
+        для программы не считается, но линия не молчит. Сам пробел на
+        экран не попадает — его эхо снимает _strip_pulse_echo.
+
+        True — пробел ушёл в линию. Вызывается из главного цикла
+        (сама себя держит по интервалу; pulse_interval=0 — выключена).
+        """
+        if self.pulse_interval <= 0 or self.line_lost or self.link is None:
+            return False
+        now = time.time()
+        if now < self._pulse_next:
+            return False
+        self._pulse_next = now + self.pulse_interval
+        try:
+            # пробел одинаков во всех кодировках линии (utf8/raw/dks) —
+            # перекодировка to_line не нужна
+            self.link.send(PULSE_CHAR)
+        except (OSError, LinkError) as e:
+            self.mark_line_lost(str(e))
+            return False
+        self._pulse_echo_until = now + PULSE_ECHO_TTL
+        return True
+
+    def _strip_pulse_echo(self, stream: bytes) -> bytes:
+        """Снять с приёма эхо своего «пробела поддержки».
+
+        Машинное эхо пробела печатало бы знак и двигало курсор — следом
+        весь вывод съезжал бы на колонку. Гасим только первый пробел и
+        только в окне PULSE_ECHO_TTL: позже пробел в выводе — уже чужой
+        (или эхо не пришло вовсе), и трогать его нельзя.
+        """
+        until = self._pulse_echo_until
+        if not until:
+            return stream
+        if time.time() > until:
+            self._pulse_echo_until = 0.0        # опоздали — не гасим чужое
+            return stream
+        i = stream.find(b" ")
+        if i < 0:
+            return stream                       # эхо ещё не пришло
+        if any(b not in (0x0D, 0x0A) for b in stream[:i]):
+            self._pulse_echo_until = 0.0        # перед пробелом — чужой
+            return stream                       # текст, не эхо-одиночка
+        self._pulse_echo_until = 0.0
+        return stream[:i] + stream[i + 1:]
+
     def emit(self, data: bytes | None) -> None:
         """Фактическая передача в линию: внутренний КОИ7-поток → байты линии.
 
@@ -1292,6 +1356,9 @@ class TerminalSession:
             stream, self._carry = normalize_incremental(data, self._carry)
         if not self.echo and stream:
             stream = self._strip_pending_echo(stream)
+        if stream:
+            # эхо «пробела поддержки» (см. pulse_tick) — на экран не выводим
+            stream = self._strip_pulse_echo(stream)
         reply = self.parser.feed(stream)
         self._update_service()         # ИНВ/ЗВН могли измениться разбором
         if not reply:

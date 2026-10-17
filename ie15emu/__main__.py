@@ -25,7 +25,7 @@ from .keyboard import DEFAULT_LAYOUT, decode_keys, key_to_bytes
 from .link import LinkError, open_link
 from .parser import Parser
 from .render import to_png_bytes, to_text
-from .session import TerminalSession
+from .session import PULSE_INTERVAL, TerminalSession
 from .undo import DEFAULT_UNDO
 
 from .hardterm import Output
@@ -159,6 +159,9 @@ def apply_conf(ns, cp: configparser.ConfigParser):
         # глубина отмены правок набора (АВТОНОМНО); 0 — отмена выключена
         ns.undo = cp.get("terminal", "undo", fallback=str(DEFAULT_UNDO)) \
             or str(DEFAULT_UNDO)
+    if getattr(ns, "pulse", None) is None:
+        # «пробел поддержки» в линию (сек); 0 — выключен
+        ns.pulse = cp.get("terminal", "pulse", fallback="60") or "60"
     if getattr(ns, "nabor", None) is None:
         term = "terminal" if cp.has_section("terminal") else None
         nb = cp.get(term, "nabor", fallback="") if term else ""
@@ -360,6 +363,7 @@ def run_line(parser: Parser, url: str, png: str | None,
              machine: str = "", show_help: bool = True,
              undo_depth: int = DEFAULT_UNDO,
              keylog: str | None = None,
+             pulse: float = PULSE_INTERVAL,
              **linkkw) -> None:
     import os
     import select
@@ -373,6 +377,9 @@ def run_line(parser: Parser, url: str, png: str | None,
         return
     session = TerminalSession(parser, link=link, mode=mode, layout=layout,
                               keymap=keymap, undo_depth=undo_depth)
+    # «пробел поддержки»: как часто шлём пробел в линию (0 — выключен)
+    session.pulse_interval = max(0.0, float(pulse))
+    session._pulse_next = time.time() + session.pulse_interval
     if machine:
         session.machine = str(machine)   # номер ЭВМ — в строке состояния
         session._update_status()
@@ -496,6 +503,10 @@ def run_line(parser: Parser, url: str, png: str | None,
                     session._update_status()
                     last_stamp = now
                     dirty = True
+                if session.pulse_tick():    # «пробел поддержки» в линию —
+                    # ни экрана, ни перерисовки не требует (эхо гасится
+                    # при приёме), но статус мог смениться (потеря линии)
+                    session._update_status()
                 if dirty:
                     # «правильный масштаб»: окно ровно на кадр 25 + подвал;
                     # проверяем по символу от ЭВМ (и по нажатию) — сбитый
@@ -777,6 +788,12 @@ def main(argv: list[str] | None = None) -> None:
                     help="записывать сырые нажатия клавиатуры и их разбор "
                          "в файл — диагностика, что шлёт терминал "
                          "(Shift+Home/End и т. п.)")
+    ap.add_argument("--pulse", type=float, default=None, metavar="СЕК",
+                    help="интервал «пробела поддержки» в линию, секунд: "
+                         "раз в это время в линию уходит пробел, чтобы "
+                         "программы БЭСМ-6 не считали сеанс уснувшим "
+                         "(его эхо на экран не выводится); 0 — выключить. "
+                         "По умолчанию 60 (секция [terminal] pulse)")
     ap.add_argument("--roms", default=str(ROM_DEFAULT))
     ap.add_argument("--password", default=None,
                     help="пароль для ssh://-линии (иначе из [ssh])")
@@ -874,6 +891,7 @@ def main(argv: list[str] | None = None) -> None:
                      show_help=not bool(args.no_help),
                      undo_depth=int(args.undo),
                      keylog=args.keylog,
+                     pulse=float(args.pulse),
                      password=args.password, keyfile=args.keyfile)
     else:
         run_script(parser, args.png)
