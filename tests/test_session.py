@@ -273,6 +273,66 @@ def test_local_f5_clears_page_without_history():
     assert session.last_key == "СТР. УДАЛЕНА"
 
 
+def test_cursor_stays_on_its_line_when_buffer_overflows():
+    # Регрессия: при буфере больше кадра печать «с нуля и до конца»
+    # уезжала вверх — строки над курсором уходили за край, курсор стоял
+    # не на своей строке, и знак вставлялся не под курсором
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    for i in range(40):                       # 40 строк > кадр (25)
+        for ch in f"L{i:02d}":
+            session.feed_key(ch)
+        session.feed_key("KEY_ENTER")
+    assert len(session.buffer) > 0
+
+    def line_and_row():
+        """Строка буфера под курсором и то, что на её месте на кадре."""
+        buf = bytes(session.buffer)
+        pos = session._buf_pos
+        start = buf.rfind(b"\r", 0, pos) + 1
+        nxt = buf.find(b"\r", pos)
+        end = len(buf) if nxt < 0 else nxt
+        buf_line = "".join(decode_koi7(bytes([c & 0x7F for c in buf[start:end]])))
+        row = "".join(decode_koi7(bytes([sc.cells[sc.y][x] for x in range(80)])))
+        return buf_line, row.rstrip()
+
+    # курсор в конце буфера: видна хвостовая страница
+    buf_line, row = line_and_row()
+    assert (sc.x, sc.y) == (0, 24), (sc.x, sc.y)  # пустая строка после ПС
+    assert buf_line == row.rstrip() or row == ""
+
+    # уход вверх по строкам: курсор обязан стоять на СВОЕЙ строке
+    for ups, want_line in ((1, "L39"), (10, "L30"), (25, "L15")):
+        s2, _ = make_session(MODE_LOCAL)
+        sc = s2.parser.screen
+        for i in range(40):
+            for ch in f"L{i:02d}":
+                s2.feed_key(ch)
+            s2.feed_key("KEY_ENTER")
+        for _ in range(ups):
+            s2.feed_key("KEY_UP")
+        session = s2
+        buf_line, row = line_and_row()
+        assert buf_line == row.rstrip(), (ups, buf_line, row.rstrip())
+
+    # знак встаёт под курсором: ряд меняется ровно на месте вставки
+    x0, y0 = sc.x, sc.y
+    before = "".join(decode_koi7(bytes([sc.cells[y0][x] for x in range(80)])))
+    session.feed_key("KEY_RIGHT")             # точка вставки = x0 + 1
+    session.feed_key("Z")                     # вставка в строку под курсором
+    x1, y1 = sc.x, sc.y                       # курсор после знака = x0 + 2
+    after = "".join(decode_koi7(bytes([sc.cells[y1][x] for x in range(80)])))
+    buf_line, row = line_and_row()
+    assert buf_line == row.rstrip(), (buf_line, row.rstrip())   # кадр = буфер
+    assert y1 == y0                           # курсор остался в своей строке
+    assert x1 == x0 + 2, (x0, x1)             # ровно один знак вставлен
+    assert after[:x0 + 1] == before[:x0 + 1]  # левее вставки — как было
+    # правее — тот же хвост, сдвинутый на знак (строка фиксированной
+    # ширины: последняя ячейка вытесняется за край — это всегда пробел,
+    # содержимое буфера при печати переносится)
+    assert after[x1:] == before[x0 + 1:][:len(after) - x1]
+
+
 def test_local_f5_deletes_page_from_buffer():
     # F5 в АВТОНОМНО удаляет из буфера ТО, что сейчас на кадре: видимая
     # страница исчезает, а уехавшие выше строки становятся видимыми

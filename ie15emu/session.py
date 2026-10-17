@@ -141,6 +141,9 @@ class TerminalSession:
         self._echo_pending = bytearray()   # эхо-ответ линии, ожидаемый при
                                      # выключенном эхе (срезается с приёма)
         self._echo_top = None        # строка, с которой началось локальное эхо блока
+        self._echo_from = 0          # индекс буфера, с которого начата печать
+        self._echo_to = 0            # индекс буфера, на котором печать кончилась
+        self._echo_bottom = None     # нижний ряд напечатанного блока
         self.encoding = encoding     # «utf8» | «raw» | «dks» — передача
         self.rx_encoding = encoding  # приём (у ДКС-линии — raw без NUL-преобразований)
         self.enc_decided = False     # баннер «Encoding is …» обработан
@@ -855,49 +858,62 @@ class TerminalSession:
 
         Эхо рисуется целиком из буфера: и вставка, и замена двигают хвост
         строки, а перерисовка по кускам оставляла бы «хвост» отменённых
-        знаков. После печати курсор ставится в позицию `_buf_pos`: по числу
-        ПР до неё — ряд, по остатку — знак.
+        знаков. Если буфер больше кадра — печатается не всё, а окно
+        (`_buf_window`), в котором видны и хвост, и строка курсора:
+        печать «с нуля» уезжала вверх, строки над курсором и сам курсор
+        уходили за край кадра, и знак вставлялся не под курсором.
+
+        После печати `_echo_top` — ряд нулевого знака буфера: печать могла
+        сдвинуть кадр вверх (`scrolled`), и этот сдвиг вычитается. Курсор
+        ставится по позиции `_buf_pos` (ряд — от `_echo_top`, прижатый
+        к кадру, колонка — по остатку от COLS).
         """
         sc = self.parser.screen
         self._erase_local_echo()          # стирает и ставит курсор в начало
-        self._echo_top = sc.y
+        top = sc.y
         buf = bytes(self.buffer)
+        start, end, lo = 0, len(buf), 0
+        delta = 0
+        page_end = end                # страница для F5 — до последнего ПС
         if buf:
+            avail = max(1, sc.rows - top)
+            start, end, lo = self._buf_window(buf, avail)
+            page_end = end
+            if end > start and buf[end - 1] in (0x0D, 0x0A):
+                # последний разрыв строки хвоста печати: после него курсор
+                # ушёл бы на строку ниже, кадр сдвинулся бы вверх и вся
+                # арифметика рядов поехала — сам разрыв на вид ничего
+                # не меняет (строка и так последняя), но для F5 страница
+                # всё равно кончается последним ПС (см. _echo_to)
+                end -= 1
+            before = sc.scrolled
             # ПР в буфере — разделитель строк; на экране это ПР ПС
-            self._echo_feed(buf.replace(b"\r", b"\r\n"))
-        head = buf[:self._buf_pos]
-        nl = head.count(b"\r")            # сколько строк выше курсора
-        col = len(head) - (head.rfind(b"\r") + 1)
-        # перенос по COLS: строка эха длиннее 80 знаков идёт на следующий ряд,
-        # иначе курсор после 80-го знака уезжал бы в конец своей строки
-        sc.y = min(sc.rows - 1, self._echo_top + nl + col // COLS)
-        sc.x = col % COLS
+            self._echo_feed(buf[start:end].replace(b"\r", b"\r\n"))
+            delta = sc.scrolled - before     # страховка: печать всё же уехала
+        # ряд нулевого знака буфера: верх печати минус пропущенные сверху
+        # ряды (`lo`) минус сдвиг кадра; знак i печатается в строке
+        # `_echo_top + rows(i)`
+        self._echo_top = top - lo - delta
+        self._echo_from = start
+        self._echo_to = page_end
+        # нижний ряд напечатанного блока — для стирания при следующей правке
+        self._echo_bottom = min(sc.rows - 1,
+                                self._echo_top + self._buf_rows_up_to(end))
+        rows, col = self._buf_rowcol(self._buf_pos)
+        sc.y = max(0, min(sc.rows - 1, self._echo_top + rows))
+        sc.x = col
         if self._buf_sel:
             # эхо перепечатано — снимки текста рядов в подсветке выделения
             # устарели, пересобираем её по новому содержимому кадра
             self._buf_sel_show()
 
     # --- выделение в буфере набора (АВТОНОМНО) ------------------------
-    def _buf_pos_to_screen(self, i: int) -> tuple[int, int]:
-        """Позиция в буфере набора → (ряд кадра, знак) на экране.
+    def _buf_rowcol(self, i: int) -> tuple[int, int]:
+        """(ряд эха, колонка) для позиции i — одним проходом по буферу.
 
-        Эхо печатается ПР ПС на каждый ПР буфера и переносится по COLS,
-        поэтому экранные координаты считаем по тому же правилу, что и
-        курсор в `_redraw_echo`.
-        """
-        sc = self.parser.screen
-        head = bytes(self.buffer[:i]).replace(b"\r", b"\r\n")
-        nl = head.count(b"\n")                # строк эха выше
-        col = len(head) - (head.rfind(b"\n") + 1)
-        y = min(sc.rows - 1, self._echo_top + nl + col // COLS)
-        return y, col % COLS
-
-    def _buf_rows_up_to(self, i: int) -> int:
-        """Сколько рядов кадра занимает эхо буфера до позиции i.
-
-        Точно повторяет печать `_redraw_echo`: ПР/ПС дают новый ряд,
-        каждые COLS знаков — перенос (строка в COLS знаков занимает
-        два ряда: ряд печати и ряд после переноса).
+        Точно повторяет печать: ПР/ПС дают новый ряд, каждые COLS знаков —
+        перенос (строка в COLS знаков занимает два ряда: ряд печати и ряд
+        после переноса), колонка — по остатку от COLS.
         """
         rows = run = 0
         for b in bytes(self.buffer[:i]):
@@ -906,42 +922,112 @@ class TerminalSession:
                 run = 0
             else:
                 run += 1
-        return rows + run // COLS
+        return rows + run // COLS, run % COLS
+
+    def _buf_rows_up_to(self, i: int) -> int:
+        """Сколько рядов кадра занимает эхо буфера до позиции i."""
+        return self._buf_rowcol(i)[0]
+
+    def _buf_pos_to_screen(self, i: int) -> tuple[int, int]:
+        """Позиция в буфере набора → (ряд кадра, знак) на экране.
+
+        Ряд считается от `_echo_top` (ряд нулевого знака буфера после
+        последней печати — он может быть и над кадром, если печать
+        уезжала вверх) и прижимается к кадру: выше видимой части
+        строка уже в истории, ей отдаётся верхний ряд.
+        """
+        sc = self.parser.screen
+        top = 0 if self._echo_top is None else self._echo_top
+        rows, col = self._buf_rowcol(i)
+        return max(0, min(sc.rows - 1, top + rows)), col
+
+    def _buf_window(self, buf: bytes, avail: int) -> tuple[int, int, int]:
+        """Окно эха, когда буфер больше кадра: (с чего, до куда, рядов сверху).
+
+        Печать «с нуля» и до конца буфера уезжала вверх: строки над
+        курсором и сам курсор уходили за край кадра, и знак вставлялся
+        не под курсором. Поэтому печатается не больше `avail` рядов:
+          * курсор у конца — виден хвост буфера (как раньше);
+          * курсор высоко — окно вокруг его строки, хвост не печатается
+            (он не нужен: важен знак под курсором).
+        Кадр при печати не смещается — печать влезает в окно целиком.
+        """
+        # starts[r] — индекс буфера, с которого начинается ряд r
+        # (границы строк и переносов считаются так же, как в _buf_rowcol)
+        starts = [0]
+        rows = run = 0
+        line_start = 0
+        for idx, b in enumerate(buf):
+            if b in (0x0D, 0x0A):
+                for j in range(1, run // COLS + 1):   # переносы строки
+                    rows += 1
+                    starts.append(line_start + j * COLS)
+                rows += 1                             # ПР ПС — новый ряд
+                starts.append(idx + 1)
+                run = 0
+                line_start = idx + 1
+            else:
+                run += 1
+        for j in range(1, run // COLS + 1):           # хвост незакрытой строки
+            rows += 1
+            starts.append(line_start + j * COLS)
+        total = rows                                  # рядов до конца буфера
+
+        def row_of(i: int) -> int:
+            # бинарный поиск по монотонной таблице
+            lo, hi = 0, len(starts)
+            while lo < hi:
+                mid = (lo + hi) // 2
+                if starts[mid] <= i:
+                    lo = mid + 1
+                else:
+                    hi = mid
+            return lo - 1
+
+        pos = self._buf_pos
+        cur = row_of(pos)
+        if cur >= total - (avail - 1):
+            # хвостовое окно: конец буфера и курсор у конца видны
+            lo = max(0, total - (avail - 1))
+            return starts[lo], len(buf), lo
+        # курсор высоко — окно от начала его строки
+        line_start_i = buf.rfind(b"\r", 0, pos) + 1
+        lo = row_of(line_start_i)
+        hi = lo + (avail - 1)
+        end = starts[hi + 1] if hi + 1 < len(starts) else len(buf)
+        return line_start_i, end, lo
 
     def _buf_page_span(self) -> tuple[int, int] | None:
         """Позиции буфера, отображённые на кадре (видимая страница набора).
 
-        Кадр показывает хвост печати: если строк больше, чем рядов под
-        эхом, кадр при печати смещается вверх и верхние строки уходят
-        в историю. Возвращает (от, до) — что именно сейчас видно, либо
-        None, если печатать нечего (пустой буфер).
+        Берём то, с чего реально началась последняя печать (`_echo_from`)
+        — при буфере больше кадра верхние строки не печатаются вовсе и
+        «страница» начинается не с нуля. Если эхо не печаталось (выключено
+        или буфер пуст) — видимой считается хвостовая страница.
         """
         buf = bytes(self.buffer)
         if not buf:
             return None
+        if self._echo_top is not None:
+            # что реально напечатано на кадре (при буфере больше кадра
+            # хвост может не печататься вовсе — окно вокруг курсора)
+            return (min(self._echo_from, len(buf)),
+                    min(self._echo_to, len(buf)))
         sc = self.parser.screen
-        top = 0 if self._echo_top is None \
-            else max(0, min(self._echo_top, sc.rows - 1))
-        available = sc.rows - top            # рядов под эхом
-        if available <= 0:
-            return None
         total = self._buf_rows_up_to(len(buf))
-        # печать дотягивает последний ряд эха (там стоит курсор) до нижней
-        # кромки кадра — при переполнении кадр смещается вверх на s рядов
-        scrolled = max(0, top + total - (sc.rows - 1))
-        j_start = max(0, scrolled - top)     # первый видимый ряд печати
-        if j_start <= 0:
-            return (0, len(buf))             # влезло целиком
-        row = run = 0
+        a = max(0, total - (sc.rows - 1))      # хвостовая страница
+        if a <= 0:
+            return (0, len(buf))
+        rows = run = 0
         for idx, b in enumerate(buf):
-            if row >= j_start:
-                return (idx, len(buf))
             if b in (0x0D, 0x0A):
-                row += run // COLS + 1
+                rows += run // COLS + 1
                 run = 0
+                if rows > a:                   # конец строки уже ниже верха
+                    return (idx + 1, len(buf))
             else:
                 run += 1
-        return (len(buf), len(buf))           # удалять нечего
+        return (len(buf), len(buf))            # удалять нечего
 
     def _buf_sel_hide(self) -> None:
         """Снять подсветку выделения набора (выделение мышью не трогаем)."""
@@ -1074,8 +1160,12 @@ class TerminalSession:
         if self._echo_top is None:
             return
         sc = self.parser.screen
-        y_end = min(sc.y, sc.rows - 1)
-        top = min(self._echo_top, y_end)   # блок мог убежать при скролле
+        # ряд до которой стираем: курсор или нижний край напечатанного
+        # блока (содержимое могло быть длиннее — уехало при печати)
+        y_end = min(max(sc.y, self._echo_bottom or 0), sc.rows - 1)
+        # верх: `_echo_top` считается от нулевого знака буфера и может
+        # быть отрицательным (печать уезжала вверх) — кадр начинается с нуля
+        top = max(0, min(self._echo_top, y_end))
         # Стираем ряды ОЗУ напрямую, а не ESC-командами через парсер:
         # в наборе команд №1 (Н0/Н1) ESC в парсер игнорируется, и
         # «ESC Y … ESC K» печатался бы в кадр буквально — «Y  K».
