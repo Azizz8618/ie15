@@ -759,8 +759,10 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--script", choices=["demo"],
                     help="без сети: прогнать встроенный скрипт")
     ap.add_argument("--feed", help="строка, отправить в линию после подключения")
-    ap.add_argument("--seconds", type=float, default=30.0,
-                    help="длительность сеанса (0 — до Ctrl-C)")
+    ap.add_argument("--seconds", type=float, default=0.0,
+                    help="длительность сеанса в секундах: по умолчанию 0 — "
+                         "до Ctrl-C (сеанс сам не закрывается); "
+                         "больше нуля — выход по истечении времени")
     ap.add_argument("--png", help="сохранить итоговый экран в PNG")
     ap.add_argument("--keylog", default=None, metavar="ФАЙЛ",
                     help="записывать сырые нажатия клавиатуры и их разбор "
