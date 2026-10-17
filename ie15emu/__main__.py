@@ -443,6 +443,7 @@ def run_line(parser: Parser, url: str, png: str | None,
     dirty = True                         # первый кадр рисуем сразу
     kb_pending = b""                     # недобранный хвост escape-последовательности
     keylog = _open_keylog(keylog)        # диагностика клавиш (--keylog)
+    end_reason = ""                      # чем закончился сеанс (в журнал)
     try:
         while seconds <= 0 or time.time() - t0 < seconds:
             try:
@@ -518,13 +519,18 @@ def run_line(parser: Parser, url: str, png: str | None,
                 if not session.line_lost:
                     say(f"[линия] {e} — сеанс продолжается, "
                         f"в строке состояния ЛИНИЯ=НЕТ")
+                    end_reason = f"обрыв линии: {e}"
                 session.mark_line_lost(str(e))
                 time.sleep(0.5)
+        end_reason = end_reason or (
+            f"время вышло ({seconds:g} с)" if seconds > 0
+            else "цикл завершён")
     except KeyboardInterrupt:
-        pass
+        end_reason = "Ctrl-C"
     except LinkError as e:            # ЭВМ сбросила линию — не трейсбек, а выход
         sys.stdout.write("\x1b[0m\r\n")
         say(f"[линия] {e} — сеанс завершён")
+        end_reason = f"линия закрыта: {e}"
     finally:
         if take_fit:
             fit.restore_saved()
@@ -537,6 +543,9 @@ def run_line(parser: Parser, url: str, png: str | None,
         if old is not None and fd is not None:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
         if keylog:
+            # чем закончился сеанс — по журналу видно причину «обрыва»
+            keylog.write(f"=== конец: {end_reason or 'прерван'} "
+                         f"({time.strftime('%H:%M:%S')}) ===\n")
             keylog.close()
         link.close()
     if png:
