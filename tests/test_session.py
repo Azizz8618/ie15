@@ -231,7 +231,8 @@ def test_local_plain_backspace_deletes_selection():
 
 def test_help_toggles_during_session():
     # F12 прячет/показывает справку подвала в ходе сеанса; состояния
-    # и «ПОСЛ» при этом остаются на месте
+    # и «ПОСЛ» при этом остаются на месте, а подсказка «СПРАВКА=F12»
+    # прижата к правому краю верхней строки состояния
     from ie15emu.keyboard import decode_key_bytes
     session, link = make_session(MODE_LOCAL)
     sc = session.parser.screen
@@ -242,12 +243,17 @@ def test_help_toggles_during_session():
     assert "СБРОС=F3" not in panel_text(sc)      # легенда скрыта
     assert "СЕТЬ=" in panel_text(sc)             # состояние осталось
     assert link.sent == []
-    # пока справка скрыта — подвал подсказывает, как её вернуть
-    assert "СПРАВКА=F12" in panel_text(sc)
+    # подсказка, как вернуть справку — в правом краю строки состояния
+    import re
+    status = re.sub(r"\x1b\[[0-9;]*m", "", sc.status_line())
+    assert "СПРАВКА=F12" not in panel_text(sc)   # в подвале её нет
+    assert status.rstrip().endswith("СПРАВКА=F12"), status
+    assert "СПРАВКА=F12" not in status[:len(status) - len(" | СПРАВКА=F12")]
     session.feed_key("HELP")                     # второй раз — обратно
     assert sc.show_help is True
     assert "СБРОС=F3" in panel_text(sc)
-    assert "СПРАВКА=F12" not in panel_text(sc)
+    status = re.sub(r"\x1b\[[0-9;]*m", "", sc.status_line())
+    assert "СПРАВКА=F12" not in status           # подсказка убрана
     # F12 (и запасная форма F1) распознаются из байтов терминала
     for seq in (b"\x1b[24~", b"\x1b[11~", b"\x1bOP", b"\x1b[[A"):
         assert decode_key_bytes(seq) == ["HELP"], seq

@@ -942,30 +942,47 @@ class Screen:
         self.service_dirty = False
 
     # --- строка состояния линии (вне кадра ЭВМ) --------------------
-    def set_status(self, cells: list[Cell]) -> None:
+    def set_status(self, cells: list[Cell], right: Cell | None = None) -> None:
         """Строка состояния над кадром: тип линии, номера, режим, время.
 
         Это «обвязка» сеанса на стороне оператора, в кадр ЭВМ она не
         входит: её рисует терминал над кадром, в историю выдачи и в
         листание (PgUp/колесо) не попадает.
+
+        `right` — ячейка, прижатая к правому краю строки (справа от
+        неё ничего нет); если она не влезает — строка остаётся без неё.
         """
         self.status_cells = [mk(c) if isinstance(c, str) else c for c in cells]
+        self.status_right = right
 
     def status_line(self) -> str:
-        """Строка состояния с цветом, дописанная до ширины окна."""
+        """Строка состояния с цветом, дописанная до ширины окна.
+
+        Ячейка `status_right` (см. set_status) рисуется в крайнем правом
+        углу: слева от неё пустое поле, последний символ — ровно на
+        ширины подвала.
+        """
         if not self.status_cells:
             return ""
-        parts = []
-        for cell in self.status_cells:
-            text = ""
+
+        def styled(cell: Cell) -> str:
+            out = ""
             for t, st in cell:
                 color = STYLE_ANSI.get(st, "")
-                text += f"{color}{t}\x1b[0m" if color else t
-            parts.append(text)
+                out += f"{color}{t}\x1b[0m" if color else t
+            return out
+
+        parts = [styled(cell) for cell in self.status_cells]
         line = SEP.join(parts).rstrip()
         # видимую длину считаем без управляющих кодов
         visible = sum(len(cell_text(c)) for c in self.status_cells) + \
             len(SEP) * (len(self.status_cells) - 1)
+        right = getattr(self, "status_right", None)
+        if right is not None:
+            rlen = len(cell_text(right))
+            if visible + len(SEP) + rlen <= self.panel_cols:
+                gap = self.panel_cols - visible - len(SEP) - rlen
+                return line + " " * gap + SEP + styled(right)
         return line + " " * max(self.panel_cols - visible, 0)
 
     def _row_text(self, row: list[Cell]) -> str:

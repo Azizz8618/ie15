@@ -254,12 +254,6 @@ class TerminalSession:
             st("БУФЕР=", str(len(self.buffer)) if self.buffer else "ПУСТО"),
             st("УПР.СИМВ=", "ВКЛ" if self.parser.show_ctrl else "ВЫКЛ"),
             last,                                   # «ПОСЛ» — свой ряд
-        ]
-        # справка скрыта — подсказка, как её вернуть: эта ячейка живёт в
-        # зоне состояний (до RULE/HELP) и вместе со справкой не прячется
-        if not sc.show_help:
-            state.append(mk(("СПРАВКА=F12", "edit")))
-        state += [
             RULE,                                 # состояние от справки
             HELP,                                 # дальше — справка (можно убрать)
             # F-клавиши — верхним рядом справки, по порядку F5…F10
@@ -638,6 +632,7 @@ class TerminalSession:
             self.last_key = "СПРАВКА ВКЛ" if sc_help.show_help \
                 else "СПРАВКА СКРЫТА"
             self._update_service()
+            self._update_status()     # подсказка «СПРАВКА=F12» — здесь же
             return None
         move = {"KEY_CTRLRIGHT": "word_right", "KEY_CTRLLEFT": "word_left",
                 "KEY_CTRLUP": "line_start", "KEY_CTRLDOWN": "line_below"}.get(key)
@@ -1289,6 +1284,7 @@ class TerminalSession:
         линией (raw / unicode / jcuken), справа — дата и время.
         """
         link = self.link
+        sc = self.parser.screen
         port = getattr(link, "line_port", None) or getattr(link, "port", None)
         when = time.localtime()
         cells = []
@@ -1353,6 +1349,9 @@ class TerminalSession:
         date_cell = mk(f"{when.tm_mday:02d}.{when.tm_mon:02d}.{when.tm_year} "
                        f"{when.tm_hour:02d}:{when.tm_min:02d}:"
                        f"{when.tm_sec:02d}")
+        # справка скрыта — подсказка «СПРАВКА=F12» в крайнем правом углу
+        # верхней строки состояния (см. set_status(right=…))
+        right = mk(("СПРАВКА=F12", "edit")) if not sc.show_help else None
 
         def width(cs) -> int:
             # длина строки состояния с разделителями « | »
@@ -1364,23 +1363,33 @@ class TerminalSession:
                 tail.insert(0, mk(("ОТ ЭВМ=", "label"), (ind_txt, "state")))
             return cells + tail
 
+        def need(cs) -> int:
+            # сколько места нужно строке вместе с ячейкой в правом углу
+            return width(cs) + (len(" | ") + len(cell_text(right))
+                                if right is not None else 0)
+
         # строка состояния обязана влезть в ширину подвала: длиннее —
         # терминал перенесёт её на второй ряд и сдвинет кадр ЭВМ. Жертвы —
-        # только ради индикатора: по очереди (см. victims) уходят подсказки
-        # и справочные ячейки, потом сокращается сам индикатор. Без
-        # индикатора строка ведёт себя как прежде — как и до него
+        # только ради индикатора «ОТ ЭВМ» или подсказки в правом углу:
+        # по очереди (см. victims) уходят подсказки и справочные ячейки,
+        # потом сокращается индикатор, потом снимается сама подсказка.
+        # Без них строка ведёт себя как прежде — как и до них
         panel_w = self.parser.screen.panel_cols
-        if ind_txt is not None:
-            while width(grown()) > panel_w:
+        if ind_txt is not None or right is not None:
+            while need(grown()) > panel_w:
                 if victims:
                     cells.remove(victims.pop(0))
                     continue
-                cut = width(grown()) - panel_w
-                if len(ind_txt) <= cut:
-                    ind_txt = None          # места нет вовсе — без него
-                    break
-                ind_txt = "…" + ind_txt[cut + 1:]
-        self.parser.screen.set_status(grown())
+                if ind_txt is not None:
+                    cut = need(grown()) - panel_w
+                    if len(ind_txt) <= cut:
+                        ind_txt = None          # места нет вовсе — без него
+                        continue
+                    ind_txt = "…" + ind_txt[cut + 1:]
+                    continue
+                right = None                    # подсказке не хватило — молчит
+                break
+        self.parser.screen.set_status(grown(), right=right)
 
     def _detect_encoding(self, data: bytes) -> None:
         """Кодировки приёма/передачи по баннеру линии SIMH.
