@@ -578,6 +578,86 @@ def test_incoming_drawn_in_host_mode():
     assert session.parser.screen.row_text("frame", 0)
 
 
+# --- оболочка SIMH: unicode-вывод и автопереключение на Н0 --------------
+
+def _raw_session():
+    """Сеанс С ЭВМ на RAW-линии (баннер «Encoding is RAW»)."""
+    session, _ = make_session(MODE_HOST)
+    session.rx_encoding = "raw"
+    return session
+
+
+def test_raw_line_utf8_displays_normally():
+    # Оболочка SIMH печатает unicode поверх raw-линии: байты читаются
+    # как UTF-8, а не рассыпаются по одному (в сырых кодах линии 0xD0/0xD1
+    # не бывает — ложных срабатываний нет)
+    session = _raw_session()
+    session.handle_line_reply("ПАРАМЕТРЫ ЗАДАНЫ УСПЕШНО\r\n".encode("utf-8"))
+    row = session.parser.screen.row_text("frame", 0) or ""
+    assert "ПАРАМЕТРЫ ЗАДАНЫ" in row, row
+    assert session.nabor == "n2"           # без приглашения набор не прыгает
+
+
+def test_raw_line_koi7_still_works():
+    # Сырой КОИ7 (коды 0x60.. и 0x80..) на той же линии — как раньше:
+    # в Н2 строка 0x60.. показывается заглавными, латиница — буквами
+    session = _raw_session()
+    session.handle_line_reply("ПАРАМЕТРЫ ЗАДАНЫ\r\n".encode("utf-8"))
+    session.handle_line_reply(bytes([0x64, 0x65]) + b" AB\r\n")
+    row1 = session.parser.screen.row_text("frame", 1) or ""
+    assert "ДЕ" in row1 and "AB" in row1, row1
+    session.handle_line_reply(bytes([0x72, 0x75, 0x73]) + b"\r\n")   # «рус»
+    row2 = session.parser.screen.row_text("frame", 2) or ""
+    assert "РУС" in row2, row2
+
+
+def test_simh_prompt_switches_to_n0():
+    # После приглашения оболочки SIMH набор сам уходит в Н0: приглашение
+    # видно прежним набором, следующая латиница идёт как есть (в Н1 она
+    # показывалась бы русскими буквами). Повторный prompt набор не дёргает,
+    # F8 возвращает его вручную
+    session = _raw_session()
+    session.handle_line_reply(b"sim set>\r\n")
+    row0 = session.parser.screen.row_text("frame", 0) or ""
+    assert "set>" in row0 or "СЕТ>" in row0, row0   # приглашение видно
+    assert session.nabor == "n0"
+    assert session.parser.mode == 1                 # Н0 — только УП
+    assert "set>" in session.last_key or "Н0" in session.last_key
+    session.handle_line_reply(b"help: set cpu\r\n")
+    row1 = session.parser.screen.row_text("frame", 1) or ""
+    assert "help: set cpu" in row1, row1            # латиница как есть
+    session.nabor = "n2"                            # набор вернули вручную
+    session.handle_line_reply(b"set again\r\n")
+    assert session.nabor == "n2"                    # повторный — не дёргает
+    before = session.nabor
+    session.feed_key("CMDSET")                      # F8 циклит (Н2→Н0→Н1…)
+    assert session.nabor != before
+
+
+def test_simh_prompt_unicode_triggers_n0():
+    # Приглашение приходит unicode («СЕТ>») — тоже перехватывается;
+    # сама кириллица в Н0 не отображается (так же и на настоящем терминале,
+    # набор 15ИЭ включает то, что видит), важно: переключение произошло
+    # и следующая латиница показана
+    session = _raw_session()
+    session.handle_line_reply("СЕТ>\r\n".encode("utf-8"))
+    assert session.nabor == "n0"
+    assert session.parser.screen.row_text("frame", 0) != ""
+    session.handle_line_reply(b"show version\r\n")
+    row1 = session.parser.screen.row_text("frame", 1) or ""
+    assert "show version" in row1, row1
+
+
+def test_simh_prompt_split_across_reads():
+    # Приглашение, разорванное между чтениями линии, ловится по окну
+    # приёма (_sniff)
+    session = _raw_session()
+    session.handle_line_reply(b"sim set")
+    assert session.nabor == "n2"              # приглашение ещё не полное
+    session.handle_line_reply(b">\r\nnext\r\n")
+    assert session.nabor == "n0"
+
+
 def test_status_line_always_fits_panel_width():
     # строка состояния обязана влезать в ширину подвала (80): иначе
     # терминал перенесёт её на второй ряд и сдвинет кадр ЭВМ

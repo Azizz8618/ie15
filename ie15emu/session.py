@@ -93,6 +93,38 @@ BANNER_HEADS = (b"connected", b"encoding", b"wru", b"prompt", b"from",
                 b"sun", b"mon", b"tue", b"wed", b"thu", b"fri", b"sat")
 
 
+# --- unicode-вывод поверх raw-линии (оболочка SIMH) ---------------------
+# Приглашение оболочки SIMH в трёх формах, в каких оно приходит:
+#   «set>»/«SET>» — ASCII (и КОИ7 в позиции 0x60.. — тот же ASCII),
+#   «СЕТ>» — unicode (SIMH печатает utf8),
+#   «СЕТ>» — кодами КОИ7 с битом алфавита (0x93 0x85 0x94).
+# Ищем по сырым данным (до перекодировок): `_sniff` — окно последних
+# 200 байт приёма, оно же переживает разрыв приглашения между чтениями.
+_SIMH_PROMPT = (b"\xd0\xa1\xd0\x95\xd0\xa2>", b"\x93\x85\x94>")
+
+
+def _simh_prompt(buf: bytes) -> bool:
+    """Есть ли в куске приглашение оболочки SIMH («set>»/«СЕТ>»)."""
+    return re.search(rb"(?i)set>", buf) is not None \
+        or any(p in buf for p in _SIMH_PROMPT)
+
+
+def _looks_like_utf8(data: bytes) -> bool:
+    """Кусок похож на unicode-текст: кириллица U+0400…U+04FF в UTF-8
+    (пары 0xD0/0xD1 + 0x80..0xBF). В сырых 7-разрядных кодах линии и во
+    внутреннем потоке КОИ7 (0x00..0x1F/0x60..0x7E/0x80..0x9E/0xE0..0xFE)
+    таких байтов не бывает — ложное срабатывание исключено. Хвост пары
+    в конце куска считается признаком: дописывается следующим чтением.
+    """
+    for i, b in enumerate(data):
+        if b in (0xD0, 0xD1):
+            if i + 1 == len(data):
+                return True            # неполная пара — ждём продолжения
+            if 0x80 <= data[i + 1] <= 0xBF:
+                return True
+    return False
+
+
 def _banner_open(line: bytes) -> bool:
     """Похоже ли начало строки на начало строки баннера."""
     low = line.strip().lower()
@@ -164,6 +196,7 @@ class TerminalSession:
         # текст (последние 120 знаков) и сколько их пришло
         self.incoming = ""
         self.incoming_n = 0
+        self._simh_shell = False   # «set>»: оболочка SIMH, набор уже Н0
         # «пробел поддержки»: интервал (сек), когда следующий уйдёт и до
         # какого срока ждём его эхо, чтобы снять с экрана
         self.pulse_interval = PULSE_INTERVAL
@@ -1612,14 +1645,28 @@ class TerminalSession:
             if not data:
                 return None
         if self.rx_encoding == "raw":
-            # RAW/ДКС-линия — байтовый канал ВТ-340: коды Н1 приходят как
-            # есть (русская буква — 0x60.. или уже с битом алфавита 0x80..);
-            # UTF-8-разбор здесь портил кадры, tmxr-баннер — единственная
-            # UTF-8-строка, ей жертвуем. Верхний регистр (одно-регистная
-            # традиция ЭВМ) применяется только в Н2 — в Н0/Н1 линия
-            # печатает оба регистра как есть
-            stream = koi7_raw_upper(data) if self.nabor == "n2" else data
-            stream, self._carry = stream, b""
+            if self._carry or _looks_like_utf8(data):
+                # Unicode-вывод поверх raw-линии (оболочка SIMH после
+                # «set>» печатает utf8): байты читаем как UTF-8, иначе
+                # кириллица рассыпалась бы по одному байту в мусор —
+                # 0xD0/0xD1 в сырых кодах линии не бывает (см. детектор)
+                stream, self._carry = normalize_incremental(data, self._carry)
+            elif _simh_prompt(self._sniff):
+                # чанк с приглашением оболочки SIMH — это латиница, а не
+                # строка 0x60.. кириллицы ЭВМ: карту koi7_raw_upper не
+                # применяем, иначе «set>» превратилось бы в коды 0x93..,
+                # которые в Н0 (переключение — следом) не отображаются
+                stream = data
+                stream, self._carry = stream, b""
+            else:
+                # RAW/ДКС-линия — байтовый канал ВТ-340: коды Н1 приходят как
+                # есть (русская буква — 0x60.. или уже с битом алфавита 0x80..);
+                # UTF-8-разбор здесь портил бы кадры, tmxr-баннер — единственная
+                # UTF-8-строка, ей жертвуем. Верхний регистр (одно-регистная
+                # традиция ЭВМ) применяется только в Н2 — в Н0/Н1 линия
+                # печатает оба регистра как есть
+                stream = koi7_raw_upper(data) if self.nabor == "n2" else data
+                stream, self._carry = stream, b""
         else:
             # utf8-приём читается инкрементально: незавершённая на границе
             # recv() многобайтовая кириллица доносит остатком
@@ -1641,6 +1688,20 @@ class TerminalSession:
         else:
             reply = self.parser.feed(stream)
             self._update_service()     # ИНВ/ЗВН могли измениться разбором
+        # Оболочка SIMH («set>»/«СЕТ>»): печатает unicode и обычный ASCII —
+        # набор переключается на Н0 сам, дальше латиница идёт как есть (в Н1
+        # строчная латиница показывалась бы русскими буквами). ПОСЛЕ вывода
+        # текущей строки: само приглашение ещё печатается прежним набором
+        # (в Н2 видно «СЕТ>»), Н0 действует для следующей выдачи.
+        # Однократно; вернуть набор — клавиша F8. Ищем в сыром окне
+        # приёма (_sniff) — сам поток к этому моменту перекодирован
+        if stream and not self._simh_shell and _simh_prompt(self._sniff):
+            self._simh_shell = True
+            if self.nabor != "n0":
+                self.nabor = "n0"
+                self.last_key = "НАБОР=Н0 (set>)"
+                self._update_service()
+                self._update_status()
         if not reply:
             return None
         wire = to_line(reply.encode("latin-1"), self.encoding)
