@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ie15emu import ROWS
-from ie15emu.charset import RUS7, decode_koi7
+from ie15emu.charset import RUS7, decode_koi7, encode_koi7
 from ie15emu.parser import Parser
 from ie15emu.screen import RULE
 from ie15emu.session import MODE_HOST, MODE_LOCAL, TerminalSession
@@ -989,6 +989,65 @@ def test_typed_full_width_line_closes_without_gap():
         session.feed_key(ch)
     assert sc.row_text("frame", 1).rstrip() == "КОНЕЦ", \
         "после полной строки появился пустой ряд"
+
+
+def test_paste_lines_wrapped_at_spaces():
+    # Вставка: строки длиннее кадра (80 знаков) ломаются по пробелам —
+    # слово идёт на следующий ряд целиком, слова не разделяются
+    session, _ = make_session(MODE_LOCAL)
+    text = " ".join(["СЛОВО"] * 30)            # 179 знаков одной строкой
+    session.feed_key(text)
+    lines = bytes(session.buffer).split(b"\r")
+    assert len(lines) > 1, "длинная строка не переломлена"
+    assert all(len(x) <= 80 for x in lines), "перелом не по границе кадра"
+    assert b" ".join(x for x in lines if x) == encode_koi7(text), \
+        "при переломе искажён текст"
+    # эхо на кадре — ряды без разрыва слов: каждый ряд кадра кончается
+    # там же, где строка буфера
+    sc = session.parser.screen
+    for i, x in enumerate(lines):
+        if x:
+            assert sc.row_text("frame", i).rstrip() == \
+                decode_koi7(x).rstrip(), (i, "ряд кадра ≠ строке буфера")
+
+
+def test_paste_word_longer_than_frame_broken_at_edge():
+    # Слово длиннее кадра (пробелов нет) рвётся по краю кадра — делить
+    # его нечем; хвост после слова остаётся целым
+    session, _ = make_session(MODE_LOCAL)
+    session.feed_key("А" * 100 + " ХВОСТ")
+    lines = bytes(session.buffer).split(b"\r")
+    assert lines[0] == encode_koi7("А" * 80)
+    assert lines[1] == encode_koi7("А" * 20 + " ХВОСТ")
+    assert all(len(x) <= 80 for x in lines)
+
+
+def test_paste_continues_typed_line_without_splitting_words():
+    # Вставка в конец набранного: первый ряд — продолжение строки набора,
+    # ширина считается от текущей колонки
+    session, _ = make_session(MODE_LOCAL)
+    for ch in "НАБРАНО ":
+        session.feed_key(ch)
+    session.feed_key(" ".join(["СЛОВО"] * 15))
+    lines = bytes(session.buffer).split(b"\r")
+    decoded = [decode_koi7(x) for x in lines]
+    assert all(len(x) <= 80 for x in decoded)
+    assert decoded[0] == "НАБРАНО " + " ".join(["СЛОВО"] * 12)   # ровно 80
+    # слова целы и на своих местах
+    assert " ".join(decoded) == "НАБРАНО " + " ".join(["СЛОВО"] * 15)
+
+
+def test_paste_chunks_long_line_wrapped_once():
+    # Вставка кусками (чтения по 256 байт) посреди длинной строки:
+    # перелом по пробелам всё равно делается по границе кадра
+    session, _ = make_session(MODE_LOCAL)
+    session.feed_key("СЛОВО " * 20)            # 120 знаков одним куском
+    session.feed_key("ХВОСТ-ВСТАВКИ")
+    lines = bytes(session.buffer).split(b"\r")
+    decoded = [decode_koi7(x) for x in lines]
+    assert all(len(x) <= 80 for x in decoded)
+    assert " ".join(x.rstrip() for x in decoded if x.rstrip()) == \
+        " ".join(["СЛОВО"] * 19) + " СЛОВО ХВОСТ-ВСТАВКИ"
 
 
 def test_frame_to_buffer_continues_below_echo():

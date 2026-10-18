@@ -327,6 +327,63 @@ class TerminalSession:
                 out.append(c)
         return bytes(out)
 
+    def _wrap_paste(self, data: bytes) -> bytes:
+        """Строки вставки длиннее COLS знаков ломаются по пробелам.
+
+        Печать рвёт длинную строку по краю кадра как придётся — середина
+        слова. Перелом по пробелу: слово идёт на следующий ряд целиком,
+        пробел на месте перелома заменяется разрывом строки. Слово
+        длиннее ряда (пробелов нет) рвётся по краю кадра — делить его
+        нечем. Первый ряд может быть продолжением строки набора (вставка
+        в конец набранного) — ширина считается от текущей колонки.
+        Вставка приходит кусками (чтения по 256 байт): ломаются
+        завершённые строки, хвост без ПР продолжится следующим куском.
+        """
+        out = bytearray()
+        col = self._buf_rowcol(self._buf_pos)[1]   # колонка вставки
+
+        def put(seg: bytes, closed: bool) -> None:
+            nonlocal col, out
+
+            def need_space() -> bool:
+                # соединительный пробел: ряд не пуст и перед вставкой
+                # уже не пробел (набранный «НАБРАНО » + вставка «СЛОВО…»
+                # не должны давать двойной пробел)
+                if col == 0:
+                    return False
+                if out:
+                    return out[-1] != 0x20
+                return not (self._buf_pos and
+                            self.buffer[self._buf_pos - 1] == 0x20)
+
+            for w in seg.split(b" "):
+                if col and col + 1 + len(w) > COLS:
+                    out += b"\r"               # перелом по пробелу
+                    col = 0
+                while len(w) > COLS - col:     # слово шире ряда
+                    out += w[:COLS - col] + b"\r"
+                    w = w[COLS - col:]
+                    col = 0
+                if w:
+                    if need_space():
+                        out += b" "
+                        col += 1
+                    out += w
+                    col += len(w)
+            if closed:
+                out += b"\r"
+                col = 0
+
+        line = bytearray()
+        for b in data:
+            if b in (0x0D, 0x0A):              # ПР/ПС вставки — разрыв строки
+                put(bytes(line), True)
+                line = bytearray()
+            else:
+                line.append(b)
+        put(bytes(line), False)                # хвост без ПР — не закрыт
+        return bytes(out)
+
     # --- НАБОР: три режима терминала 15ИЭ (клавиша F8) -------------------
     #   Н0 — знаки ASCII (ISO 646 IRV: ¤ ¬ ¯), команды — только УП;
     #   Н1 — русские знаки верхнего и нижнего регистра (КОИ-7 Н1:
@@ -974,6 +1031,11 @@ class TerminalSession:
                 self.reconnect()
                 return None
             return data        # очередь эхо-ответа ведёт emit()
+        if len(key) != 1 and is_paste_text:
+            # строки вставки длиннее кадра ломаются по пробелам — слова
+            # не разделяются (иначе печать рвёт их по краю кадра как
+            # придётся)
+            data = self._wrap_paste(data)
         # АВТОНОМНО: обычный ВК при открытом выделении удаляет его (как в
         # редакторах). Это же закрывает терминалы, где Shift+Backspace не
         # различим: xterm шлёт для Shift+ВК и обычного ВК один \x7f.
