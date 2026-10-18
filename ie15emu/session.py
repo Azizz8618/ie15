@@ -38,6 +38,12 @@ MODE_HOST = "host"        # «С ЭВМ»
 # единый пробел — вся строка должна умещаться в 80 знаков
 LINE_LABELS = {"utf8": "ЛИНИЯ=UTF-8", "raw": "ЛИНИЯ=RAW", "dks": "ЛИНИЯ=ДКС"}
 
+# имена клавиш-команд (не знаки и не вставка — ветки feed_key ниже)
+COMMAND_KEYS = frozenset((
+    "UNDO", "SEND", "MODE", "CMDSET", "BLINK", "ECHO", "CLEAR",
+    "SELCLEAR", "SELTAKE", "SELBSPACE", "HELP",
+))
+
 # Индикация последней нажатой управляющей клавиши: клавиша=отданный код
 CONTROL_HINTS = {
     "KEY_ENTER": "ENTER=0D0A", "KEY_BACKSPACE": "BKSP=08", "\x7f": "BKSP=08",
@@ -59,6 +65,20 @@ CONTROL_HINTS = {
 LAYOUT_LABELS = {"phonetic": "ФОН", "positional": "ПОЗ"}
 
 WHEEL_STEP = 3       # рядов выдачи на щелчок колеса мыши
+
+# Движения курсора не являются шагом отмены: навигация буфер не правит,
+# и откат по слову через неё не прерывается (набор до и после движения
+# откатывается одним шагом)
+CURSOR_MOVE_KEYS = frozenset((
+    "KEY_UP", "KEY_DOWN", "KEY_LEFT", "KEY_RIGHT",
+    "KEY_CTRLLEFT", "KEY_CTRLRIGHT", "KEY_CTRLUP", "KEY_CTRLDOWN",
+    "KEY_HOME", "KEY_END",
+    "SELUP", "SELDOWN", "SELLEFT", "SELRIGHT",
+    "CTRLSELUP", "CTRLSELDOWN", "CTRLSELLEFT", "CTRLSELRIGHT",
+    "SELHOME", "SELEND",
+    "KEY_PAGEUP", "KEY_PAGEDOWN",
+    "KEY_WHEELUP", "KEY_WHEELDOWN",
+))
 
 # разделители слова для прыжков Ctrl+←/→ по набору (АВТОНОМНО)
 WORD_DELIMS = b" ."
@@ -206,6 +226,8 @@ class TerminalSession:
         self._pulse_next = time.time() + PULSE_INTERVAL
         self._pulse_echo_until = 0.0
         self._last_paste = 0.0     # монотонное время последней части вставки
+        self._paste_pending = bytearray()   # хвост вставки без ПР: ждёт
+                                            # продолжения (см. _wrap_paste)
         # запись управляющих последовательностей НАПРЯМУЮ терминалу
         # (буфер обмена OSC52: копирование/вставка); ставит run_line,
         # None — писать некуда (тесты, headless)
@@ -224,6 +246,7 @@ class TerminalSession:
         if mode not in (MODE_LOCAL, MODE_HOST):
             raise ValueError(f"неизвестный режим: {mode!r}")
         was_host = self.mode == MODE_HOST
+        self.flush_paste()                 # отложенный хвост вставки — в буфер
         self.mode = mode
         # смена режима закрывает индикатор «ОТ ЭВМ»: в С ЭВМ сообщения
         # идут в кадр по-старому, накопленное в АВТОНОМНО больше не нужно
@@ -336,53 +359,92 @@ class TerminalSession:
         длиннее ряда (пробелов нет) рвётся по краю кадра — делить его
         нечем. Первый ряд может быть продолжением строки набора (вставка
         в конец набранного) — ширина считается от текущей колонки.
-        Вставка приходит кусками (чтения по 256 байт): ломаются
-        завершённые строки, хвост без ПР продолжится следующим куском.
+
+        Вставка приходит кусками (чтения по 256 байт), и граница куска
+        режет слово посередине. Поэтому ломаются только ЗАВЕРШЁННЫЕ
+        строки (с ПР), а хвост без ПР откладывается (`_paste_pending`) —
+        его продолжит следующий кусок; отдать отложенное до того —
+        `flush_paste` (любая клавиша, кроме продолжения вставки,
+        ПЕРЕДАЧА, смена режима, пауза в кусках).
         """
+        seg = bytes(self._paste_pending) + bytes(data)
+        self._paste_pending = bytearray()
         out = bytearray()
         col = self._buf_rowcol(self._buf_pos)[1]   # колонка вставки
-
-        def put(seg: bytes, closed: bool) -> None:
-            nonlocal col, out
-
-            def need_space() -> bool:
-                # соединительный пробел: ряд не пуст и перед вставкой
-                # уже не пробел (набранный «НАБРАНО » + вставка «СЛОВО…»
-                # не должны давать двойной пробел)
-                if col == 0:
-                    return False
-                if out:
-                    return out[-1] != 0x20
-                return not (self._buf_pos and
-                            self.buffer[self._buf_pos - 1] == 0x20)
-
-            for w in seg.split(b" "):
-                if col and col + 1 + len(w) > COLS:
-                    out += b"\r"               # перелом по пробелу
-                    col = 0
-                while len(w) > COLS - col:     # слово шире ряда
-                    out += w[:COLS - col] + b"\r"
-                    w = w[COLS - col:]
-                    col = 0
-                if w:
-                    if need_space():
-                        out += b" "
-                        col += 1
-                    out += w
-                    col += len(w)
-            if closed:
+        line = bytearray()
+        for b in seg:
+            if b in (0x0D, 0x0A):                  # ПР/ПС вставки — разрыв
+                col = self._paste_emit(bytes(line), out, col)
                 out += b"\r"
                 col = 0
-
-        line = bytearray()
-        for b in data:
-            if b in (0x0D, 0x0A):              # ПР/ПС вставки — разрыв строки
-                put(bytes(line), True)
                 line = bytearray()
             else:
                 line.append(b)
-        put(bytes(line), False)                # хвост без ПР — не закрыт
+        self._paste_pending += line                # хвост без ПР — в отложку
         return bytes(out)
+
+    def flush_paste(self) -> None:
+        """Отдать хвост вставки, ждущий продолжения (см. _wrap_paste).
+
+        Продолжение не пришло (другая клавиша, ПЕРЕДАЧА, смена режима,
+        пауза в кусках) — хвост печатается сейчас: перелом по пробелам,
+        слово длиннее ряда рвётся по краю кадра. Встаёт в текущую позицию
+        курсора и отменяется вместе со своей вставкой (шаг открыт).
+        """
+        if not self._paste_pending:
+            return
+        seg = bytes(self._paste_pending)
+        self._paste_pending = bytearray()
+        out = bytearray()
+        col = self._buf_rowcol(self._buf_pos)[1]
+        col = self._paste_emit(seg, out, col)
+        self.undo.snapshot(self.buffer)    # хвост — шаг своей вставки
+        self.buffer[self._buf_pos:self._buf_pos] = bytes(out)
+        self._buf_pos += len(out)
+        if self.echo:
+            self._redraw_echo()
+        self._update_service()
+
+    def paste_tick(self) -> None:
+        """Пауза в кусках вставки (PASTE_UNDO_GAP): хвост больше не
+        продолжится — отдать. Вызывается из цикла сеанса на каждой
+        итерации (в тестах отдача происходит на следующей клавише).
+        """
+        if self._paste_pending and \
+                time.monotonic() - self._last_paste > PASTE_UNDO_GAP:
+            self.flush_paste()
+
+    def _paste_emit(self, seg: bytes, out: bytearray, col: int) -> int:
+        """Строка вставки в `out` с переломом по пробелам.
+
+        Возвращает колонку после последнего знака. Соединительный пробел
+        не дублируется: перед точкой вставки может уже стоять пробел
+        (набранное «НАБРАНО » + вставка «СЛОВО…» — один пробел).
+        """
+
+        def need_space() -> bool:
+            if col == 0:
+                return False
+            if out:
+                return out[-1] != 0x20
+            return not (self._buf_pos and
+                        self.buffer[self._buf_pos - 1] == 0x20)
+
+        for w in seg.split(b" "):
+            if col and col + 1 + len(w) > COLS:
+                out += b"\r"                   # перелом по пробелу
+                col = 0
+            while len(w) > COLS - col:         # слово шире ряда
+                out += w[:COLS - col] + b"\r"
+                w = w[COLS - col:]
+                col = 0
+            if w:
+                if need_space():
+                    out += b" "
+                    col += 1
+                out += w
+                col += len(w)
+        return col
 
     # --- НАБОР: три режима терминала 15ИЭ (клавиша F8) -------------------
     #   Н0 — знаки ASCII (ISO 646 IRV: ¤ ¬ ¯), команды — только УП;
@@ -549,6 +611,12 @@ class TerminalSession:
         по этим строкам и пишут привязки в [keys].
         """
         orig = key
+        # отложенный хвост прошлой вставки: продолжение вставки его
+        # дописывает, любая другая клавиша — отдает его в буфер первым
+        if not (len(key) > 1 and not is_key_combo(key)
+                and not key.startswith(("KEY_", "MOUSE", "ctrl+MOUSE"))
+                and key not in COMMAND_KEYS) and self._paste_pending:
+            self.flush_paste()
         # выпадающая строка сообщения ЭВМ гасится первой же клавишей
         # (или движением мыши) — оператор увидел, пора убирать
         if self.parser.screen.notice:
@@ -587,11 +655,11 @@ class TerminalSession:
                 self._last_paste = time.monotonic()
             else:
                 continuing = False
-            if not continuing:
-                # откат по слову: любая не-знаковая клавиша (навигация,
-                # Enter, ВК, F-клавиши…) заканчивает текущий шаг отмены —
-                # следующая правка начнёт новый, а Ctrl+U откатит до
-                # этой границы
+            if not continuing and key not in CURSOR_MOVE_KEYS:
+                # откат по слову: любая не-знаковая клавиша (Enter, ВК,
+                # F-клавиши…) заканчивает текущий шаг отмены — следующая
+                # правка начнёт новый, а Ctrl+U откатит до этой границы.
+                # Движения курсора — не шаг: буфер не правят
                 self.undo.step()
         if key.lower() in ("ctrl+shift+c", "ctrl+shift+v"):
             # копирование/вставка из внешних источников (буфер обмена ОС).
@@ -1555,6 +1623,7 @@ class TerminalSession:
     # --- передача буфера --------------------------------------------
     def send(self) -> bytes:
         """Клавиша SEND: выдать накопленное в линию и очистить буфер."""
+        self.flush_paste()                 # хвост вставки — часть буфера
         data = bytes(self.buffer)
         self.buffer.clear()
         self._buf_pos = 0            # буфер пуст — курсор в начало набора

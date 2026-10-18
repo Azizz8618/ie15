@@ -598,6 +598,9 @@ def run_line(parser: Parser, url: str, png: str | None,
                     session._update_status()
                     last_stamp = now
                     dirty = True
+                session.paste_tick()        # пауза в кусках вставки —
+                if session._paste_pending:
+                    dirty = True            # хвост отложенной вставки отдан
                 if session.pulse_tick():    # «пробел поддержки» в линию —
                     # ни экрана, ни перерисовки не требует (эхо гасится
                     # при приёме), но статус мог смениться (потеря линии)

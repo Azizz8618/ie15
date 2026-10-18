@@ -105,18 +105,19 @@ def test_undo_step_by_step():
 
 
 def test_undo_boundary_on_enter_and_navigation():
-    # ПР и навигация тоже закрывают шаг: набор после них — новый шаг
+    # ПР закрывает шаг (это часть текста); движение курсора буфер не
+    # правит — шагом не является: набор до и после движения откатывается
+    # одним шагом
     session, _ = make_session(MODE_LOCAL)
     for ch in "ab":
         session.feed_key(ch)
     session.feed_key("KEY_ENTER")
     for ch in "cd":
         session.feed_key(ch)
-    session.feed_key("KEY_HOME")               # навигация — граница шага
+    session.feed_key("KEY_HOME")               # навигация — не шаг
     session.feed_key("x")
     assert bytes(session.buffer) == b"AB\rXCD"
-    for want in (b"AB\rCD",                  # снялся «x»
-                 b"AB\r",                    # потом слово «cd»
+    for want in (b"AB\r",                    # снялись «x» и «cd» вместе
                  b"AB",                      # потом ПР
                  b""):                       # и первое слово
         session.feed_key("UNDO")

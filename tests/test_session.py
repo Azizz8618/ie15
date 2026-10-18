@@ -683,6 +683,7 @@ def test_osc52_reply_pastes_with_recoding():
     assert keys == [text] and tail == b"", (keys, tail)
     session, _ = make_session(MODE_LOCAL)
     session.feed_key(keys[0])
+    session.flush_paste()                   # пауза — хвост отдаётся
     assert decode_koi7(bytes(session.buffer)) == text
     assert "ВСТАВКА" in session.last_key
     # ответ, разорванный между чтениями, тоже собирается
@@ -734,6 +735,7 @@ def test_terminal_own_paste_is_faithful():
     assert keys == [text]                   # один ключ вставки
     for k in keys:
         session.feed_key(k)
+    session.flush_paste()                   # пауза — хвост отдаётся
     assert decode_koi7(bytes(session.buffer)) == text, \
         "вставка одним ключом дала мусор"
     assert "ВСТАВКА" in session.last_key     # подвал показывает вставку
@@ -810,6 +812,7 @@ def test_bracketed_paste_in_session():
     session, _ = make_session(MODE_LOCAL)
     for k in keys:
         session.feed_key(k)
+    session.flush_paste()                  # пауза — хвост отдаётся
     # в буфере разделитель строк — ПР (0x0D), как у ВК
     assert bytes(session.buffer) == encode_koi7(text.replace("\n", "\r"))
     assert "ВСТАВКА" in session.last_key
@@ -829,6 +832,7 @@ def test_paste_undo_removes_whole_paste():
     for chunk in ("ЧАНК-ПЕРВЫЙ-КУСОК ВСТАВКИ",
                   " ЧАНК-ВТОРОЙ-КУСОК-ДАЛЕЕ", " И-ТРЕТИЙ-ЧАНКОВЫЙ"):
         session.feed_key(chunk)            # подряд, как чтения одной вставки
+    session.flush_paste()                  # пауза — хвост отдаётся
     assert bytes(session.buffer) != before
     session.feed_key("UNDO")
     assert bytes(session.buffer) == before, "откат оставил часть вставки"
@@ -853,6 +857,7 @@ def test_paste_undo_removes_whole_paste():
     session3, _ = make_session(MODE_LOCAL)
     session3.feed_key("ПЕРВАЯ-ИЗ-ДВУХ")
     time.sleep(0.6)                        # > PASTE_UNDO_GAP
+    session3.paste_tick()                  # цикл сеанса отдаёт хвост
     session3.feed_key("ВТОРАЯ-ИЗ-ДВУХ")
     session3.feed_key("UNDO")
     assert decode_koi7(bytes(session3.buffer)) == "ПЕРВАЯ-ИЗ-ДВУХ"
@@ -997,6 +1002,7 @@ def test_paste_lines_wrapped_at_spaces():
     session, _ = make_session(MODE_LOCAL)
     text = " ".join(["СЛОВО"] * 30)            # 179 знаков одной строкой
     session.feed_key(text)
+    session.flush_paste()                      # пауза — хвост отдаётся
     lines = bytes(session.buffer).split(b"\r")
     assert len(lines) > 1, "длинная строка не переломлена"
     assert all(len(x) <= 80 for x in lines), "перелом не по границе кадра"
@@ -1016,6 +1022,7 @@ def test_paste_word_longer_than_frame_broken_at_edge():
     # его нечем; хвост после слова остаётся целым
     session, _ = make_session(MODE_LOCAL)
     session.feed_key("А" * 100 + " ХВОСТ")
+    session.flush_paste()                      # пауза — хвост отдаётся
     lines = bytes(session.buffer).split(b"\r")
     assert lines[0] == encode_koi7("А" * 80)
     assert lines[1] == encode_koi7("А" * 20 + " ХВОСТ")
@@ -1029,6 +1036,7 @@ def test_paste_continues_typed_line_without_splitting_words():
     for ch in "НАБРАНО ":
         session.feed_key(ch)
     session.feed_key(" ".join(["СЛОВО"] * 15))
+    session.flush_paste()                      # пауза — хвост отдаётся
     lines = bytes(session.buffer).split(b"\r")
     decoded = [decode_koi7(x) for x in lines]
     assert all(len(x) <= 80 for x in decoded)
@@ -1043,11 +1051,58 @@ def test_paste_chunks_long_line_wrapped_once():
     session, _ = make_session(MODE_LOCAL)
     session.feed_key("СЛОВО " * 20)            # 120 знаков одним куском
     session.feed_key("ХВОСТ-ВСТАВКИ")
+    session.flush_paste()                      # пауза — хвост отдаётся
     lines = bytes(session.buffer).split(b"\r")
     decoded = [decode_koi7(x) for x in lines]
     assert all(len(x) <= 80 for x in decoded)
     assert " ".join(x.rstrip() for x in decoded if x.rstrip()) == \
         " ".join(["СЛОВО"] * 19) + " СЛОВО ХВОСТ-ВСТАВКИ"
+
+
+def test_paste_user_text_in_small_reads_words_intact():
+    # Регрессия: большой текст (600+ знаков, три абзаца) приходит
+    # чтениями по 16…4096 байт, границы чтений режут слова. Перелом по
+    # пробелам обязан делить слова только там, где пробел в источнике:
+    # незакрытый хвост куска откладывается и продолжается следующим
+    session, _ = make_session(MODE_LOCAL)
+    text = ("астоящее место группы ШККАЛ - MD/2248, физ. зона 0o1242 "
+            "(29-мегабайтный диск ПУЛЬТа; рядом КАЛАХ - 0o1234). Адрес "
+            "2400236 = число зон 2зона 0236 со смещением нумерации "
+            "0o1004. Все мои записи на 2148/2061/2348 были мимо цели - "
+            "цепочка exec всегда читала оттуда.\r"
+            "Старший разряд адреса - это число зон: группа ШККАЛ должна "
+            "быть ровно 2 зоны (как 6 у КАЛАХа). Моя трехзонная сборка "
+            "обрезалась и падала на старте - отсюда КОНЕЦ СЕАНСА.\r"
+            "Поймана и первая диагностическая величина: N=& - нEнт "
+            "огромный (формат :12 переполнился) - ШККАЛ читает зону с "
+            "гигантским счетчиком записей, отсюда и мусорные шифры в "
+            "строках.")
+    expected = decode_koi7(encode_koi7(text.replace("\r", " "))).split()
+    for size in (4096, 256, 128, 64, 32, 16):
+        s, _ = make_session(MODE_LOCAL)
+        for i in range(0, len(text), size):
+            s.feed_key(text[i:i+size])
+        s.flush_paste()                    # пауза — хвост отдаётся
+        lines = [decode_koi7(x) for x in bytes(s.buffer).split(b"\r")]
+        assert all(len(x) <= 80 for x in lines), \
+            f"чтение {size}: ряд длиннее кадра"
+        assert " ".join(lines).split() == expected, \
+            f"чтение {size}: слова разделены или потеряны"
+
+
+def test_cursor_move_is_not_undo_step():
+    # Движения курсора не являются шагом отмены: навигация буфер не
+    # правит, набор до и после движения откатывается одним шагом
+    session, _ = make_session(MODE_LOCAL)
+    for ch in "СЛОВО ПЕРВОЕ ":
+        session.feed_key(ch)
+    for k in ("KEY_LEFT", "KEY_UP", "KEY_CTRLLEFT", "KEY_HOME", "KEY_END"):
+        session.feed_key(k)
+    for ch in "ВТОРОЕ ":
+        session.feed_key(ch)
+    session.feed_key("UNDO")
+    assert decode_koi7(bytes(session.buffer)) == "СЛОВО ПЕРВОЕ ", \
+        "движение курсора разорвало шаг отмены"
 
 
 def test_frame_to_buffer_continues_below_echo():
