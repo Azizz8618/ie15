@@ -1129,8 +1129,22 @@ class TerminalSession:
                 # всё равно кончается последним ПС (см. _echo_to)
                 end -= 1
             before = sc.scrolled
-            # ПР в буфере — разделитель строк; на экране это ПР ПС
-            self._echo_feed(buf[start:end].replace(b"\r", b"\r\n"))
+            # ПР в буфере — разделитель строк; на экране это ПР ПС. Строка,
+            # заполнившая кадр ровно (длина кратна COLS), уже перевела
+            # курсор переносом печати — дополнительный ПС дал бы пустой
+            # ряд, поэтому её ПР печатается без ПС (как у ЭВМ: «текст ПР»)
+            out = bytearray()
+            line_start = buf.rfind(b"\r", 0, start) + 1
+            for i in range(start, end):
+                b = buf[i]
+                if b == 0x0D:
+                    line_len = i - line_start
+                    out += b"\r" if line_len and line_len % COLS == 0 \
+                        else b"\r\n"
+                    line_start = i + 1
+                else:
+                    out.append(b)
+            self._echo_feed(bytes(out))
             delta = sc.scrolled - before     # страховка: печать всё же уехала
         # ряд нулевого знака буфера: верх печати минус пропущенные сверху
         # ряды (`lo`) минус сдвиг кадра; знак i печатается в строке
@@ -1154,13 +1168,15 @@ class TerminalSession:
         """(ряд эха, колонка) для позиции i — одним проходом по буферу.
 
         Точно повторяет печать: ПР/ПС дают новый ряд, каждые COLS знаков —
-        перенос (строка в COLS знаков занимает два ряда: ряд печати и ряд
-        после переноса), колонка — по остатку от COLS.
+        перенос. Строка, заполнившая кадр ровно (длина кратна COLS),
+        перевела курсор переносом печати — её ПР нового ряда не даёт
+        (иначе перерисовка вставила бы пустой ряд после каждой такой
+        строки), колонка — по остатку от COLS.
         """
         rows = run = 0
         for b in bytes(self.buffer[:i]):
             if b in (0x0D, 0x0A):
-                rows += run // COLS + 1      # переносы законченной строки + ПС
+                rows += max(1, (run + COLS - 1) // COLS)
                 run = 0
             else:
                 run += 1
@@ -1186,17 +1202,19 @@ class TerminalSession:
     def _buf_starts(self, buf: bytes) -> tuple[list[int], int]:
         """Начала рядов печати и число рядов: starts[r] — индекс буфера,
         с которого начинается ряд r. Границы считаются как в `_buf_rowcol`:
-        ПР/ПС даёт новый ряд, каждые COLS знаков — перенос.
+        ПР/ПС даёт новый ряд, каждые COLS знаков — перенос; строка длиной,
+        кратной COLS, занимает один ряд (перенос уже сделан печатью).
         """
         starts = [0]
         rows = run = 0
         line_start = 0
         for idx, b in enumerate(buf):
             if b in (0x0D, 0x0A):
-                for j in range(1, run // COLS + 1):   # переносы строки
+                full = max(1, (run + COLS - 1) // COLS)
+                for j in range(1, full):              # переносы строки
                     rows += 1
                     starts.append(line_start + j * COLS)
-                rows += 1                             # ПР ПС — новый ряд
+                rows += 1                             # ряд после разрыва
                 starts.append(idx + 1)
                 run = 0
                 line_start = idx + 1
@@ -1312,7 +1330,7 @@ class TerminalSession:
         rows = run = 0
         for idx, b in enumerate(buf):
             if b in (0x0D, 0x0A):
-                rows += run // COLS + 1
+                rows += max(1, (run + COLS - 1) // COLS)
                 run = 0
                 if rows > a:                   # конец строки уже ниже верха
                     return (idx + 1, len(buf))

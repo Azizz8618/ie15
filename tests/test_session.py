@@ -956,6 +956,41 @@ def test_echo_starts_below_machine_content():
         "кадр сдвинулся при переходе: строки ЭВМ должны жить в буфере"
 
 
+def test_frame_with_full_width_rows_has_no_gaps():
+    # Регрессия: строка кадра ровно в 80 знаков после переноса в буфер
+    # занимала при перерисовке ДВА ряда (перенос печати + ПС от ПР) —
+    # в тексте на экране появлялись пустые интервалы. Строка кратной
+    # COLS длины занимает один ряд: перенос уже сделан печатью
+    session, _ = make_session(MODE_HOST)
+    sc = session.parser.screen
+    line80 = "А" * 79 + "Я"                # ровно 80 знаков, без пробелов
+    session.handle_line_reply((line80 + "\r\n" + line80 + "\r\n"
+                               + "КОНЕЦ\r\n").encode())
+    before = [sc.row_text("frame", y) for y in range(5)]
+    assert len(before[0]) == 80            # предусловие: полный кадр
+    session.toggle_mode()
+    session.feed_key("X")                  # первая правка перерисует эхо
+    after = [sc.row_text("frame", y) for y in range(5)]
+    assert after[:5] == before, "текст кадра искажён после перехода"
+    # набранный знак — на следующей строке под текстом, без интервалов
+    assert sc.row_text("frame", 5).rstrip() != ""
+
+
+def test_typed_full_width_line_closes_without_gap():
+    # Та же конвенция при обычном наборе: строка ровно в 80 знаков,
+    # закрытая Enter, не оставляет пустого ряда после себя
+    from ie15emu import COLS
+    session, _ = make_session(MODE_LOCAL)
+    sc = session.parser.screen
+    for _ in range(COLS):
+        session.feed_key("А")
+    session.feed_key("KEY_ENTER")
+    for ch in "КОНЕЦ":
+        session.feed_key(ch)
+    assert sc.row_text("frame", 1).rstrip() == "КОНЕЦ", \
+        "после полной строки появился пустой ряд"
+
+
 def test_frame_to_buffer_continues_below_echo():
     # Повторный переход С ЭВМ → АВТОНОМНО при живом наборе: добавляется
     # только то, что ЭВМ напечатала НИЖЕ эха набора — сам набор не
