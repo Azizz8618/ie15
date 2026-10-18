@@ -210,6 +210,9 @@ class TerminalSession:
         # (буфер обмена OSC52: копирование/вставка); ставит run_line,
         # None — писать некуда (тесты, headless)
         self.term_write = None
+        # callback повторного соединения: ВВОД в С ЭВМ при «ЛИНИЯ=НЕТ»
+        # (ставит run_line; None — переподключаться некуда)
+        self.reconnect = None
         self.mouse_on = False   # мышь терминала отдана эмулятору (F-подвал)
         self._banner_tail = b""      # недобранная строка баннера
         self._banner_done = False    # баннер закончился (пошли данные ЭВМ)
@@ -871,6 +874,14 @@ class TerminalSession:
         if not data:
             return None
         if self.mode == MODE_HOST:
+            # ВВОД при фактическом обрыве — повторное соединение. Ввод
+            # приходит разными формами: 0x0D (KEY_ENTER/прямой ПР) или
+            # 0x0A — стандартный setcbreak не снимает ICRNL, и терминал
+            # превращает ВК в \n (шлеть в мёртвую линию нечего)
+            if (key in ("KEY_ENTER", "\n", "\r")
+                    and self.line_lost and self.reconnect):
+                self.reconnect()
+                return None
             return data        # очередь эхо-ответа ведёт emit()
         # АВТОНОМНО: обычный ВК при открытом выделении удаляет его (как в
         # редакторах). Это же закрывает терминалы, где Shift+Backspace не

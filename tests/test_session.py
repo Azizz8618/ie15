@@ -864,6 +864,46 @@ def test_paste_undo_removes_whole_paste():
     assert session4.last_key == "ОТМЕНА"
 
 
+def test_enter_reconnects_when_line_lost():
+    # Фактический обрыв: ВВОД в С ЭВМ вызывает переподключение
+    # (callback ставит run_line) и НЕ шлёт ПР в мёртвую линию
+    session, link = make_session(MODE_HOST)
+    session.mark_line_lost("нет ответа")
+    calls = []
+    session.reconnect = lambda: calls.append("re")
+    out = session.feed_key("KEY_ENTER")
+    assert calls == ["re"] and out is None
+    assert getattr(link, "sent", []) == []      # в мёртвую линию — тишина
+
+    # Enter от реального терминала приходит 0x0A (setcbreak не снимает
+    # ICRNL) — эта форма тоже должна переподключать
+    session0, _ = make_session(MODE_HOST)
+    session0.mark_line_lost("x")
+    session0.reconnect = lambda: calls.append("re2")
+    assert session0.feed_key("\n") is None
+    assert session0.feed_key("\r") is None
+    assert calls == ["re", "re2", "re2"]
+
+    # при живой линии ВВОД — обычный ПР, переподключения нет
+    session2, _ = make_session(MODE_HOST)
+    session2.reconnect = lambda: calls.append("НЕТ")
+    assert session2.feed_key("KEY_ENTER") == b"\r"
+    assert calls == ["re", "re2", "re2"]
+
+    # в АВТОНОМНО при обрыве ВВОД — обычный ВК в буфер (не reconnect)
+    session3, _ = make_session(MODE_LOCAL)
+    session3.mark_line_lost("x")
+    session3.reconnect = lambda: calls.append("НЕТ-2")
+    session3.feed_key("KEY_ENTER")
+    assert bytes(session3.buffer) == b"\r"
+    assert calls == ["re", "re2", "re2"]
+
+    # без callback (тесты/headless) — Enter не падает, идёт обычным путём
+    session4, _ = make_session(MODE_HOST)
+    session4.line_lost = True
+    assert session4.feed_key("KEY_ENTER") == b"\r"
+
+
 def test_echo_starts_below_machine_content():
     # При переходе в АВТОНОМНО набор НЕ стирает уже имеющееся на кадре
     # (вывод ЭВМ) — эхо «спускается» ниже последней занятой строки; если

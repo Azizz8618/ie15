@@ -398,6 +398,44 @@ def run_line(parser: Parser, url: str, png: str | None,
         "F6 — ЭХО (пароль без вывода), "
         "F8 — РЕЖИМ (набор №1↔№2), F9 — АВТОНОМНО↔С ЭВМ, F10 — SEND, "
         "Ctrl-C — выход")
+
+    def _reconnect() -> None:
+        """Повторное соединение — ВВОД в С ЭВМ при «ЛИНИЯ=НЕТ».
+
+        Старый сокет закрывается, ссылка в сессии заменяется; новый
+        баннер линии отфильтруется заново (сброс _banner_*). При неудаче
+        флаг обрыва остаётся — ВВОД повторит попытку.
+        """
+        nonlocal link
+        if not url.startswith(("tcp://", "ssh://")):
+            say("[линия] переподключение предусмотрено для tcp/ssh-линий")
+            return
+        say(f"[линия] {url} — повторное соединение…")
+        try:
+            link.close()
+        except OSError:
+            pass                              # сокет уже мёртв
+        try:
+            new = open_link(url, **linkkw)
+        except (LinkError, OSError) as e:
+            say(f"[линия] не подключилось: {e} — ВВОД повторит попытку")
+            session.last_key = "ЛИНИЯ: не подключилась"
+            session._update_service()
+            return
+        link = new
+        session.link = new
+        session.line_lost = False
+        # новый сокет = баннер заново: служебные строки — в статус,
+        # не в кадр
+        session._banner_done = False
+        session._banner_tail = b""
+        session.last_key = "ЛИНИЯ: восстановлена"
+        session._update_service()
+        session._update_status()
+        say(f"[линия] {url} — соединение восстановлено")
+
+    session.reconnect = _reconnect
+
     # До отправки первого текста читаем баннер SIMH («Encoding is …»),
     # чтобы направление передачи совпало с кодировкой линии.
     if url.startswith(("tcp://", "ssh://")):
@@ -548,7 +586,8 @@ def run_line(parser: Parser, url: str, png: str | None,
                             if not session.line_lost:
                                 say(f"[линия] {e} — сеанс продолжается "
                                     f"(АВТОНОМНО доступен, отправка в линию "
-                                    f"выключена)")
+                                    f"выключена); ВВОД в С ЭВМ — "
+                                    f"повторное соединение")
                             session.mark_line_lost(str(e))
                             data = b""
                         if data:
