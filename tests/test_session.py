@@ -754,6 +754,7 @@ def test_terminal_own_paste_is_faithful():
     session_h, link_h = make_session(MODE_HOST)
     for k in keys:
         session_h.emit(session_h.feed_key(k))
+    session_h.flush_paste()                 # пауза — хвост отдаётся
     assert len(link_h.sent) == 1, link_h.sent
     assert b"".join(link_h.sent) == to_line(encode_koi7(text),
                                             session_h.encoding)
@@ -1103,6 +1104,32 @@ def test_cursor_move_is_not_undo_step():
     session.feed_key("UNDO")
     assert decode_koi7(bytes(session.buffer)) == "СЛОВО ПЕРВОЕ ", \
         "движение курсора разорвало шаг отмены"
+
+
+def test_host_paste_long_lines_wrapped_at_spaces():
+    # Вставка в С ЭВМ ломается по пробелам так же: строки длиннее кадра
+    # уходят в линию уже переломленными — эхо машины не рвёт слова.
+    # Линия utf8 несёт кириллицу двумя байтами — ряды считаем в знаках
+    session, link = make_session(MODE_HOST)
+    text = " ".join(["СЛОВО"] * 30)            # 179 знаков одной строкой
+    session.emit(session.feed_key(text))
+    session.flush_paste()                      # пауза — хвост отдаётся
+    lines = b"".join(link.sent).decode("utf-8", "replace").split("\r")
+    assert all(len(x) <= 80 for x in lines), "ряд длиннее кадра"
+    assert " ".join(x for x in lines if x).split() == ["СЛОВО"] * 30
+
+
+def test_host_paste_chunks_words_intact():
+    # Куски-чтения в С ЭВМ: незакрытый хвост куска отдаётся по паузе,
+    # слова на стыках кусков не рвутся
+    session, link = make_session(MODE_HOST)
+    text = " ".join(["СЛОВО"] * 30)
+    for i in range(0, len(text), 64):
+        session.emit(session.feed_key(text[i:i+64]))
+    session.flush_paste()
+    lines = b"".join(link.sent).decode("utf-8", "replace").split("\r")
+    assert all(len(x) <= 80 for x in lines)
+    assert " ".join(x for x in lines if x).split() == ["СЛОВО"] * 30
 
 
 def test_frame_to_buffer_continues_below_echo():
