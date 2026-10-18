@@ -223,18 +223,109 @@ class TerminalSession:
     def set_mode(self, mode: str) -> None:
         if mode not in (MODE_LOCAL, MODE_HOST):
             raise ValueError(f"неизвестный режим: {mode!r}")
+        was_host = self.mode == MODE_HOST
         self.mode = mode
         # смена режима закрывает индикатор «ОТ ЭВМ»: в С ЭВМ сообщения
         # идут в кадр по-старому, накопленное в АВТОНОМНО больше не нужно
         self.incoming = ""
         self.incoming_n = 0
         self.parser.screen.notice = ""     # и выпадающую строку
+        if mode == MODE_LOCAL and was_host:
+            # переход С ЭВМ → АВТОНОМНО: кадр становится началом набора
+            self._frame_to_buffer()
         self._update_service()
         self._update_status()
 
     def toggle_mode(self) -> str:
         self.set_mode(MODE_HOST if self.mode == MODE_LOCAL else MODE_LOCAL)
         return self.mode
+
+    def _frame_to_buffer(self) -> None:
+        """Переход С ЭВМ → АВТОНОМНО: текст кадра добавляется в буфер набора.
+
+        Кадр ЭВМ переходит к оператору: набор продолжает текст экрана,
+        ПЕРЕДАЧА отдаёт и его. Копируются ряды ниже собственного эха
+        набора (если эхо видно на кадре), иначе весь кадр; пустые ряды
+        сверху и снизу текста не переносятся, пустые ряды внутри —
+        сохраняются. Сам кадр не перерисовывается: текст уже на нём, а
+        `_echo_top` получает ряд кадра, с которого начинается буфер, —
+        следующий знак правит буфер и перерисовывает эхо с учётом
+        перенесённого текста (кадр становится окном на буфер, как при
+        обычном наборе больше экрана). Ничего не стирается: строки ЭВМ,
+        ушедшие при печати за край кадра, остаются в буфере, а не
+        пропадают.
+
+        Ряд кадра — одна строка буфера (разделитель ПР, как у Enter).
+        Перенос отменяем: Ctrl+U возвращает буфер к состоянию до
+        перехода. Закреплённый просмотр истории (PgUp) снимается —
+        набор должен быть виден.
+        """
+        sc = self.parser.screen
+        had_echo = bool(self.buffer) and self._echo_top is not None
+        if had_echo:
+            # эхо набора на кадре — кадр добавляем ниже него
+            echo_end = min(self._echo_to, len(self.buffer))
+            copy_from = max(0, self._echo_top) + self._buf_rows_up_to(echo_end)
+        else:
+            copy_from = 0
+        copy_from = max(0, min(copy_from, sc.rows - 1))
+        bottom = -1               # последний непустой ряд кадра ниже copy_from
+        for y in range(sc.rows - 1, copy_from - 1, -1):
+            if any(c != 0x20 for c in sc.cells[y]):
+                bottom = y
+                break
+        if bottom < copy_from:
+            return                # ниже эха кадр пуст — добавлять нечего
+        while copy_from <= bottom and \
+                not any(c != 0x20 for c in sc.cells[copy_from]):
+            copy_from += 1        # пустые ряды сверху текста не переносим
+        self.undo.snapshot(self.buffer)     # перенос кадра — отменяемый шаг
+        tail = bytes(self.buffer[self.buffer.rfind(b"\r") + 1:])
+        data = bytearray()
+        for y in range(copy_from, bottom + 1):
+            chunk = self._row_to_buffer(sc.cells[y]).rstrip(b" ")
+            if had_echo and tail and y == copy_from and chunk.startswith(tail):
+                # незакрытая строка набора продолжена ЭВМ на том же ряду:
+                # хвост эха уже в буфере — переносим только продолжение
+                chunk = chunk[len(tail):]
+            data += chunk + b"\r"
+        self.buffer.extend(data)
+        self.undo.step()
+        if not had_echo:
+            # буфер начался с ряда `copy_from` кадра
+            self._echo_top = copy_from
+            self._echo_from = 0
+        self._echo_to = len(self.buffer)
+        self._echo_bottom = min(
+            sc.rows - 1,
+            max(0, self._echo_top or 0) + self._buf_rows_up_to(self._echo_to))
+        self._buf_pos = len(self.buffer)    # набор продолжается ниже текста
+        # курсор — куда ляжет следующий знак; у нижнего края прижимается,
+        # печать следующего знака сама сдвинет окно, если места нет
+        rows, col = self._buf_rowcol(self._buf_pos)
+        sc.y = max(0, min(sc.rows - 1,
+                          max(0, self._echo_top or 0) + rows))
+        sc.x = col
+        sc.view_top = None        # набор должен быть виден, а не история
+
+    @staticmethod
+    def _row_to_buffer(row: list[int]) -> bytes:
+        """Ряд кадра (коды ЭВМ) → коды внутреннего потока буфера набора.
+
+        В кадре русские заглавные — 0x00…0x1E (коды ЭВМ), в буфере —
+        с «битом алфавита» 0x80+: иначе «М»=0x0D сливался бы с ПР, «К»=0x0B
+        — с УП, и печать эха исполняла бы их как команды. Русские строчные
+        кадра (0x60…) получают 0xE0+, латиница и знаки проходят как есть.
+        """
+        out = bytearray()
+        for c in row:
+            if 0x00 <= c <= 0x1F:      # русская заглавная (коды ЭВМ)
+                out.append(0x80 | c)
+            elif 0x60 <= c <= 0x7E:    # русская строчная
+                out.append(0xE0 | (c - 0x60))
+            else:
+                out.append(c)
+        return bytes(out)
 
     # --- НАБОР: три режима терминала 15ИЭ (клавиша F8) -------------------
     #   Н0 — знаки ASCII (ISO 646 IRV: ¤ ¬ ¯), команды — только УП;
@@ -1017,6 +1108,9 @@ class TerminalSession:
         к кадру, колонка — по остатку от COLS).
         """
         sc = self.parser.screen
+        sc.view_top = None        # печать правит кадр: закреплённый просмотр
+                                  # истории (PgUp) снят — набор должен быть
+                                  # виден, иначе набор шёл бы «вслепую»
         self._erase_local_echo()          # стирает и ставит курсор в начало
         top = sc.y
         buf = bytes(self.buffer)

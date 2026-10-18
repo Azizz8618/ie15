@@ -905,9 +905,9 @@ def test_enter_reconnects_when_line_lost():
 
 
 def test_echo_starts_below_machine_content():
-    # При переходе в АВТОНОМНО набор НЕ стирает уже имеющееся на кадре
-    # (вывод ЭВМ) — эхо «спускается» ниже последней занятой строки; если
-    # места внизу нет, кадр сдвигается вверх и строки уходят в историю
+    # При переходе в АВТОНОМНО кадр ЭВМ добавляется в буфер набора: текст
+    # экрана становится началом набора (ПЕРЕДАЧА отдаст и его), кадр не
+    # перерисовывается, курсор встаёт ниже текста
     session, _ = make_session(MODE_HOST)
     sc = session.parser.screen
     session.handle_line_reply("СТРОКА ПЕРВАЯ ЭВМ\r\n".encode())
@@ -915,15 +915,27 @@ def test_echo_starts_below_machine_content():
     top_text = (session.parser.screen.row_text("frame", 0),
                 session.parser.screen.row_text("frame", 1))
     session.toggle_mode()                       # → АВТОНОМНО
+    assert session.buffer, "кадр ЭВМ не добавлен в буфер"
+    assert bytes(session.buffer).endswith(b"\r")   # строки закрываются ПР
+    buf_after_toggle = bytes(session.buffer)
     session.feed_key("X")
     assert session.parser.screen.row_text("frame", 0) == top_text[0], \
         "первая строка ЭВМ уничтожена набором"
     assert session.parser.screen.row_text("frame", 1) == top_text[1], \
         "вторая строка ЭВМ уничтожена набором"
-    assert session.buffer                         # набор состоялся
-    assert session._echo_top == sc.last_used() - 1 or session._echo_top >= 2
+    assert len(session.buffer) == len(buf_after_toggle) + 1, \
+        "набор не продолжил буфер"
+    assert session._buf_pos == len(session.buffer)  # курсор в конце набора
 
-    # кадр целиком занят — набор сдвигает кадр, строки ЭВМ в истории
+    # Ctrl+U отменяет набор X: буфер возвращается к состоянию сразу после
+    # перехода (текст кадра без X); повторный Ctrl+U отменяет сам перенос
+    session.feed_key("UNDO")
+    assert bytes(session.buffer) == buf_after_toggle, \
+        "отмена не вернула буфер к состоянию после перехода"
+    session.feed_key("UNDO")
+    assert not session.buffer, "отмена не убрала перенос кадра"
+
+    # кадр целиком занят: строки ЭВМ переходят в буфер, а не стираются
     session2, _ = make_session(MODE_HOST)
     sc2 = session2.parser.screen
     for i in range(sc2.rows):              # кадр занят целиком, включая
@@ -932,10 +944,80 @@ def test_echo_starts_below_machine_content():
         end = "" if i == sc2.rows - 1 else "\r\n"
         session2.handle_line_reply(f"СТРОКА {i:02d}{end}".encode())
     hist_before = len(sc2.history)
+    first_row = session2._row_to_buffer(sc2.cells[0]).rstrip(b" ")
     session2.toggle_mode()
+    buf_after_toggle = bytes(session2.buffer)
     session2.feed_key("Y")
-    assert session2.buffer, "набор при полном кадре не состоялся"
-    assert len(sc2.history) > hist_before, "строки ЭВМ не ушли в историю"
+    assert len(session2.buffer) == len(buf_after_toggle) + 1, \
+        "набор при полном кадре не состоялся"
+    assert first_row + b"\r" in bytes(session2.buffer), \
+        "строки ЭВМ не добавлены в буфер"
+    assert len(sc2.history) == hist_before, \
+        "кадр сдвинулся при переходе: строки ЭВМ должны жить в буфере"
+
+
+def test_frame_to_buffer_continues_below_echo():
+    # Повторный переход С ЭВМ → АВТОНОМНО при живом наборе: добавляется
+    # только то, что ЭВМ напечатала НИЖЕ эха набора — сам набор не
+    # дублируется
+    session, _ = make_session(MODE_LOCAL)
+    for ch in "НАБОР":
+        session.feed_key(ch)
+    buffer_after_typing = bytes(session.buffer)
+    session.toggle_mode()                       # → С ЭВМ
+    session.handle_line_reply("ОТВЕТ ЭВМ\r\n".encode())
+    session.toggle_mode()                       # → АВТОНОМНО
+    buf = bytes(session.buffer)
+    assert buf.startswith(buffer_after_typing), "набор потерян/изменён"
+    assert buf.endswith(b"\r"), "строки ЭВМ не закрыты ПР"
+    assert len(buf) > len(buffer_after_typing), "ответ ЭВМ не добавлен"
+    assert session._buf_pos == len(session.buffer)
+
+
+def test_frame_to_buffer_skips_when_frame_empty():
+    # Пустой кадр — добавлять нечего: буфер не меняется
+    session, _ = make_session(MODE_HOST)
+    session.toggle_mode()
+    assert not session.buffer
+    assert session._echo_top is None
+    assert session._buf_pos == 0
+
+
+def test_mode_switch_unpins_history_view():
+    # Закреплённый просмотр истории (PgUp в С ЭВМ) снимается переходом
+    # в АВТОНОМНО: набор должен быть виден, а не «слепой» набор по кадру
+    session, _ = make_session(MODE_HOST)
+    sc = session.parser.screen
+    for i in range(60):
+        session.handle_line_reply(f"СТРОКА-{i:03d}\r\n".encode())
+    session.feed_key("KEY_PAGEUP")
+    assert sc.view_top is not None              # просмотр закреплён
+    session.toggle_mode()
+    assert sc.view_top is None, "закреплённый просмотр не снят переходом"
+    session.feed_key("X")
+    assert sc.view_top is None                  # и после набора тоже
+
+
+def test_long_typing_keeps_machine_rows_in_buffer():
+    # Главный сценарий потери: текст ЭВМ на кадре, набор перерастает кадр.
+    # Строки ЭВМ должны остаться в буфере (кадр — окно на буфер), а не
+    # стираться безвозвратно
+    session, _ = make_session(MODE_HOST)
+    sc = session.parser.screen
+    for i in range(30):
+        session.handle_line_reply(f"ВЫДАЧА-{i:03d}\r\n".encode())
+    seen_before = {session._row_to_buffer(sc.cells[y]).rstrip(b" ")
+                   for y in range(sc.rows)
+                   if any(c != 0x20 for c in sc.cells[y])}
+    session.toggle_mode()
+    for i in range(20):
+        for ch in f"НАБОР-{i:03d}":
+            session.feed_key(ch)
+        session.feed_key("KEY_ENTER")
+    buf = bytes(session.buffer)
+    for row in seen_before:
+        assert row + b"\r" in buf, f"строка ЭВМ {row!r} потеряна"
+    assert buf.endswith(b"\r")
 
 
 def test_incoming_drawn_in_host_mode():
@@ -1464,7 +1546,8 @@ def test_service_panel_all_bits():
     assert "ЛИНИЯ=ДКС" in panel() and "РАСК=ВЫКЛ" in panel()
     session.feed_key("MODE")                           # клавиша СЕАНС (F9)
     assert "СЕТЬ=АВТОНОМНО" in panel()
-    for ch in "ЗАД":
+    session.feed_key("SELCLEAR")                   # F3: кадр ЭВМ ушёл в буфер
+    for ch in "ЗАД":                               # — очистим, набор с нуля
         session.feed_key(ch)
     assert "БУФЕР=3" in panel()                        # буфер ждёт SEND
     session.emit(session.feed_key("SEND"))
