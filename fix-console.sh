@@ -178,6 +178,13 @@ IE15EOF
             if cp "$BUILT" "$SAVED" 2>/dev/null; then
                 say "собранная раскладка сохранена: $SAVED"
                 say "  (после перезагрузки верните её: sudo loadkeys \"$SAVED\")"
+                # скрипт идёт от root — файл останется root'у, и ни git,
+                # ни оператор читать его не смогут (закоммитить, сравнить).
+                # Отдаём тому, кто запускал через sudo; если запускали
+                # прямо от root — владельцу каталога репозитория
+                OWNER="${SUDO_USER:-$(stat -c '%U' "$(dirname "$0")")}"
+                chown "$OWNER" "$SAVED" 2>/dev/null || true
+                chmod 644 "$SAVED" 2>/dev/null || true
             fi
         else
             warn "раскладку с Shift+Ctrl+стрелками собрать не удалось —"
