@@ -370,10 +370,7 @@ class TerminalSession:
         seg = bytes(self._paste_pending) + bytes(data)
         self._paste_pending = bytearray()
         out = bytearray()
-        # в С ЭВМ «продолжение набранной строки» не наше — машина печатает
-        # от своего курсора; каждый ряд вставки начинается с нуля
-        col = 0 if self.mode == MODE_HOST \
-            else self._buf_rowcol(self._buf_pos)[1]
+        col = self._buf_rowcol(self._buf_pos)[1]   # колонка вставки
         line = bytearray()
         for b in seg:
             if b in (0x0D, 0x0A):                  # ПР/ПС вставки — разрыв
@@ -391,27 +388,22 @@ class TerminalSession:
 
         Продолжение не пришло (другая клавиша, ПЕРЕДАЧА, смена режима,
         пауза в кусках) — хвост печатается сейчас: перелом по пробелам,
-        слово длиннее ряда рвётся по краю кадра. В АВТОНОМНО встаёт в
-        текущую позицию курсора и отменяется вместе со своей вставкой
-        (шаг открыт); в С ЭВМ уходит в линию, как и основной кусок.
+        слово длиннее ряда рвётся по краю кадра. Встаёт в текущую позицию
+        курсора и отменяется вместе со своей вставкой (шаг открыт).
         """
         if not self._paste_pending:
             return
         seg = bytes(self._paste_pending)
         self._paste_pending = bytearray()
         out = bytearray()
-        col = 0 if self.mode == MODE_HOST \
-            else self._buf_rowcol(self._buf_pos)[1]
+        col = self._buf_rowcol(self._buf_pos)[1]
         col = self._paste_emit(seg, out, col)
-        if self.mode == MODE_LOCAL:
-            self.undo.snapshot(self.buffer)    # хвост — шаг своей вставки
-            self.buffer[self._buf_pos:self._buf_pos] = bytes(out)
-            self._buf_pos += len(out)
-            if self.echo:
-                self._redraw_echo()
-            self._update_service()
-        else:
-            self.emit(bytes(out))              # в линию, как основной кусок
+        self.undo.snapshot(self.buffer)    # хвост — шаг своей вставки
+        self.buffer[self._buf_pos:self._buf_pos] = bytes(out)
+        self._buf_pos += len(out)
+        if self.echo:
+            self._redraw_echo()
+        self._update_service()
 
     def paste_tick(self) -> None:
         """Пауза в кусках вставки (PASTE_UNDO_GAP): хвост больше не
@@ -1106,10 +1098,6 @@ class TerminalSession:
                     and self.line_lost and self.reconnect):
                 self.reconnect()
                 return None
-            if len(key) != 1 and is_paste_text:
-                # вставка в С ЭВМ ломается по пробелам так же: строки
-                # длиннее кадра эхом машины печатались бы посреди слова
-                data = self._wrap_paste(data)
             return data        # очередь эхо-ответа ведёт emit()
         if len(key) != 1 and is_paste_text:
             # строки вставки длиннее кадра ломаются по пробелам — слова
