@@ -69,6 +69,8 @@ WORD_DELIMS = b" ."
 # эхо пробела снимается до разбора (см. _strip_pulse_echo).
 PULSE_CHAR = b" "          # что шлём
 PULSE_INTERVAL = 60.0      # секунд между пробелами (0 — выключено)
+PASTE_UNDO_GAP = 0.5       # сек: чтения подряд = продолжение одной
+                           # вставки — тогда отмена удаляет её целиком
 PULSE_ECHO_TTL = 5.0       # с: сколько ждём эхо своего пробела; позже —
                            # не гасим (чтобы не съесть чужой пробел в выводе)
 
@@ -203,6 +205,7 @@ class TerminalSession:
         self.pulse_interval = PULSE_INTERVAL
         self._pulse_next = time.time() + PULSE_INTERVAL
         self._pulse_echo_until = 0.0
+        self._last_paste = 0.0     # монотонное время последней части вставки
         # запись управляющих последовательностей НАПРЯМУЮ терминалу
         # (буфер обмена OSC52: копирование/вставка); ставит run_line,
         # None — писать некуда (тесты, headless)
@@ -418,10 +421,27 @@ class TerminalSession:
                 self._update_service()
                 return None
         if len(key) != 1:
-            # откат по слову: любая не-знаковая клавиша (навигация, Enter,
-            # ВК, F-клавиши…) заканчивает текущий шаг отмены — следующая
-            # правка начнёт новый, а Ctrl+U откатит до этой границы
-            self.undo.step()
+            # Многосимвольный текст — вставка (из буфера ОС или --feed).
+            # Пока части идут подряд (терминал без меток 200~ шлёт её
+            # чтениями по 256 байт), это ОДНА вставка: шаг отмены между
+            # частями не ставится и промежуточный снимок не кладётся —
+            # цель отката остаётся «состояние до вставки», и Ctrl+U
+            # удаляет весь объём целиком, а не по частям
+            is_paste_text = (len(key) > 1 and not is_key_combo(key)
+                             and not key.startswith(
+                                 ("KEY_", "MOUSE", "ctrl+MOUSE")))
+            if is_paste_text:
+                continuing = (time.monotonic() - self._last_paste
+                              <= PASTE_UNDO_GAP)
+                self._last_paste = time.monotonic()
+            else:
+                continuing = False
+            if not continuing:
+                # откат по слову: любая не-знаковая клавиша (навигация,
+                # Enter, ВК, F-клавиши…) заканчивает текущий шаг отмены —
+                # следующая правка начнёт новый, а Ctrl+U откатит до
+                # этой границы
+                self.undo.step()
         if key.lower() in ("ctrl+shift+c", "ctrl+shift+v"):
             # копирование/вставка из внешних источников (буфер обмена ОС).
             # Без этого ветки нажатие разбиралось бы как УП Ctrl+C/Ctrl+V
@@ -453,8 +473,7 @@ class TerminalSession:
         elif len(key) == 1:
             self.last_key = arrow + f"{key} U+{ord(key):04X}"
             self._update_service()
-        elif len(key) > 1 and not is_key_combo(key) \
-                and not key.startswith(("KEY_", "MOUSE", "ctrl+MOUSE")):
+        elif is_paste_text:
             # многосимвольное нажатие — вставка из буфера обмена (OSC52)
             # или --feed: идёт обычной перекодировкой, в подвале — размер
             # (имена KEY_/MOUSE сюда не попадают — у них свои подсказки)

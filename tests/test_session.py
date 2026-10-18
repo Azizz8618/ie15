@@ -815,6 +815,55 @@ def test_bracketed_paste_in_session():
     assert "ВСТАВКА" in session.last_key
 
 
+def test_paste_undo_removes_whole_paste():
+    # Вставка из буфера ОС приходит чанками (чтения по 256 байт, когда
+    # терминал не шлёт меток 200~) — Ctrl+U обязан удалять её ЦЕЛИКОМ,
+    # а не частями: раньше каждый чанк ставил свою границу шага и
+    # откат шёл по чанкам (3 отмены на 3 чанка)
+    from ie15emu.charset import decode_koi7
+
+    session, _ = make_session(MODE_LOCAL)
+    for ch in "до вставки ":
+        session.feed_key(ch)
+    before = bytes(session.buffer)
+    for chunk in ("ЧАНК-ПЕРВЫЙ-КУСОК ВСТАВКИ",
+                  " ЧАНК-ВТОРОЙ-КУСОК-ДАЛЕЕ", " И-ТРЕТИЙ-ЧАНКОВЫЙ"):
+        session.feed_key(chunk)            # подряд, как чтения одной вставки
+    assert bytes(session.buffer) != before
+    session.feed_key("UNDO")
+    assert bytes(session.buffer) == before, "откат оставил часть вставки"
+
+    # одиночная вставка (bracketed/OSC52, один ключ) — тоже целиком
+    session.feed_key("ОДИНОЧНАЯ-ВСТАВКА")
+    session.feed_key("UNDO")
+    assert bytes(session.buffer) == before
+
+    # слово ДО вставки переживает откат вставки (граница ставится перед ней)
+    session2, _ = make_session(MODE_LOCAL)
+    for ch in "слово ":
+        session2.feed_key(ch)
+    word = bytes(session2.buffer)
+    session2.feed_key("ВСТАВКА")
+    session2.feed_key("UNDO")
+    assert bytes(session2.buffer) == word
+
+    # вставки, разделённые большой паузой, — разные шаги: уходит только
+    # последняя
+    import time
+    session3, _ = make_session(MODE_LOCAL)
+    session3.feed_key("ПЕРВАЯ-ИЗ-ДВУХ")
+    time.sleep(0.6)                        # > PASTE_UNDO_GAP
+    session3.feed_key("ВТОРАЯ-ИЗ-ДВУХ")
+    session3.feed_key("UNDO")
+    assert decode_koi7(bytes(session3.buffer)) == "ПЕРВАЯ-ИЗ-ДВУХ"
+
+    # служебные клавиши вставкой не считаются — подвал свой
+    session4, _ = make_session(MODE_LOCAL)
+    session4.feed_key("с")
+    session4.feed_key("UNDO")
+    assert session4.last_key == "ОТМЕНА"
+
+
 def test_echo_starts_below_machine_content():
     # При переходе в АВТОНОМНО набор НЕ стирает уже имеющееся на кадре
     # (вывод ЭВМ) — эхо «спускается» ниже последней занятой строки; если
