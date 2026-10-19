@@ -258,6 +258,10 @@ class Terminal:
         """Линия оборвалась — сообщить об этом вызывающему."""
         if self.link_error is not None:
             raise LinkError(str(self.link_error))
+        # обрыв «молча» (связь пропала, а данных нет) ловит проверка
+        # состояния линии: раз в check секунд спрашиваем у линии (моста)
+        if self.session.link_check_tick() and self.session.line_lost:
+            raise LinkError(self.session.last_key or "линия потеряна")
 
     # --- чтение линии -------------------------------------------------
     def _drain_banner(self, timeout: float) -> None:

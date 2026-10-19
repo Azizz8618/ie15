@@ -22,7 +22,7 @@ from . import COLS, ROWS, __version__
 from .charset import (decode_koi7, encode_koi7, koi7_display_upper,
                       koi7_raw_upper,
                       normalize_incremental, to_line)
-from .link import LinkError
+from .link import LinkError, parse_probe
 from .keyboard import (DEFAULT_LAYOUT, ctrl_code, is_key_combo, key_to_bytes,
                        KEY_CTRLSELDOWN, KEY_CTRLSELLEFT, KEY_CTRLSELRIGHT,
                        KEY_CTRLSELUP, KEY_SELDOWN, KEY_SELLEFT,
@@ -34,9 +34,10 @@ from .undo import DEFAULT_UNDO, UndoStack
 MODE_LOCAL = "local"      # «АВТОНОМНО»
 MODE_HOST = "host"        # «С ЭВМ»
 
-# Подписи установленных управляющих разрядов (служебная строка 25);
-# единый пробел — вся строка должна умещаться в 80 знаков
-LINE_LABELS = {"utf8": "ЛИНИЯ=UTF-8", "raw": "ЛИНИЯ=RAW", "dks": "ЛИНИЯ=ДКС"}
+# Тип линии по баннеру SIMH: «Connected to DKS» — ДКС, иначе КВУ.
+# В подвале показывается как «ЛИНИЯ=КВУ» / «ЛИНИЯ=ДКС» (обрыв — «НЕТ»).
+LINE_TYPE_KVU = "КВУ"
+LINE_TYPE_DKS = "ДКС"
 
 # имена клавиш-команд (не знаки и не вставка — ветки feed_key ниже)
 COMMAND_KEYS = frozenset((
@@ -93,6 +94,12 @@ PASTE_UNDO_GAP = 0.5       # сек: чтения подряд = продолж�
                            # вставки — тогда отмена удаляет её целиком
 PULSE_ECHO_TTL = 5.0       # с: сколько ждём эхо своего пробела; позже —
                            # не гасим (чтобы не съесть чужой пробел в выводе)
+
+# Проверка живости линии: раз в сколько секунд спрашиваем у линии
+# (моста SSH) состояние (см. TerminalSession.link_check_tick). Без неё
+# связь может пропасть «молча» — SSH-соединение не рвётся, данных нет,
+# а в строке состояния так и горит «ЛИНИЯ=ДКС» при давно ушедшей связи.
+CHECK_INTERVAL = 60.0      # секунд между проверками (0 — выключено)
 
 
 # Баннер tmxr/telnet SIMH: «CONNECTED TO THE PDP-11/70 SIMULATOR TTY
@@ -225,6 +232,12 @@ class TerminalSession:
         self.pulse_interval = PULSE_INTERVAL
         self._pulse_next = time.time() + PULSE_INTERVAL
         self._pulse_echo_until = 0.0
+        # проверка живости линии (моста): интервал (сек) и состояние
+        # последней проверки («ЖИВ»/«НЕТ»/«» — ещё не проверяли)
+        self.check_interval = CHECK_INTERVAL
+        self._check_next = time.time() + CHECK_INTERVAL
+        self.check_state = ""
+        self.check_info = ""       # отчёт моста (последний)
         self._last_paste = 0.0     # монотонное время последней части вставки
         self._paste_pending = bytearray()   # хвост вставки без ПР: ждёт
                                             # продолжения (см. _wrap_paste)
@@ -493,9 +506,20 @@ class TerminalSession:
         def st(label, value, style=None):  # «МЕТКА=значение» с цветом значения
             return mk(label, (value, style or self._flag_style(value)))
 
-        line = LINE_LABELS.get(self.encoding, f"ЛИНИЯ={self.encoding}")
+        # «ЛИНИЯ=» — единственный индикатор состояния линии: её тип
+        # (КВУ | ДКС), а не кодировка (кодировку объявляет сама линия, и она
+        # видна в строке состояния над кадром — «РЕЖИМ=RAW»). Пока баннер
+        # SIMH не пришёл — тип неизвестен («?»); обрыв связи (в т.ч. мост
+        # не отвечает — см. link_check_tick) — «НЕТ»: сеанс продолжается,
+        # линия не работает.
         if self.line_lost:
-            line = "ЛИНИЯ=НЕТ"        # таймаут/разрыв — сеанс продолжается
+            line = "НЕТ"
+        elif self.line_type:
+            line = self.line_type           # КВУ | ДКС
+        elif getattr(self.link, "banner", False):
+            line = "?"                       # баннер ещё не пришёл
+        else:
+            line = "ЛОК"                     # локальная линия (stdio://)
         last = mk("ПОСЛ: ", (self.last_key, "last"))
         state = [
             # «АВТОНОМНО» — красным и подчёркнутым: набор идёт в буфер
@@ -504,8 +528,8 @@ class TerminalSession:
                "state" if host else "local"),
             
             st("НАБОР=", self.NABOR_LABELS[self.nabor]),
-            st("ЛИНИЯ=", line.split("=", 1)[-1],
-               "off" if self.line_lost else None),
+            st("ЛИНИЯ=", line,
+               "off" if (self.line_lost or line == "?") else None),
             st("РАСК=", lay),
             st("ЭХО=", "ВКЛ" if self.echo else "ВЫКЛ"),
             st("ВИДЕО=", "ИНВ" if sc.inverse else "НОРМ"),
@@ -1717,6 +1741,65 @@ class TerminalSession:
         self._pulse_echo_until = now + PULSE_ECHO_TTL
         return True
 
+    def link_check_tick(self) -> bool:
+        """Регулярно спрашивать линию (мост SSH) о состоянии.
+
+        Связь пропадает «молча»: SSH-соединение не рвётся, но данных
+        больше нет — и подвал продолжает показывать «ЛИНИЯ=КВУ»/«ЛИНИЯ=ДКС»,
+        хотя линии давно нет. Раз в check_interval секунд спрашиваем у
+        линии состояние (Link.probe): ответа нет — линия потеряна
+        («ЛИНИЯ=НЕТ»), сеанс при этом продолжается (АВТОНОМНО доступен,
+        ВВОД в С ЭВМ — повторное соединение).
+
+        True — состояние линии изменилось (нужно перерисовать подвал).
+        """
+        if self.check_interval <= 0 or self.link is None or self.line_lost:
+            return False
+        if getattr(self.link, "probe_label", None) is None:
+            return False            # линия локальная — проверять нечего
+        now = time.time()
+        if now < self._check_next:
+            return False
+        self._check_next = now + self.check_interval
+        try:
+            info = self.link.probe()
+        except (OSError, LinkError) as e:
+            self.check_info = str(e)
+            if self.check_state != "НЕТ":
+                self.check_state = "НЕТ"
+                self._update_status()
+            self.mark_line_lost(str(e))
+            return True
+        self.check_info = str(info)
+        state = parse_probe(info, getattr(self.link, "line_port", None))
+        # мост сообщил, на какой линии стоит соединение: терминал, задавший
+        # диапазон портов, мог угадать не с того — показываем настоящий
+        port = state.get("port")
+        if port and port != getattr(self.link, "line_port", None):
+            self.link.line_port = port
+            self._update_status()
+        if state.get("line") == "МЕРТВА":
+            # мост жив, а линия за ним умерла — канал ещё держится, связи
+            # фактически уже нет
+            self.check_state = "НЕТ"
+            self.mark_line_lost("линия мертва (мост сообщил)")
+            return True
+        mark = state.get("bridge") or "ЖИВ"
+        if mark != self.check_state:
+            self.check_state = mark
+            self._update_status()
+            return True
+        return False
+
+    def mark_line_alive(self) -> None:
+        """Линия снова жива (повторное соединение): сбросить обрыв."""
+        self.line_lost = False
+        self.check_state = ""
+        self.check_info = ""
+        self._check_next = time.time() + self.check_interval
+        self._update_service()
+        self._update_status()
+
     def _strip_pulse_echo(self, stream: bytes) -> bytes:
         """Снять с приёма эхо своего «пробела поддержки».
 
@@ -1817,8 +1900,8 @@ class TerminalSession:
             self.banner_seen = True
             changed = True
         if b"Connected to DKS" in buf:
-            if self.line_type != "ДКС":
-                self.line_type = "ДКС"
+            if self.line_type != LINE_TYPE_DKS:
+                self.line_type = LINE_TYPE_DKS
                 changed = True
         m = BANNER_LINE_NO.search(buf)
         if m:
@@ -1840,7 +1923,8 @@ class TerminalSession:
                 self.peer = peer
                 changed = True
         if not self.line_type:
-            self.line_type = "КВУ"        # tty без «Connected to DKS» — КВУ
+            self.line_type = LINE_TYPE_KVU    # tty без «Connected to DKS» — КВУ
+            changed = True                    # подвал: «ЛИНИЯ=КВУ»
         if changed:
             self._update_service()
             self._update_status()
@@ -1862,8 +1946,9 @@ class TerminalSession:
             # сообщение о подключении так и не пришло — линия не «отошла»:
             # показываем прямо в строке состоянии, в кадр не пишем
             cells.append(mk(("ПРОВЕРЬ ЛИНИЮ!", "off")))
-        else:
-            cells.append(mk((self.line_type or "КВУ", "state")))
+        # типа линии (КВУ/ДКС) здесь нет: состояние линии — только в
+        # подвале, ячейка «ЛИНИЯ=» (см. _update_service). Здесь номера,
+        # канал и режим.
         if self.machine:
             cells.append(mk("ЭВМ=", (self.machine, "state")))
         if self.line_no is not None:
@@ -1871,7 +1956,8 @@ class TerminalSession:
         if port:
             cells.append(mk("КАНАЛ=", (str(port), "state")))
         if self.line_mode:
-            cells.append(mk("РЕЖИМ=", (self.line_mode, "state")))
+            mode_cell = mk("РЕЖИМ=", (self.line_mode, "state"))
+            cells.append(mode_cell)
         # мышь терминала отдана эмулятору? (выделение текста, колесо)
         mouse_cell = mk(("МЫШЬ=", "label"),
                         ("ВКЛ" if self.mouse_on else "ВЫКЛ",
@@ -1904,8 +1990,11 @@ class TerminalSession:
             victims.insert(0, cell)          # первая жертва — ОТМЕНА
         # версия эмулятора — видно, чем именно работаем (та же цифра в
         # --version и в строке запуска); перед датой, дата остаётся последней
-        cells.append(mk(("ВЕРСИЯ=", "label"), (__version__, "state")))
-        victims.append(mouse_cell)             # ВЕРСИЯ не жертвуется
+        version_cell = mk(("ВЕРСИЯ=", "label"), (__version__, "state"))
+        cells.append(version_cell)
+        # жертвы по списку (первая в списке — первая жертва): подсказки,
+        # затем мышь. Версия не жертвуется никогда.
+        victims.append(mouse_cell)             # мышь
         # индикатор сообщений ЭВМ в АВТОНОМНО (см. _note_incoming): кадр занят
         # набором, поэтому текст показываем здесь — хвост последних знаков,
         # а в скобках — сколько сообщений пришло с начала режима

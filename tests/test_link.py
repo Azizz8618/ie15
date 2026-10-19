@@ -10,8 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from ie15emu.link import (KEEPALIVE, LinkError, SSHLink, _enable_ssh_keepalive,
-                          _set_tcp_keepalive)
+from ie15emu.link import (KEEPALIVE, LinkError, SSHLink, TCPLink,
+                          _enable_ssh_keepalive, _set_tcp_keepalive)
 from ie15emu.parser import Parser
 from ie15emu.session import MODE_HOST, MODE_LOCAL, TerminalSession
 
@@ -149,3 +149,130 @@ def test_line_lost_flag_flips_once():
     assert s.line_lost is True
     assert s.last_key == first
     assert link.n == 1                       # дальше отправок нет
+
+
+# --- проверка живости линии (моста) -----------------------------------
+class _ProbeChan:
+    """Канал проверки: отдаёт заготовленный ответ моста."""
+
+    def __init__(self, answer: bytes = b""):
+        self.answer = answer
+        self.cmd = None
+        self.closed = False
+        self.eof_received = False
+
+    def settimeout(self, timeout):           # noqa: ARG002
+        pass
+
+    def exec_command(self, cmd):
+        self.cmd = cmd
+
+    def recv(self, size):                    # noqa: ARG002
+        out, self.answer = self.answer, b""
+        return out
+
+    def exit_status_ready(self):
+        return False
+
+    def close(self):
+        self.closed = True
+
+
+class _ProbeTransport:
+    """Транспорт SSH: канал проверки выдаётся заранее заготовленным."""
+
+    def __init__(self, chan=None, exc=None, active: bool = True):
+        self.chan = chan
+        self.exc = exc
+        self.active = active
+
+    def is_active(self):
+        return self.active
+
+    def open_session(self, timeout=None):     # noqa: ARG002
+        if self.exc is not None:
+            raise self.exc
+        return self.chan
+
+
+class _ProbeClient:
+    def __init__(self, transport):
+        self._t = transport
+
+    def get_transport(self):
+        return self._t
+
+
+def _link_for_probe(transport) -> SSHLink:
+    link = SSHLink.__new__(SSHLink)          # без подключения
+    link.client = _ProbeClient(transport)
+    link.chan = None
+    link.line_port = 4202
+    return link
+
+
+def test_ssh_probe_reads_bridge_report():
+    from ie15emu.link import parse_probe
+
+    report = ("МОСТ=ЖИВ\r\nСЕССИЙ=1\r\nЛИНИЯ=4202:ЖИВА (моя)\r\n").encode("utf-8")
+    chan = _ProbeChan(report)
+    link = _link_for_probe(_ProbeTransport(chan))
+    info = link.probe(timeout=1.0)
+    assert chan.cmd == "status"              # запрос состояния моста
+    assert "МОСТ=ЖИВ" in info
+    state = parse_probe(info, 4202)
+    assert state["bridge"] == "ЖИВ" and state["line"] == "ЖИВА"
+    assert state["port"] == 4202
+
+
+def test_ssh_probe_timeout_means_dead_bridge():
+    # Молчащий путь: канал не открывается за отведённое время — связи нет
+    from ie15emu.link import _SSHException
+
+    link = _link_for_probe(_ProbeTransport(
+        exc=_SSHException("Timeout opening channel.")))
+    try:
+        link.probe(timeout=0.1)
+    except LinkError:
+        pass
+    else:
+        raise AssertionError("молчащий мост не признан мёртвым")
+
+
+def test_ssh_probe_of_dead_transport():
+    link = _link_for_probe(_ProbeTransport(active=False))
+    try:
+        link.probe(timeout=0.1)
+    except LinkError:
+        pass
+    else:
+        raise AssertionError("мёртвый транспорт не признан мёртвым")
+
+
+def test_parse_probe_ignores_other_lines():
+    from ie15emu.link import parse_probe
+
+    text = "МОСТ=ЖИВ\r\nСЕССИЙ=2\r\nЛИНИЯ=4204:МЕРТВА\r\nЛИНИЯ=4202:ЖИВА\r\n"
+    state = parse_probe(text, 4202)
+    assert state["bridge"] == "ЖИВ"
+    assert state["line"] == "ЖИВА"          # наша линия жива
+    state = parse_probe(text, 4204)
+    assert state["line"] == "МЕРТВА"        # а вот эта — мертва
+
+
+def test_tcp_probe_sees_dead_socket():
+    # Сокет, который закрыли с другой стороны: проверка должна это увидеть
+    a, b = socket.socketpair()
+    try:
+        link = TCPLink.__new__(TCPLink)
+        link.sock = a
+        link.port = 4202
+        b.close()                            # обрыв
+        try:
+            link.probe(timeout=0.5)
+        except LinkError:
+            pass
+        else:
+            raise AssertionError("мёртвый сокет не признан мёртвым")
+    finally:
+        a.close()

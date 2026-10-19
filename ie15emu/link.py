@@ -13,8 +13,16 @@
 """
 from __future__ import annotations
 
+import logging
+import select
 import socket
 import time
+
+# paramiko без настроенного логгера пишет в stderr через «lastResort»:
+# «Secsh channel 0 open FAILED: Administratively prohibited» — это не
+# ошибка (мост direct-tcpip не разрешает, терминал идёт в обход), а обычный
+# шаг подключения. Свои ошибки линии эмулятор сообщает сам.
+logging.getLogger("paramiko").setLevel(logging.CRITICAL)
 
 try:                       # paramiko может не стоять: SSH-линии не будет
     from paramiko.ssh_exception import SSHException as _SSHException
@@ -28,6 +36,11 @@ except ImportError:        # заглушка — isinstance-проверки п
 # АВТОНОМНО, где не шли ничего. Периодичные подтверждения держат линию
 # живой и одновременно обнаруживают уже мёртвого собеседника.
 KEEPALIVE = 30             # секунд между подтверждениями (SSH-транспорт)
+
+# Проверка живости линии: раз в сколько секунд терминал спрашивает у
+# линии (моста) состояние (см. TerminalSession.link_check_tick).
+PROBE_CMD = "status"       # exec-команда запроса состояния моста
+PROBE_TIMEOUT = 5.0        # сколько ждём ответа на запрос
 
 
 def _set_tcp_keepalive(sock) -> None:
@@ -59,6 +72,23 @@ def _enable_ssh_keepalive(transport) -> bool:
         transport.set_keepalive(KEEPALIVE)
     except Exception:
         return False
+    return True
+
+
+def _set_ssh_socket_keepalive(transport) -> bool:
+    """Сокету SSH-транспорта — агрессивный TCP keep-alive.
+
+    Протокольный keep-alive paramiko (global request) ответа не ждёт и
+    мёртвого собеседника не замечает: оборванный путь (тишина сети, NAT)
+    остаётся незамеченным. Ловит его только ядро — ему нужны
+    TCP_KEEPIDLE/TCP_KEEPINTVL/TCP_KEEPCNT."""
+    try:
+        sock = transport.sock
+    except AttributeError:
+        return False
+    if sock is None:
+        return False
+    _set_tcp_keepalive(sock)
     return True
 
 
@@ -132,6 +162,38 @@ def spec_hint(ports) -> str:
     return ",".join(str(a) if a == b else f"{a}-{b}" for a, b in out)
 
 
+def parse_probe(text, line_port=None) -> dict:
+    """Отчёт о состоянии → словарь.
+
+    Ключи: «bridge» — «ЖИВ»/«НЕТ» (мост отвечает), «line» — «ЖИВА»/
+    «МЕРТВА» (наша линия за мостом), «port» — порт нашей линии (мост
+    сообщает, на какой линии стоит соединение; терминал, задавший
+    диапазон портов, мог угадать не с того).
+
+    Пустая строка — неизвестно: сервер ответил, но команды «status» не
+    знает (обычный sshd).
+    """
+    out = {"bridge": "", "line": "", "port": None}
+    for raw in str(text).splitlines():
+        row = raw.strip()
+        if row.startswith("МОСТ="):
+            out["bridge"] = "ЖИВ" if "ЖИВ" in row else "НЕТ"
+        elif row.startswith("ЛИНИЯ="):
+            rest = row[len("ЛИНИЯ="):]
+            port, _, state = rest.partition(":")
+            mine = "моя" in rest          # линия этого соединения
+            if not mine and line_port is not None \
+                    and port.strip() != str(line_port):
+                continue                # чужая линия — не наша
+            if "МЕРТВА" in state:
+                out["line"] = "МЕРТВА"
+            elif "ЖИВА" in state and not out["line"]:
+                out["line"] = "ЖИВА"
+            if mine and port.strip().isdigit():
+                out["port"] = int(port.strip())
+    return out
+
+
 IAC, DONT, DO, WONT, WILL, SB, SE = 0xFF, 254, 253, 252, 251, 250, 240
 
 
@@ -192,6 +254,7 @@ class TCPLink:
 
     banner = True       # ждём баннер tmxr («CONNECTED TO …»)
     owns_stdin = False  # линия отдельна от клавиатуры: stdin читают только ключи
+    probe_label = "ЛИН"  # как называется линия в строке состояния
 
     def __init__(self, host: str, port, timeout: float = 5.0,
                  probe: float = 2.0):
@@ -252,6 +315,44 @@ class TCPLink:
         except OSError as e:
             raise LinkError(f"линия закрыта: {e}") from e
 
+    def probe(self, timeout: float = PROBE_TIMEOUT) -> str:
+        """Проверить живость линии: сокет должен быть живым.
+
+        Настоящего «собеседника на том конце» тут нет — у TCP-линии
+        свои keep-alive-пробы ядра (см. _set_tcp_keepalive), а молчащий
+        обрыв ловит recv(). Проверка ловит локально мёртвый сокет и
+        оборванный конец (EOF приходит мгновенно, данные — нет).
+        """
+        old_timeout = None
+        try:
+            self.sock.getpeername()
+        except OSError as e:
+            raise LinkError(f"линия закрыта: {e}") from e
+        try:
+            # MSG_PEEK: байты из буфера не забираем — линия их прочтёт
+            old_timeout = self.sock.gettimeout()
+            self.sock.settimeout(0)
+            peek = self.sock.recv(1, socket.MSG_PEEK)
+        except (BlockingIOError, socket.timeout):
+            peek = b"\x00"            # данных нет — сокет жив
+        except OSError as e:
+            raise LinkError(f"линия закрыта: {e}") from e
+        finally:
+            if old_timeout is not None:
+                try:
+                    self.sock.settimeout(old_timeout)
+                except OSError:
+                    pass
+        if not peek:                  # пустой peek = обрыв (EOF)
+            raise LinkError("линия закрыта ЭВМ")
+        try:
+            _, _, exc = select.select([self.sock], [], [self.sock], 0)
+        except (OSError, ValueError) as e:
+            raise LinkError(f"линия закрыта: {e}") from e
+        if exc:
+            raise LinkError("линия закрыта: сокет с ошибкой")
+        return f"линия {self.port} жива"
+
     def close(self) -> None:
         self.sock.close()
 
@@ -282,6 +383,7 @@ class SSHLink:
 
     banner = True       # ждём баннер tmxr («CONNECTED TO …»)
     owns_stdin = False  # линия отдельна от клавиатуры: stdin читают только ключи
+    probe_label = "МОСТ"  # как называется линия в строке состояния
 
     def __init__(self, host: str, port, user: str,
                  password: str | None = None, keyfile: str | None = None,
@@ -321,13 +423,17 @@ class SSHLink:
                     # своему таймауту гасит простоявшее без дела соединение
                     # (сеанс в АВТОНОМНО обрывался на холостом ходу)
                     _enable_ssh_keepalive(client.get_transport())
+                    # …и TCP keep-alive на сокете: протокольный ответа не
+                    # ждёт, а молчащий обрыв (тишина сети, NAT) ловит
+                    # только ядро
+                    _set_ssh_socket_keepalive(client.get_transport())
                     break
                 except paramiko.SSHException:
                     client.close()
                     client = None
                     if attempt < 3:
                         time.sleep(1.0 + 1.5 * attempt)
-                except OSError:
+                except (OSError, EOFError):
                     client.close()
                     client = None
                     break            # refused/сеть — повторять бессмысленно
@@ -367,7 +473,9 @@ class SSHLink:
                                 first = chan.recv(4096)
                             except socket.timeout:
                                 first = b""
-                        except (paramiko.SSHException, OSError) as e:
+                        except (paramiko.SSHException, OSError, EOFError) as e:
+                            # транспорт/сессия умерли (EOFError у paramiko —
+                            # не OSError, без него был бы трейсбек)
                             client.close()
                             refused.append(p)
                             last_err = e
@@ -437,7 +545,7 @@ class SSHLink:
                     break
                 opened_refused = True
                 continue
-            except OSError:
+            except (OSError, EOFError):
                 opened_refused = True
                 continue
             try:
@@ -445,7 +553,7 @@ class SSHLink:
                 first = chan.recv(4096)
             except socket.timeout:
                 first = b""
-            except OSError as e:
+            except (OSError, EOFError) as e:
                 chan.close()
                 opened_busy = True
                 continue
@@ -495,6 +603,70 @@ class SSHLink:
             # линия сбросилась во время набора (в т.ч. таймаут SSH)
             raise LinkError(f"SSH-канал закрыт: {e}") from e
 
+    # --- проверка живости моста ---------------------------------------
+    def probe(self, timeout: float = PROBE_TIMEOUT) -> str:
+        """Спросить у моста состояние: жив ли он и жива ли наша линия.
+
+        Запрос идёт вторым каналом того же SSH-соединения (мост отвечает
+        на exec-команду «status» — см. besm6/ssh_bridge.py). Ответ —
+        доказательство, что связь жива: без него обрыв «молча» (тишина
+        сети, NAT, убитый мост) не виден, и подвал продолжает показывать
+        «ЛИНИЯ=КВУ»/«ЛИНИЯ=ДКС» при давно пропавшей связи.
+
+        LinkError — мост не отвечает (связи нет).
+        """
+        transport = self.client.get_transport() if self.client else None
+        if transport is None or not transport.is_active():
+            raise LinkError("SSH-соединение разорвано")
+        try:
+            chan = transport.open_session(timeout=timeout)
+        except Exception as e:
+            low = str(e).lower()
+            if "prohibit" in low:
+                # exec на сервере запрещён — проверить нечем; это не обрыв
+                return "проверка недоступна (exec запрещён)"
+            if "timeout opening channel" in low:
+                raise LinkError(f"мост не отвечает ({timeout:g} с)") from e
+            raise LinkError(f"мост не отвечает: {e}") from e
+        try:
+            return self._probe_read(chan, transport, timeout)
+        finally:
+            try:
+                chan.close()
+            except Exception:
+                pass
+
+    def _probe_read(self, chan, transport, timeout: float) -> str:
+        """Прочитать ответ моста (или убедиться, что ответа не будет)."""
+        try:
+            chan.settimeout(timeout)
+            chan.exec_command(PROBE_CMD)
+        except Exception as e:
+            raise LinkError(f"мост не отвечает: {e}") from e
+        data = b""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                chunk = chan.recv(4096)
+            except socket.timeout:
+                break
+            except Exception as e:
+                raise LinkError(f"мост не отвечает: {e}") from e
+            if not chunk:
+                break               # сервер закрыл канал — ответ получен
+            data += chunk
+            if len(data) >= 4096:
+                break
+        if data:
+            return data.decode("utf-8", "replace").strip()
+        if not transport.is_active():
+            raise LinkError("SSH-соединение разорвано")
+        if chan.closed or chan.eof_received or chan.exit_status_ready():
+            # сервер ответил и закрыл канал, но команды «status» не знает
+            # (обычный sshd) — round-trip состоялся, связи живы
+            return "мост не знает команду «%s»" % PROBE_CMD
+        raise LinkError(f"мост не отвечает ({timeout:g} с)")
+
     def close(self) -> None:
         try:
             self.chan.close()
@@ -517,6 +689,7 @@ class StdioLink:
 
     banner = False      # баннера tmxr тут нет — «ПРОВЕРЬ ЛИНИЮ!» не показываем
     owns_stdin = True   # линия читает тот же stdin, что и клавиатура
+    probe_label = None  # проверять нечего: линия локальная
 
     def __init__(self):
         import sys
@@ -529,6 +702,9 @@ class StdioLink:
     def send(self, data: bytes) -> None:
         self._out.write(data)
         self._out.flush()
+
+    def probe(self, timeout: float = PROBE_TIMEOUT) -> str:
+        return "локальная линия"
 
     def close(self) -> None:
         pass

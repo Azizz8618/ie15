@@ -25,7 +25,7 @@ from .keyboard import DEFAULT_LAYOUT, decode_keys, group_paste, key_to_bytes
 from .link import LinkError, open_link
 from .parser import Parser
 from .render import to_png_bytes, to_text
-from .session import PULSE_INTERVAL, TerminalSession
+from .session import CHECK_INTERVAL, PULSE_INTERVAL, TerminalSession
 from .undo import DEFAULT_UNDO
 
 from .hardterm import Output
@@ -162,6 +162,9 @@ def apply_conf(ns, cp: configparser.ConfigParser):
     if getattr(ns, "pulse", None) is None:
         # «пробел поддержки» в линию (сек); 0 — выключен
         ns.pulse = cp.get("terminal", "pulse", fallback="60") or "60"
+    if getattr(ns, "check", None) is None:
+        # проверка живости линии (моста) (сек); 0 — выключена
+        ns.check = cp.get("terminal", "check", fallback="60") or "60"
     if getattr(ns, "nabor", None) is None:
         term = "terminal" if cp.has_section("terminal") else None
         nb = cp.get(term, "nabor", fallback="") if term else ""
@@ -368,6 +371,7 @@ def run_line(parser: Parser, url: str, png: str | None,
              undo_depth: int = DEFAULT_UNDO,
              keylog: str | None = None,
              pulse: float = PULSE_INTERVAL,
+             check: float = CHECK_INTERVAL,
              **linkkw) -> None:
     import os
     import select
@@ -384,6 +388,9 @@ def run_line(parser: Parser, url: str, png: str | None,
     # «пробел поддержки»: как часто шлём пробел в линию (0 — выключен)
     session.pulse_interval = max(0.0, float(pulse))
     session._pulse_next = time.time() + session.pulse_interval
+    # проверка живости линии (моста): как часто спрашиваем состояние
+    session.check_interval = max(0.0, float(check))
+    session._check_next = time.time() + session.check_interval
     if machine:
         session.machine = str(machine)   # номер ЭВМ — в строке состояния
         session._update_status()
@@ -424,11 +431,11 @@ def run_line(parser: Parser, url: str, png: str | None,
             return
         link = new
         session.link = new
-        session.line_lost = False
         # новый сокет = баннер заново: служебные строки — в статус,
         # не в кадр
         session._banner_done = False
         session._banner_tail = b""
+        session.mark_line_alive()      # сброс обрыва и проверки состояния
         session.last_key = "ЛИНИЯ: восстановлена"
         session._update_service()
         session._update_status()
@@ -605,6 +612,11 @@ def run_line(parser: Parser, url: str, png: str | None,
                     # ни экрана, ни перерисовки не требует (эхо гасится
                     # при приёме), но статус мог смениться (потеря линии)
                     session._update_status()
+                if session.link_check_tick():
+                    # состояние линии изменилось (мост ответил или
+                    # оказался мёртвым) — подвал и строка состояния
+                    # пересобраны, экран — перерисовать
+                    dirty = True
                 if dirty:
                     # «правильный масштаб»: окно ровно на кадр 25 + подвал;
                     # проверяем по символу от ЭВМ (и по нажатию) — сбитый
@@ -826,6 +838,7 @@ def run_headless(parser: Parser, url: str, feed: str | None, dump: str | None,
                  wait: float, seconds: float, want_status: bool = False,
                  mode: str = "host", layout: str | None = None,
                  keymap: dict[str, str] | None = None, machine: str = "",
+                 check: float = CHECK_INTERVAL,
                  **linkkw) -> None:
     """Работа без окна терминала: ни панели, ни справки, ни мыши.
 
@@ -841,6 +854,9 @@ def run_headless(parser: Parser, url: str, feed: str | None, dump: str | None,
     except (LinkError, OSError) as e:
         say(f"[линия] {url} — не удалось подключиться: {e}")
         return
+    # проверка живости линии (моста) — как и в интерактивном сеансе
+    term.session.check_interval = max(0.0, float(check))
+    term.session._check_next = time.time() + term.session.check_interval
     try:
         if feed:
             # в «АВТОНОМНО» набранное без ПЕРЕДАЧИ в линию не уходит
@@ -903,6 +919,12 @@ def main(argv: list[str] | None = None) -> None:
                          "программы БЭСМ-6 не считали сеанс уснувшим "
                          "(его эхо на экран не выводится); 0 — выключить. "
                          "По умолчанию 60 (секция [terminal] pulse)")
+    ap.add_argument("--check", type=float, default=None, metavar="СЕК",
+                    help="интервал проверки живости линии (моста SSH), "
+                         "секунд: раз в это время у линии спрашивается "
+                         "состояние, и «ЛИНИЯ=ДКС» сменяется на «ЛИНИЯ=НЕТ», "
+                         "если связи давно нет; 0 — выключить. "
+                         "По умолчанию 60 (секция [terminal] check)")
     ap.add_argument("--roms", default=str(ROM_DEFAULT))
     ap.add_argument("--password", default=None,
                     help="пароль для ssh://-линии (иначе из [ssh])")
@@ -995,6 +1017,7 @@ def main(argv: list[str] | None = None) -> None:
                          args.wait, args.seconds, bool(args.status),
                          mode=args.mode, layout=layout,
                          keymap=args.keymap, machine=args.machine or "",
+                         check=float(args.check),
                          password=args.password, keyfile=args.keyfile)
         else:
             run_line(parser, args.line, args.png, args.seconds,
@@ -1005,6 +1028,7 @@ def main(argv: list[str] | None = None) -> None:
                      undo_depth=int(args.undo),
                      keylog=args.keylog,
                      pulse=float(args.pulse),
+                     check=float(args.check),
                      password=args.password, keyfile=args.keyfile)
     else:
         run_script(parser, args.png)

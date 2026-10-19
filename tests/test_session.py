@@ -1642,7 +1642,7 @@ def test_service_panel_all_bits():
     def panel() -> str:
         return "\n".join(rows())
 
-    for lab in ("СЕТЬ=С ЭВМ", "НАБОР=Н2", "ЛИНИЯ=UTF-8", "РАСК=ВЫКЛ",
+    for lab in ("СЕТЬ=С ЭВМ", "НАБОР=Н2", "ЛИНИЯ=?", "РАСК=ВЫКЛ",
                 "ВИДЕО=НОРМ", "БУФЕР=ПУСТО", "УПР.СИМВ=ВЫКЛ"):
         assert lab in panel(), lab
     assert "ЗВУК" not in panel()
@@ -1991,7 +1991,10 @@ def test_banner_goes_to_status_line_not_frame():
     assert session.line_type == "КВУ" and session.line_no == 3
     assert session.line_mode == "RAW" and session.banner_seen is True
     assert "ЭВМ=6" in status and "ТЕРМ=3" in status and "КАНАЛ=4203" in status
-    assert "РЕЖИМ=RAW" in status and status[:4] == "КВУ "
+    assert "РЕЖИМ=RAW" in status
+    # типа линии в строке состояния нет — он только в подвале («ЛИНИЯ=»)
+    assert "КВУ" not in status and "ДКС" not in status
+    assert "ЛИНИЯ=КВУ" in panel_text(sc)
     # дата-время в конце строки состояния: ДД.ММ.ГГГГ ЧЧ:ММ:СС
     assert re.search(r"\d\d\.\d\d\.\d{4} \d\d:\d\d:\d\d$", status)
     # баннер может прийти двумя кусками — фильтр не должен потерять выдачу
@@ -2015,7 +2018,9 @@ def test_status_line_warns_when_no_banner():
     session.handle_line_reply(b"Connected to DKS\r\n")
     status = re.sub(r"\x1b\[[0-9;]*m", "",
                     session.parser.screen.status_line()).rstrip()
-    assert status.startswith("ДКС") and "ПРОВЕРЬ ЛИНИЮ!" not in status
+    # предупреждение ушло, тип линии — в подвале
+    assert "ПРОВЕРЬ ЛИНИЮ!" not in status
+    assert "ЛИНИЯ=ДКС" in panel_text(session.parser.screen)
     # у линии без баннера (stdio — отладка) предупреждения нет
     session3, link3 = make_session(MODE_HOST)
     link3.banner = False
@@ -3002,6 +3007,107 @@ def test_kbd_selection_shift_arrows(monkeypatch):
     session.feed_key("KEY_CTRLRIGHT")
     assert len(sc.selections) == sel_before   # новая протяжка не открыта
     assert sc._drag is None
+
+
+# --- проверка живости линии (моста) -----------------------------------
+class ProbeLink:
+    """Линия с проверкой состояния: отвечает заранее заданным."""
+
+    banner = True
+    port = 4202
+    line_port = 4202
+    probe_label = "МОСТ"
+
+    def __init__(self, answer: str = "МОСТ=ЖИВ\r\nСЕССИЙ=1\r\n"
+                                     "ЛИНИЯ=4202:ЖИВА\r\n", exc=None):
+        self.answer = answer
+        self.exc = exc
+        self.probes = 0
+        self.sent: list[bytes] = []
+
+    def send(self, data: bytes) -> None:
+        self.sent.append(bytes(data))
+
+    def probe(self, timeout: float = 5.0) -> str:   # noqa: ARG002
+        self.probes += 1
+        if self.exc is not None:
+            raise self.exc
+        return self.answer
+
+
+def status_text(sc) -> str:
+    """Строка состояния над кадром без ANSI-последовательностей."""
+    return re.sub(r"\x1b\[[0-9;]*m", "", sc.status_line())
+
+
+def test_link_check_reports_bridge_state():
+    link = ProbeLink()
+    session = TerminalSession(Parser(), link=link, mode=MODE_HOST)
+    session._check_next = 0.0                 # пора проверять
+    assert session.link_check_tick() is True   # состояние изменилось
+    assert session.check_state == "ЖИВ"
+    # состояние линии — только в подвале, ячейка «ЛИНИЯ=»
+    assert "ЛИНИЯ=?" in "".join(session.parser.screen.panel_cells())
+    # вторая проверка состояния не меняет — молча, без мигания
+    session._check_next = 0.0
+    assert session.link_check_tick() is False
+    assert link.probes == 2
+
+
+def test_link_check_marks_line_lost_when_bridge_silent():
+    # Мост не отвечает: связь пропала «молча» — подвал обязан сказать НЕТ
+    from ie15emu.link import LinkError
+
+    link = ProbeLink(exc=LinkError("мост не отвечает (5 с)"))
+    session = TerminalSession(Parser(), link=link, mode=MODE_HOST)
+    session._check_next = 0.0
+    assert session.link_check_tick() is True
+    assert session.line_lost is True
+    assert session.check_state == "НЕТ"
+    panel = "".join(session.parser.screen.panel_cells())
+    assert "ЛИНИЯ=НЕТ" in panel
+    # обрыв виден и в последней клавише
+    assert session.last_key.startswith("ЛИНИЯ")
+
+
+def test_link_check_sees_dead_line_behind_live_bridge():
+    # Мост жив, а линия за ним мертва — канал ещё держится, связи нет
+    link = ProbeLink(answer="МОСТ=ЖИВ\r\nСЕССИЙ=1\r\nЛИНИЯ=4202:МЕРТВА\r\n")
+    session = TerminalSession(Parser(), link=link, mode=MODE_HOST)
+    session._check_next = 0.0
+    assert session.link_check_tick() is True
+    assert session.line_lost is True
+    assert "ЛИНИЯ=НЕТ" in "".join(session.parser.screen.panel_cells())
+
+
+def test_link_check_disabled_and_skipped_when_lost():
+    link = ProbeLink()
+    session = TerminalSession(Parser(), link=link, mode=MODE_HOST)
+    session.check_interval = 0.0             # выключено конфигом
+    session._check_next = 0.0
+    assert session.link_check_tick() is False
+    assert link.probes == 0
+    # линия уже потеряна — проверять нечего
+    session.check_interval = 60.0
+    session._check_next = 0.0
+    session.mark_line_lost("обрыв")
+    assert session.link_check_tick() is False
+    assert link.probes == 0
+
+
+def test_line_type_shown_in_footer():
+    # «ЛИНИЯ=» — тип линии: КВУ или ДКС (не кодировка)
+    session, _ = make_session(MODE_HOST)
+    assert "ЛИНИЯ=?" in panel_text(session.parser.screen)
+    session.handle_line_reply(b"Connected to DKS\r\n")
+    assert "ЛИНИЯ=ДКС" in panel_text(session.parser.screen)
+    session, _ = make_session(MODE_HOST)
+    session.handle_line_reply(b"CONNECTED TO THE PDP-11/70 SIMULATOR TTY "
+                              b"DEVICE, LINE 3\r\n")
+    assert "ЛИНИЯ=КВУ" in panel_text(session.parser.screen)
+    # обрыв связи — «ЛИНИЯ=НЕТ» (тип не важен: линии нет)
+    session.mark_line_lost("мост не отвечает")
+    assert "ЛИНИЯ=НЕТ" in panel_text(session.parser.screen)
 
 
 if __name__ == "__main__":
