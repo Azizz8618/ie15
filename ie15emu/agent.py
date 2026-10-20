@@ -242,6 +242,11 @@ class Terminal:
 
     def _read_loop(self) -> None:
         while not self._stop.is_set():
+            if self.session.hold:
+                # удержание экрана (Ctrl+L): линию не читаем — выдача
+                # копится в буфере сокета, машина упирается в него
+                time.sleep(0.05)
+                continue
             try:
                 data = self.link.recv()
             except (OSError, LinkError) as e:
@@ -284,6 +289,8 @@ class Terminal:
         """
         self._check_link()
         if self._reader is None:                 # линия читается вручную
+            if self.session.hold:                # удержание: не читаем
+                return False
             try:
                 data = self.link.recv()
             except (OSError, LinkError):

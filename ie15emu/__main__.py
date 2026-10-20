@@ -555,7 +555,13 @@ def run_line(parser: Parser, url: str, png: str | None,
         while seconds <= 0 or time.time() - t0 < seconds:
             try:
                 link_fd = link_sock(link)
-                fds = [link_fd] if link_fd is not None else []
+                # Удержание экрана (Ctrl+L): линию не читаем — выдача копится
+                # в буфере сокета и машина упирается в него (обратное
+                # давление), а экран остаётся тем, что на нём. Дескриптор
+                # линии из select убираем: он и так постоянно «готов», и цикл
+                # без этого крутился бы впустую.
+                fds = [link_fd] if (link_fd is not None
+                                    and not session.hold) else []
                 if fd is not None:
                     fds.append(fd)
                 if fds:
@@ -577,7 +583,8 @@ def run_line(parser: Parser, url: str, png: str | None,
                         _key_chunk(chunk)
                         if not select.select([fd], [], [], 0)[0]:
                             break
-                if not getattr(link, "owns_stdin", False) and not session.line_lost:
+                if not getattr(link, "owns_stdin", False) \
+                        and not session.line_lost and not session.hold:
                     # линия stdio:// читает тот же stdin, что и клавиатура: её
                     # recv() забирал бы хвост escape-последовательности («ESC [ 1 ; 2 F»)
                     # из-под разбора клавиш — в кадр попадал бы мусор вида «ШХШ1;2Ф».
@@ -917,7 +924,9 @@ def main(argv: list[str] | None = None) -> None:
                     help="интервал «пробела поддержки» в линию, секунд: "
                          "раз в это время в линию уходит пробел, чтобы "
                          "программы БЭСМ-6 не считали сеанс уснувшим "
-                         "(его эхо на экран не выводится); 0 — выключить. "
+                         "(его эхо на экран не выводится); только в "
+                         "АВТОНОМНО — в С ЭВМ пробел сбивает выдачу; "
+                         "0 — выключить. "
                          "По умолчанию 60 (секция [terminal] pulse)")
     ap.add_argument("--check", type=float, default=None, metavar="СЕК",
                     help="интервал проверки живости линии (моста SSH), "

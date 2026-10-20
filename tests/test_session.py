@@ -489,12 +489,20 @@ def test_pulse_disabled_and_line_lost():
 def test_pulse_echo_not_drawn_on_screen():
     # эхо пробела (машинное) не попадает на экран: знак не печатается,
     # курсор не двигается — иначе весь следующий вывод съезжал бы на
-    # колонку вправо
+    # колонку вправо. Пробел поддержки отправляется только в АВТОНОМНО:
+    # в С ЭВМ лишний знак вклинивается в выдачу и сбивает её
     session, link = make_session(MODE_HOST)
     session.pulse_interval = 60.0
     session._pulse_next = 0.0
-    session.pulse_tick()
+    assert session.pulse_tick() is False           # в С ЭВМ — не шлём
+    assert link.sent == []
+    session.set_mode(MODE_LOCAL)
+    assert session.pulse_tick() is True            # в АВТОНОМНО — шлём
     assert link.sent == [b" "]
+    # эхо пробела (машинное) не попадает на экран: знак не печатается,
+    # курсор не двигается — иначе весь следующий вывод съезжал бы на
+    # колонку вправо (в С ЭВМ выдача идёт в кадр)
+    session.set_mode(MODE_HOST)
     sc = session.parser.screen
     before = [row[:] for row in sc.cells], (sc.x, sc.y)
     session.handle_line_reply(b" ")                # машина эхит пробел
@@ -1794,7 +1802,8 @@ def test_pgup_pagedown_scroll_view():
     # PgUp/PgDn — листание окна вывода (история + кадр до последней
     # заполненной строки + подвал). Вверх листаем, только когда выдано
     # больше одной страницы; выше первой строки — стоп (без цикла);
-    # закрепленное окно приём не сбрасывает
+    # закрепленное окно приём не сбрасывает; долистали вниз — окно снова
+    # следящее (за выдачей)
     session, link = make_session(MODE_HOST)
     sc = session.parser.screen
     for i in range(30):                              # 30 рядов > страницы 25
@@ -1808,15 +1817,23 @@ def test_pgup_pagedown_scroll_view():
     session.feed_key("KEY_PAGEUP")
     assert sc.view_top == 0                           # выше — стоп, не цикл
     session.feed_key("KEY_PAGEDOWN")                 # страница вниз
-    assert sc.view_top == sc.view_rows() - 24
+    # внизу окно снова следящее: иначе следующая строка выдачи уводила бы
+    # курсор под нижнюю кромку и опускать экран пришлось бы вручную
+    assert sc.view_top is None
+    assert sc.sync_view_top(24) == sc.view_rows() - 24
     # узкое окно: листание от первой строки кадра до последней строки
     # подвала; выше первой строки и ниже последней — стоп, без цикла
     sc._view_h = 6
+    session.feed_key("KEY_PAGEUP")                   # вверх — снова закреплено
     top = sc.view_top
+    assert top is not None
+    session.feed_key("KEY_PAGEUP")                   # ещё страница вверх
+    up = sc.view_top
+    assert up == top - 5
     session.feed_key("KEY_PAGEDOWN")                 # страница вниз
-    assert sc.view_top == top + 5
+    assert sc.view_top == up + 5
     session.feed_key("KEY_PAGEUP")                   # страница вверх
-    assert sc.view_top == top
+    assert sc.view_top == up
     while sc.view_top > 0:                           # вверх до первой строки
         session.feed_key("KEY_PAGEUP")
     assert sc.view_top == 0
@@ -1832,7 +1849,8 @@ def test_pgup_pagedown_scroll_view():
 
 def test_pageup_blocked_until_more_than_one_screen():
     # циклической прокрутки вверх нет: пока выдано не больше страницы
-    # кадра, PgUp ничего не листает (окно остаётся следящим), вниз — можно
+    # кадра, PgUp ничего не листает (окно остаётся следящим); вниз —
+    # можно, но мы и так внизу, так что окно остаётся следящим
     session, link = make_session(MODE_HOST)
     sc = session.parser.screen
     sc._view_h = 6
@@ -1844,16 +1862,105 @@ def test_pageup_blocked_until_more_than_one_screen():
         assert session.feed_key("KEY_PAGEUP") is None
         assert sc.view_top is None                    # следящий режим
     session.feed_key("KEY_PAGEDOWN")                 # вниз — можно
-    top = sc.view_top
-    assert top is not None
-    session.feed_key("KEY_PAGEUP")                   # вверх — по-прежнему нет
-    assert sc.view_top == top                        # окно не прыгает
+    assert sc.view_top is None                        # следящий режим
     assert link.sent == []
     for i in range(10):                              # выдали вторую страницу
         session.handle_line_reply(bytes([0x80 | 1]) + b"B" + b"\r\n")
     assert sc.page_printed() is True
     session.feed_key("KEY_PAGEUP")                   # вверх — можно
-    assert sc.view_top == top - 5                   # страница вверх
+    assert sc.view_top is not None                   # окно закреплено
+    assert sc.view_top == sc._follow_top(6) - 5      # страница вверх
+
+
+def test_scroll_to_bottom_follows_output_again():
+    # Долистали вниз — окно снова следящее: следующая строка выдачи не
+    # должна уводить курсор под нижнюю кромку (раньше окно «отставало» от
+    # текста на строку, и опускать экран приходилось вручную)
+    session, link = make_session(MODE_HOST)
+    sc = session.parser.screen
+    sc._view_h = 24
+    for i in range(30):
+        session.handle_line_reply(bytes([0x80 | 1]) + b"A" + b"\r\n")
+    session.feed_key("KEY_PAGEUP")                   # вверх — в историю
+    assert sc.view_top is not None
+    for _ in range(10):                              # и до самого низа
+        session.feed_key("KEY_PAGEDOWN")
+    assert sc.view_top is None                        # следящий режим
+    # новая строка выдачи: курсор остаётся в поле зрения
+    session.handle_line_reply(bytes([0x80 | 1]) + b"B" + b"\r\n")
+    top = sc.sync_view_top(24)
+    assert len(sc.history) + sc.y - top < 24, "курсор ушёл за кадр"
+
+
+def test_hold_key_stops_output_and_sends_reset_code():
+    # Ctrl+L — удержание экрана: выдача ЭВМ останавливается, а в линию
+    # уходит команда 15ИЭ «Сброс» (0x0C) — на линии типа «Э» ДИСПАК по
+    # ней отменяет идущую выдачу
+    session, link = make_session(MODE_HOST)
+    sc = session.parser.screen
+    assert session.hold is False
+    assert session.feed_key("ctrl+l") is None        # в линию — ничего
+    assert session.hold is True
+    assert link.sent == [b"\x0c"]
+    assert "УДЕРЖ" in sc.status_line()
+    # повторное нажатие — снятие удержания
+    link.sent.clear()
+    session.feed_key("ctrl+l")
+    assert session.hold is False
+    assert link.sent == []                            # снятие — команда не шлётся
+    assert "УДЕРЖ" not in sc.status_line()
+
+
+def test_hold_key_accepts_raw_control_byte():
+    # терминал без CSI-u присылает Ctrl+L сырым байтом 0x0C
+    session, link = make_session(MODE_HOST)
+    session.feed_key("\x0c")
+    assert session.hold is True
+    assert link.sent == [b"\x0c"]
+
+
+def test_hold_reset_code_echo_does_not_move_cursor():
+    # эхо нашей команды «Сброс» (0x0C) в кадр попадать не должно: на
+    # 15ИЭ 0x0C — «ДОМ», курсор ушёл бы в начало и следующий вывод затёр
+    # бы верх кадра
+    session, link = make_session(MODE_HOST)
+    sc = session.parser.screen
+    session.handle_line_reply(b"ABCD\r\n")
+    assert (sc.x, sc.y) == (0, 1)
+    session.feed_key("ctrl+l")
+    assert session.hold is True
+    session.handle_line_reply(b"\x0c")            # эхо «Сброса»
+    assert (sc.x, sc.y) == (0, 1)                 # курсор на месте
+    # а чужая 0x0C в выводе — обычный знак (после «Сброса» эхо уже снято)
+    session.handle_line_reply(b"\x0c")
+    assert (sc.x, sc.y) == (0, 0)                 # «ДОМ» отработал как надо
+
+
+def test_hold_key_is_plain_char_in_local_mode():
+    # в АВТОНОМНО выдачи машины в кадре нет — 0x0C обычный знак набора
+    session, link = make_session(MODE_LOCAL)
+    session.feed_key("\x0c")
+    assert session.hold is False
+    assert session.buffer == b"\x0c"
+
+
+def test_resume_key_releases_hold_and_returns_to_output():
+    # Ctrl+Q — снять удержание; без удержания — вернуть окно к живой
+    # выдаче (следящий режим)
+    session, link = make_session(MODE_HOST)
+    sc = session.parser.screen
+    for i in range(30):
+        session.handle_line_reply(bytes([0x80 | 1]) + b"A" + b"\r\n")
+    session.feed_key("KEY_PAGEUP")                   # вверх — в историю
+    assert sc.view_top is not None
+    session.feed_key("ctrl+q")                       # к выдаче
+    assert sc.view_top is None
+    assert session.hold is False
+    session.feed_key("ctrl+l")                       # удержание
+    assert session.hold is True
+    session.feed_key("ctrl+q")                       # снятие
+    assert session.hold is False
+    assert sc.view_top is None
 
 
 def test_mouse_wheel_scrolls_history_without_cycle():
@@ -2135,7 +2242,10 @@ def test_low_window_keeps_status_line_and_scrolls_text(monkeypatch):
         return got
 
     r = rows()
+    # строка состояния содержит дату и время — они меняются между
+    # отрисовками, сравниваем всё, кроме них
     first = re.sub(r"\x1b\[[0-9;]*m", "", sc.status_line()).rstrip()
+    first = first.rsplit("|", 1)[0].rstrip()
     assert first in r[1]                            # статус — первый ряд
     assert r[2].startswith("---") and r[2] == "-" * sc.panel_cols
     for n in range(10):                            # вывод короче окна
@@ -2732,7 +2842,9 @@ def test_clear_key_moves_screen_to_history():
     assert sc.view_top <= len(sc.history)
     top_hist = sc.view_top
     session.feed_key("KEY_PAGEDOWN")
-    assert sc.view_top > 0 or top_hist is None
+    # дошли до низа — окно снова следящее (к живой выдаче)
+    assert sc.view_top is None
+    assert top_hist is not None
 
 
 def test_history_limit_from_conf():
