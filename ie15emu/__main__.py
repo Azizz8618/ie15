@@ -25,7 +25,7 @@ from .keyboard import DEFAULT_LAYOUT, decode_keys, group_paste, key_to_bytes
 from .link import LinkError, open_link
 from .parser import Parser
 from .render import to_png_bytes, to_text
-from .session import CHECK_INTERVAL, PULSE_INTERVAL, TerminalSession
+from .session import CHECK_INTERVAL, DEFAULT_BUFFER, PULSE_INTERVAL, TerminalSession
 from .undo import DEFAULT_UNDO
 
 from .hardterm import Output
@@ -159,6 +159,10 @@ def apply_conf(ns, cp: configparser.ConfigParser):
         # глубина отмены правок набора (АВТОНОМНО); 0 — отмена выключена
         ns.undo = cp.get("terminal", "undo", fallback=str(DEFAULT_UNDO)) \
             or str(DEFAULT_UNDO)
+    if getattr(ns, "buffer", None) is None:
+        # предел буфера набора в АВТОНОМНО (знаков); 0 — не ограничивать
+        ns.buffer = cp.get("terminal", "buffer",
+                           fallback=str(DEFAULT_BUFFER)) or str(DEFAULT_BUFFER)
     if getattr(ns, "pulse", None) is None:
         # «пробел поддержки» в линию (сек); 0 — выключен
         ns.pulse = cp.get("terminal", "pulse", fallback="60") or "60"
@@ -369,6 +373,7 @@ def run_line(parser: Parser, url: str, png: str | None,
              take_mouse: bool = True, take_fit: bool = False,
              machine: str = "", show_help: bool = True,
              undo_depth: int = DEFAULT_UNDO,
+             buffer_limit: int = DEFAULT_BUFFER,
              keylog: str | None = None,
              pulse: float = PULSE_INTERVAL,
              check: float = CHECK_INTERVAL,
@@ -384,7 +389,8 @@ def run_line(parser: Parser, url: str, png: str | None,
         say(f"[линия] {url} — не удалось подключиться: {e}")
         return
     session = TerminalSession(parser, link=link, mode=mode, layout=layout,
-                              keymap=keymap, undo_depth=undo_depth)
+                              keymap=keymap, undo_depth=undo_depth,
+                              buffer_limit=buffer_limit)
     # «пробел поддержки»: как часто шлём пробел в линию (0 — выключен)
     session.pulse_interval = max(0.0, float(pulse))
     session._pulse_next = time.time() + session.pulse_interval
@@ -958,6 +964,9 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--undo", default=None, type=str,
                     help="глубина отмены правок набора в АВТОНОМНО "
                          f"(Ctrl+U, по умолчанию {DEFAULT_UNDO}; 0 — выключить)")
+    ap.add_argument("--buffer", default=None, type=str,
+                    help="предел буфера набора в АВТОНОМНО, знаков "
+                         f"(по умолчанию {DEFAULT_BUFFER}; 0 — не ограничивать)")
     ap.add_argument("--nabor", choices=["n0", "n1", "n2"], default=None,
                     help="НАБОР терминала: Н0 — знаки ASCII, Н1 — русские "
                          "верхний и нижний регистры (КОИ-7), Н2 — набор "
@@ -1035,6 +1044,7 @@ def main(argv: list[str] | None = None) -> None:
                      take_fit=bool(args.fit), machine=args.machine or "",
                      show_help=not bool(args.no_help),
                      undo_depth=int(args.undo),
+                     buffer_limit=int(args.buffer),
                      keylog=args.keylog,
                      pulse=float(args.pulse),
                      check=float(args.check),

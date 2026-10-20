@@ -65,6 +65,31 @@ CONTROL_HINTS = {
 
 LAYOUT_LABELS = {"phonetic": "ФОН", "positional": "ПОЗ"}
 
+# Предел буфера набора в АВТОНОМНО (знаков). 0 — не ограничивать.
+#
+# Настоящий 15ИЭ ограничен строкой: ДИСПАК принимает в строку ввода
+# ограниченное число знаков, дальше — «ПЕРЕПОЛНЕН БУФЕР ВВОДА» (boek1.be:
+# счётчик НОМСИМВ, начальное значение 60₈). Здесь предел задаёт конфиг
+# ([terminal] buffer): при переполнении лишние знаки не принимаются,
+# подвал показывает «БУФЕР=ПОЛОН», и оператор отдаёт накопленное
+# (ПЕРЕДАЧА, F10) либо снимает его (F3).
+DEFAULT_BUFFER = 4096
+
+
+def _find_break(buf, pos: int, end: int) -> int:
+    """Позиция ближайшего разрыва строки (ПР или ПС) в буфере [pos, end).
+
+    -1 — разрыва нет. Поиск байта идёт в C: буфер набора бывает большой,
+    и просмотр каждого знака делал нажатие клавиши дорогим.
+    """
+    a = buf.find(b"\r", pos, end)
+    b = buf.find(b"\n", pos, end)
+    if a < 0:
+        return b
+    if b < 0:
+        return a
+    return a if a < b else b
+
 WHEEL_STEP = 3       # рядов выдачи на щелчок колеса мыши
 
 # УДЕРЖАНИЕ ЭКРАНА (пауза выдачи ЭВМ) — клавиша Ctrl+L.
@@ -187,7 +212,8 @@ class TerminalSession:
                  koi7: bool = False, encoding: str = "utf8",
                  layout: str | None = None,
                  keymap: dict[str, str] | None = None,
-                 undo_depth: int = DEFAULT_UNDO) -> None:
+                 undo_depth: int = DEFAULT_UNDO,
+                 buffer_limit: int = DEFAULT_BUFFER) -> None:
         if mode not in (MODE_LOCAL, MODE_HOST):
             raise ValueError(f"неизвестный режим: {mode!r}")
         self.parser = parser
@@ -208,6 +234,9 @@ class TerminalSession:
         self.default_layout = layout     # раскладка, включаемая набором Н1
         self.koi7 = layout is not None
         self.buffer = bytearray()
+        # предел буфера набора (знаков): 0 — не ограничивать. Задаётся
+        # конфигом ([terminal] buffer) — по умолчанию DEFAULT_BUFFER.
+        self.buffer_limit = max(0, int(buffer_limit))
         # отмена правок набора (АВТОНОМНО): снимки буфера, глубина — из
         # конфига ([terminal] undo), 0 — выключена
         self.undo = UndoStack(undo_depth)
@@ -350,6 +379,9 @@ class TerminalSession:
                 # хвост эха уже в буфере — переносим только продолжение
                 chunk = chunk[len(tail):]
             data += chunk + b"\r"
+        # предел буфера набора: кадр (до 25×80 знаков) может не влезть —
+        # переносим сколько влезет
+        data = bytearray(self._buf_clip(bytes(data)))
         self.buffer.extend(data)
         self.undo.step()
         if not had_echo:
@@ -436,6 +468,13 @@ class TerminalSession:
         out = bytearray()
         col = self._buf_rowcol(self._buf_pos)[1]
         col = self._paste_emit(seg, out, col)
+        # предел буфера набора: хвост вставки подрезаем по месту (и говорим,
+        # сколько взято — молча обрезать нельзя)
+        clipped = self._buf_clip(bytes(out))
+        if len(clipped) != len(out):
+            self.last_key = (f"ВСТАВКА ОБРЕЗАНА ({len(clipped)} зн.)"
+                             if clipped else "ВСТАВКА НЕ ПРИНЯТА (БУФЕР ПОЛОН)")
+            out = bytearray(clipped)
         self.undo.snapshot(self.buffer)    # хвост — шаг своей вставки
         self.buffer[self._buf_pos:self._buf_pos] = bytes(out)
         self._buf_pos += len(out)
@@ -559,8 +598,12 @@ class TerminalSession:
             st("ЭХО=", "ВКЛ" if self.echo else "ВЫКЛ"),
             st("ВИДЕО=", "ИНВ" if sc.inverse else "НОРМ"),
             # «БУФЕР=» не прячем: в режиме удержания оператор может
-            # перейти в АВТОНОМНО и набирать — счётчик нужен и там
-            st("БУФЕР=", str(len(self.buffer)) if self.buffer else "ПУСТО"),
+            # перейти в АВТОНОМНО и набирать — счётчик нужен и там.
+            # Буфер полон — показываем это вместо счётчика
+            (mk("БУФЕР=", ("ПОЛОН", "off"))
+             if self.buffer_limit > 0
+             and len(self.buffer) >= self.buffer_limit
+             else st("БУФЕР=", str(len(self.buffer)) if self.buffer else "ПУСТО")),
             st("УПР.СИМВ=", "ВКЛ" if self.parser.show_ctrl else "ВЫКЛ"),
             last,                                   # «ПОСЛ» — свой ряд
             RULE,                                 # состояние от справки
@@ -914,6 +957,7 @@ class TerminalSession:
                             self.mark_line_lost(str(e))
                 else:
                     self.undo.snapshot(self.buffer)     # отменяемая правка
+                    data = self._buf_clip(data)        # предел буфера
                     self.buffer.extend(data)
                     self.undo.step()          # взятое — свой шаг отката
             self._update_service()
@@ -1175,6 +1219,14 @@ class TerminalSession:
             # не разделяются (иначе печать рвёт их по краю кадра как
             # придётся)
             data = self._wrap_paste(data)
+            # предел буфера набора: вставку подрезаем по месту (и говорим,
+            # сколько взято — молча обрезать нельзя)
+            clipped = self._buf_clip(data)
+            if len(clipped) != len(data):
+                self.last_key = (f"ВСТАВКА ОБРЕЗАНА ({len(clipped)} зн.)"
+                                 if clipped
+                                 else "ВСТАВКА НЕ ПРИНЯТА (БУФЕР ПОЛОН)")
+                data = clipped
         # АВТОНОМНО: обычный ВК при открытом выделении удаляет его (как в
         # редакторах). Это же закрывает терминалы, где Shift+Backspace не
         # различим: xterm шлёт для Shift+ВК и обычного ВК один \x7f.
@@ -1202,17 +1254,26 @@ class TerminalSession:
         elif key == "KEY_ENTER":
             # Enter: CR (0D) — управляющий символ разделителя строки; курсор
             # (и на экране) — в начало следующей строки
+            if self._buf_full(1):
+                return None
             self.buffer[pos:pos] = b"\r"
             self._buf_pos = pos + 1
-        elif self.insert_mode:
-            self.buffer[pos:pos] = data      # вставка: хвост уходит вправо
-            self._buf_pos = pos + len(data)
-        elif pos + len(data) <= len(self.buffer):
-            self.buffer[pos:pos + len(data)] = data    # замена поверх
-            self._buf_pos = pos + len(data)
-        else:                                # замена в конце строки = добавление
-            self.buffer[pos:pos] = data
-            self._buf_pos = pos + len(data)
+        else:
+            # вставка/замена: буфер растёт, если знаков больше, чем до
+            # конца набора (замена поверх размера не меняет)
+            grow = len(data) if self.insert_mode \
+                else max(0, pos + len(data) - len(self.buffer))
+            if self._buf_full(grow):
+                return None
+            if self.insert_mode:
+                self.buffer[pos:pos] = data      # вставка: хвост уходит вправо
+                self._buf_pos = pos + len(data)
+            elif pos + len(data) <= len(self.buffer):
+                self.buffer[pos:pos + len(data)] = data    # замена поверх
+                self._buf_pos = pos + len(data)
+            else:                                # замена в конце строки = добавление
+                self.buffer[pos:pos] = data
+                self._buf_pos = pos + len(data)
         # откат по слову: граница шага — после разделителя (пробел, точка,
         # ПР) и после ВК — дальше набор идёт новым словом/строкой
         if data in (b" ", b".", b"\r") or key == "KEY_BACKSPACE":
@@ -1286,6 +1347,48 @@ class TerminalSession:
         # не должен: на 15ИЭ 0x0C — это «ДОМ», курсор ушёл бы в начало,
         # и следующий вывод затёр бы верх кадра. Эхо срежем при приёме.
         self._hold_echo = True
+
+    # --- предел буфера набора -----------------------------------------
+    def _buf_room(self, need: int) -> bool:
+        """Влезает ли в буфер набора ещё `need` знаков.
+
+        Предел — конфиг ([terminal] buffer), 0 — не ограничивать.
+        """
+        if self.buffer_limit <= 0:
+            return True
+        return len(self.buffer) + need <= self.buffer_limit
+
+    def _buf_full(self, need: int) -> bool:
+        """Буфер набора переполнен — отказать (с подсказкой в подвале).
+
+        True — не влезает, ввод отвергнут.
+        """
+        if self._buf_room(need):
+            return False
+        self.last_key = f"БУФЕР ПОЛОН ({self.buffer_limit})"
+        self._update_service()
+        self._update_status()
+        return True
+
+    def _buf_clip(self, data: bytes) -> bytes:
+        """Подрезать данные по месту в буфере набора (по границе слова).
+
+        Вставка длиннее остатка буфера обрезается — молча обрезать нельзя,
+        поэтому вызывающий сообщает, сколько взято.
+        """
+        if self.buffer_limit <= 0:
+            return data
+        room = self.buffer_limit - len(self.buffer)
+        if room <= 0:
+            return b""
+        if len(data) <= room:
+            return data
+        cut = data[:room]
+        # по границе слова: отступ назад до пробела или ПР
+        brk = max(cut.rfind(b" "), cut.rfind(b"\r"), cut.rfind(b"\n"))
+        if brk > 0:
+            cut = cut[:brk]
+        return cut
 
     def _echo_feed(self, data: bytes) -> None:
         """Напечатать набираемое на экран (АВТОНОМНО).
@@ -1405,21 +1508,31 @@ class TerminalSession:
 
     # --- выделение в буфере набора (АВТОНОМНО) ------------------------
     def _buf_rowcol(self, i: int) -> tuple[int, int]:
-        """(ряд эха, колонка) для позиции i — одним проходом по буферу.
+        """(ряд эха, колонка) для позиции i — проходом по разрывам строк.
 
         Точно повторяет печать: ПР/ПС дают новый ряд, каждые COLS знаков —
         перенос. Строка, заполнившая кадр ровно (длина кратна COLS),
         перевела курсор переносом печати — её ПР нового ряда не даёт
         (иначе перерисовка вставила бы пустой ряд после каждой такой
         строки), колонка — по остатку от COLS.
+
+        Разрывы строк ищутся ПОИСКОМ байта (счёт идёт в C), а не
+        просмотром каждого знака: буфер набора бывает большой (вставка,
+        макрос), и просмотр по знакам делал нажатие клавиши дорогим тем
+        больше, чем длиннее набор.
         """
+        buf = self.buffer
         rows = run = 0
-        for b in bytes(self.buffer[:i]):
-            if b in (0x0D, 0x0A):
-                rows += max(1, (run + COLS - 1) // COLS)
-                run = 0
-            else:
-                run += 1
+        pos = 0
+        while pos < i:
+            nl = _find_break(buf, pos, i)
+            if nl < 0:
+                break
+            run = nl - pos
+            rows += max(1, (run + COLS - 1) // COLS)
+            run = 0
+            pos = nl + 1
+        run = i - pos
         return rows + run // COLS, run % COLS
 
     def _buf_rows_up_to(self, i: int) -> int:
@@ -1444,25 +1557,29 @@ class TerminalSession:
         с которого начинается ряд r. Границы считаются как в `_buf_rowcol`:
         ПР/ПС даёт новый ряд, каждые COLS знаков — перенос; строка длиной,
         кратной COLS, занимает один ряд (перенос уже сделан печатью).
+
+        Разрывы строк ищутся поиском байта (счёт в C) — см. `_buf_rowcol`.
         """
         starts = [0]
-        rows = run = 0
-        line_start = 0
-        for idx, b in enumerate(buf):
-            if b in (0x0D, 0x0A):
-                full = max(1, (run + COLS - 1) // COLS)
-                for j in range(1, full):              # переносы строки
-                    rows += 1
-                    starts.append(line_start + j * COLS)
-                rows += 1                             # ряд после разрыва
-                starts.append(idx + 1)
-                run = 0
-                line_start = idx + 1
-            else:
-                run += 1
-        for j in range(1, run // COLS + 1):           # хвост незакрытой строки
+        rows = 0
+        pos = 0
+        n = len(buf)
+        while pos < n:
+            nl = _find_break(buf, pos, n)
+            if nl < 0:
+                break
+            run = nl - pos
+            full = max(1, (run + COLS - 1) // COLS)
+            for j in range(1, full):              # переносы строки
+                rows += 1
+                starts.append(pos + j * COLS)
+            rows += 1                             # ряд после разрыва
+            starts.append(nl + 1)
+            pos = nl + 1
+        run = n - pos
+        for j in range(1, run // COLS + 1):       # хвост незакрытой строки
             rows += 1
-            starts.append(line_start + j * COLS)
+            starts.append(pos + j * COLS)
         return starts, rows
 
     def _buf_pos_at_row(self, row: int, col: int) -> int:

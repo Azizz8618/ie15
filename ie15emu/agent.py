@@ -54,7 +54,7 @@ import time
 
 from .link import LinkError, open_link
 from .parser import Parser
-from .session import MODE_HOST, MODE_LOCAL, TerminalSession
+from .session import DEFAULT_BUFFER, MODE_HOST, MODE_LOCAL, TerminalSession
 
 # Латинские буквы, которыми набор Н2 показывает русские буквы ЭВМ: коды
 # 0x40…0x5F у машины — это русский верхний регистр, а терминал в одно-регист-
@@ -210,12 +210,14 @@ class Terminal:
                  mode: str = MODE_HOST, layout: str | None = None,
                  keymap: dict[str, str] | None = None, machine: str = "",
                  show_help: bool = False, banner_timeout: float = 3.0,
-                 read_async: bool = True, **linkkw) -> None:
+                 read_async: bool = True, buffer_limit: int = DEFAULT_BUFFER,
+                 **linkkw) -> None:
         if mode not in (MODE_LOCAL, MODE_HOST):
             raise ValueError(f"неизвестный режим: {mode!r}")
         self.link = open_link(url, **linkkw)
         self.session = TerminalSession(Parser(), link=self.link, mode=mode,
-                                       layout=layout, keymap=keymap)
+                                       layout=layout, keymap=keymap,
+                                       buffer_limit=buffer_limit)
         self.session.parser.screen.set_help(show_help)
         if machine:
             self.session.machine = str(machine)

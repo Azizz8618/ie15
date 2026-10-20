@@ -3222,6 +3222,73 @@ def test_line_type_shown_in_footer():
     assert "ЛИНИЯ=НЕТ" in panel_text(session.parser.screen)
 
 
+def test_buffer_limit_stops_typing():
+    # предел буфера набора (конфиг [terminal] buffer): лишние знаки не
+    # принимаются, в подвале — «БУФЕР=ПОЛОН»
+    session, _ = make_session(MODE_LOCAL)
+    session.buffer_limit = 20
+    for _ in range(25):
+        session.feed_key("a")
+    assert len(session.buffer) == 20
+    assert "БУФЕР=ПОЛОН" in panel_text(session.parser.screen)
+    # Enter при полном буфере — не влезает, отказ с подсказкой
+    session.feed_key("KEY_ENTER")
+    assert len(session.buffer) == 20
+    assert "БУФЕР ПОЛОН" in session.last_key
+    # очистка (F3) — буфер снова пуст, набор возобновлён
+    session.feed_key("SELCLEAR")
+    session.feed_key("SELCLEAR")
+    assert len(session.buffer) == 0
+    session.feed_key("b")
+    assert len(session.buffer) == 1
+
+
+def test_buffer_limit_clips_paste():
+    # вставка не влезает — берётся сколько поместилось, и об этом сказано
+    # в подвале (молча обрезать нельзя)
+    session, _ = make_session(MODE_LOCAL)
+    session.buffer_limit = 20
+    session.feed_key("a" * 5 + " " + "b" * 40 + "\r")
+    assert len(session.buffer) <= 20
+    assert "ОБРЕЗАНА" in session.last_key
+
+
+def test_buffer_limit_off_keeps_everything():
+    # предел 0 — буфер не ограничен
+    session, _ = make_session(MODE_LOCAL)
+    session.buffer_limit = 0
+    for _ in range(500):
+        session.feed_key("a")
+    assert len(session.buffer) == 500
+    assert "ПОЛОН" not in panel_text(session.parser.screen)
+
+
+def test_buffer_rows_match_naive_count():
+    # быстрый построчный расчёт (поиск разрывов) совпадает с перебором
+    # каждого знака: иначе эхо печаталось бы не в тех рядах
+    from ie15emu.session import COLS
+    session, _ = make_session(MODE_LOCAL)
+    buf = b"abc" * 30 + b"\r" + b"x" * (COLS * 2 + 5) + b"\r" + b"tail"
+    session.buffer.extend(buf)
+    for i in (0, 1, 5, 90, 91, 92, 180, 181, len(buf)):
+        rows = run = 0
+        for b in buf[:i]:
+            if b in (0x0D, 0x0A):
+                rows += max(1, (run + COLS - 1) // COLS)
+                run = 0
+            else:
+                run += 1
+        assert session._buf_rowcol(i) == (rows + run // COLS, run % COLS)
+    starts, rows = session._buf_starts(bytes(buf))
+    assert starts[0] == 0
+    assert rows == len(starts) - 1
+    # границы рядов: каждый следующий ряд начинается с места, где
+    # предыдущий кончился (перенос краем кадра или разрыв строки)
+    for r in range(1, len(starts)):
+        prev = starts[r - 1]
+        assert starts[r] == prev + COLS or buf[starts[r] - 1] in (0x0D, 0x0A)
+
+
 if __name__ == "__main__":
     import inspect
     for name, fn in sorted(globals().items()):
