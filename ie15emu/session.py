@@ -20,7 +20,7 @@ import time
 
 from . import COLS, ROWS, __version__
 from .charset import (decode_koi7, encode_koi7, koi7_display_upper,
-                      koi7_raw_upper,
+                      koi7_raw_upper, latin_upper,
                       normalize_incremental, to_line)
 from .link import LinkError, parse_probe
 from .keyboard import (DEFAULT_LAYOUT, ctrl_code, is_key_combo, key_to_bytes,
@@ -89,6 +89,21 @@ def _find_break(buf, pos: int, end: int) -> int:
     if b < 0:
         return a
     return a if a < b else b
+
+
+def _row_of(starts: list[int], i: int) -> int:
+    """Номер ряда, в котором лежит позиция i, — по таблице начал.
+
+    Таблица монотонна, и поиск двоичный: O(log n) вместо просмотра буфера.
+    """
+    lo, hi = 0, len(starts)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if starts[mid] <= i:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo - 1
 
 WHEEL_STEP = 3       # рядов выдачи на щелчок колеса мыши
 
@@ -1402,9 +1417,9 @@ class TerminalSession:
         if self.nabor in ("n0", "n1"):
             self.parser.feed(data)
         else:
-            latin = bytes((b - 0x20) if 0x61 <= b <= 0x7A else b
-                          for b in data)
-            self.parser.feed(koi7_display_upper(latin))
+            # латинскую строчную — верхним регистром (таблица подстановки,
+            # счёт в C: эхо перерисовывается на каждое нажатие)
+            self.parser.feed(koi7_display_upper(latin_upper(data)))
 
     def _buf_move(self, key: str) -> None:
         """Передвинуть курсор набора по буферу (АВТОНОМНО).
@@ -1462,7 +1477,10 @@ class TerminalSession:
         page_end = end                # страница для F5 — до последнего ПС
         if buf:
             avail = max(1, sc.rows - top)
-            start, end, lo = self._buf_window(buf, avail)
+            # таблица начал рядов — одна на перерисовку: и окно, и позиция
+            # курсора считаются по ней (иначе буфер просматривался бы трижды)
+            starts, _total = self._buf_starts(buf)
+            start, end, lo = self._buf_window(buf, avail, starts)
             page_end = end
             if end > start and buf[end - 1] in (0x0D, 0x0A):
                 # последний разрыв строки хвоста печати: после него курсор
@@ -1478,15 +1496,22 @@ class TerminalSession:
             # ряд, поэтому её ПР печатается без ПС (как у ЭВМ: «текст ПР»)
             out = bytearray()
             line_start = buf.rfind(b"\r", 0, start) + 1
-            for i in range(start, end):
-                b = buf[i]
-                if b == 0x0D:
-                    line_len = i - line_start
+            # строки окна — разбиением по ПР (счёт в C), а не просмотром
+            # каждого знака: окно эха — это весь кадр, и перебор знаков
+            # стоил дороже самой печати
+            pos = start
+            parts = buf[start:end].split(b"\r")
+            last = len(parts) - 1
+            for k, part in enumerate(parts):
+                if k < last:                       # за строкой идёт ПР
+                    line_len = (pos + len(part)) - line_start
+                    out += part
                     out += b"\r" if line_len and line_len % COLS == 0 \
                         else b"\r\n"
-                    line_start = i + 1
                 else:
-                    out.append(b)
+                    out += part
+                pos += len(part) + 1
+                line_start = pos
             self._echo_feed(bytes(out))
             delta = sc.scrolled - before     # страховка: печать всё же уехала
         # ряд нулевого знака буфера: верх печати минус пропущенные сверху
@@ -1496,9 +1521,20 @@ class TerminalSession:
         self._echo_from = start
         self._echo_to = page_end
         # нижний ряд напечатанного блока — для стирания при следующей правке
-        self._echo_bottom = min(sc.rows - 1,
-                                self._echo_top + self._buf_rows_up_to(end))
-        rows, col = self._buf_rowcol(self._buf_pos)
+        # (ряды до end — по таблице, без прохода по буферу)
+        if buf:
+            rows_end = _row_of(starts, end)
+        else:
+            rows_end = 0
+        self._echo_bottom = min(sc.rows - 1, self._echo_top + rows_end)
+        # позиция курсора — по таблице рядов (двоичный поиск), без прохода
+        # по буферу
+        if buf:
+            row = _row_of(starts, self._buf_pos)
+            rows = row
+            col = (self._buf_pos - starts[row]) % COLS
+        else:
+            rows, col = self._buf_rowcol(self._buf_pos)
         sc.y = max(0, min(sc.rows - 1, self._echo_top + rows))
         sc.x = col
         if self._buf_sel:
@@ -1624,7 +1660,9 @@ class TerminalSession:
             self._redraw_echo()
         return True
 
-    def _buf_window(self, buf: bytes, avail: int) -> tuple[int, int, int]:
+    def _buf_window(self, buf: bytes, avail: int,
+                    starts: list[int] | None = None
+                    ) -> tuple[int, int, int]:
         """Окно эха, когда буфер больше кадра: (с чего, до куда, рядов сверху).
 
         Печать «с нуля» и до конца буфера уезжала вверх: строки над
@@ -1634,31 +1672,25 @@ class TerminalSession:
           * курсор высоко — окно вокруг его строки, хвост не печатается
             (он не нужен: важен знак под курсором).
         Кадр при печати не смещается — печать влезает в окно целиком.
+
+        `starts` — готовая таблица начал рядов (её считает `_buf_starts`):
+        пересчитывать её второй раз незачем.
         """
         # starts[r] — индекс буфера, с которого начинается ряд r
         # (границы строк и переносов считаются так же, как в _buf_rowcol)
-        starts, total = self._buf_starts(buf)
-
-        def row_of(i: int) -> int:
-            # бинарный поиск по монотонной таблице
-            lo, hi = 0, len(starts)
-            while lo < hi:
-                mid = (lo + hi) // 2
-                if starts[mid] <= i:
-                    lo = mid + 1
-                else:
-                    hi = mid
-            return lo - 1
+        if starts is None:
+            starts, _total = self._buf_starts(buf)
+        total = len(starts) - 1
 
         pos = self._buf_pos
-        cur = row_of(pos)
+        cur = _row_of(starts, pos)
         if cur >= total - (avail - 1):
             # хвостовое окно: конец буфера и курсор у конца видны
             lo = max(0, total - (avail - 1))
             return starts[lo], len(buf), lo
         # курсор высоко — окно от начала его строки
         line_start_i = buf.rfind(b"\r", 0, pos) + 1
-        lo = row_of(line_start_i)
+        lo = _row_of(starts, line_start_i)
         hi = lo + (avail - 1)
         end = starts[hi + 1] if hi + 1 < len(starts) else len(buf)
         return line_start_i, end, lo

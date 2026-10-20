@@ -408,7 +408,50 @@ class Screen:
             self.rev += 1
             return
         self.x += 1
-        self.wrap_cursor()
+        # перенос строки — здесь, без вызова: put() зовётся на каждый знак
+        if self.x >= COLS:
+            self.x = 0
+            self.y += 1
+        if self.y >= self.rows:
+            self.scroll_up()
+            self.y = self.rows - 1
+        self.rev += 1
+
+    def put_run(self, codes: bytes) -> None:
+        """Печать сплошного текста одним куском — как `put` по одному знаку.
+
+        Выдача ЭВМ и эхо набора — сплошной текст, и проверки на каждый
+        знак (вызовы, ветвления) стоили дороже самой записи. Здесь знаки
+        пишутся сразу: атрибут один (инверсия), перенос строки и сдвиг
+        кадра — те же, что у `put`.
+        """
+        n = len(codes)
+        if not n:
+            return
+        a = ATTR_INV if self.inverse else 0
+        cells = self.cells
+        attr = self.attr
+        y = self.y
+        x = self.x
+        i = 0
+        while i < n:
+            room = COLS - x
+            take = n - i
+            if take > room:
+                take = room
+            cells[y][x:x + take] = list(codes[i:i + take])
+            attr[y][x:x + take] = [a] * take
+            self.row_rev[y] = self.rev + 1
+            i += take
+            x += take
+            if x >= COLS:
+                x = 0
+                y += 1
+                if y >= self.rows:
+                    self.scroll_up()
+                    y = self.rows - 1
+        self.x = x
+        self.y = y
         self.rev += 1
 
     def erase_eol(self) -> None:

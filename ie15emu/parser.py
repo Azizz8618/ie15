@@ -19,9 +19,14 @@
 """
 from __future__ import annotations
 
+import re
+
 from . import COLS
-from .charset import ALPHA_BIT
+from .charset import ALPHA_BIT, MASK7
 from .screen import Screen
+
+# Управляющий код — конец «сплошного текста» (поиск в C, не по знакам).
+_CTRL_RE = re.compile(rb"[\x00-\x1f]")
 
 # Управляющие коды
 BEL = 0x07
@@ -97,10 +102,23 @@ class Parser:
     def feed(self, data: bytes) -> str | None:
         """Разобрать буфер; вернуть текст запроса от терминала (ESC Z и т.п.)."""
         replies: list[str] = []
-        for b in data:
-            r = self._byte(b)
+        i = 0
+        n = len(data)
+        while i < n:
+            if self.state == "raw":
+                # сплошной текст (0x20 и выше) — печатаем куском: по одному
+                # знаку проверки стоят дороже самой записи, а выдача ЭВМ и
+                # эхо набора почти всегда текст. Конец куска ищем в C.
+                m = _CTRL_RE.search(data, i)
+                j = m.start() if m else n
+                if j > i:
+                    self.screen.put_run(data[i:j].translate(MASK7))
+                    i = j
+                    continue
+            r = self._byte(data[i])
             if r:
                 replies.append(r)
+            i += 1
         return "".join(replies) or None
 
     def _byte(self, b: int) -> str | None:
@@ -132,6 +150,11 @@ class Parser:
         if b >= ALPHA_BIT:
             self.screen.put(b)     # знак алфавита: русская заглавная (Н1+0x80)
             return None
+        if 0x20 <= b <= 0x7F:
+            # обычный знак (0x7F — сплошная заливка) — самый частый случай:
+            # проверяем его первым, а не после всех управляющих кодов
+            self.screen.put(b)
+            return None
         if b == ESC:
             # режим 1 (набор №1): ESC-последовательностей нет — код гасится
             if self.mode == 2:
@@ -161,8 +184,6 @@ class Parser:
             self.screen.y = 0
         elif b == VT_VT:                 # 0x0B — на Видеотоне команды нет
             pass
-        elif 0x20 <= b <= 0x7F:
-            self.screen.put(b)     # печать, 0x7F — сплошная заливка
         elif b == 0x00:
             # NUL — пустой код: не знак терминала, не печатается и
             # каретки не двигает (не путать с командой ДИАЛОГа «НУС» —

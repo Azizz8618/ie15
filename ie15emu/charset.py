@@ -229,7 +229,7 @@ def normalize_line_bytes(data: bytes) -> bytes:
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
-        return bytes(b & 0x7F for b in data)   # сырой 8-разрядный поток
+        return data.translate(MASK7)       # сырой 8-разрядный поток
     return encode_koi7(text)
 
 
@@ -253,7 +253,28 @@ def normalize_incremental(data: bytes, carry: bytes = b""):
         except UnicodeDecodeError:
             continue
         return encode_koi7(text), data[end:]
-    return bytes(b & 0x7F for b in data), b""   # мусор без UTF-8
+    return data.translate(MASK7), b""   # мусор без UTF-8
+
+
+def _subst_table(changes: dict[int, int]) -> bytes:
+    """Таблица подстановки для bytes.translate (счёт в C, без Python-цикла)."""
+    tbl = bytearray(range(256))
+    for src, dst in changes.items():
+        tbl[src] = dst
+    return bytes(tbl)
+
+
+# Строка 0x60.. (русские строчные) → 0x80.. (заглавные с битом алфавита):
+# так линия RAW показывает русские заглавными.
+_RUS_UPPER = _subst_table({0x60 + i: 0x80 + i for i in range(len(RUS7))})
+# Внутренние строчные 0xE0.. → заглавные 0x80.. (эхо АВТОНОМНО).
+_DISPLAY_UPPER = _subst_table({0xE0 + i: 0x80 + i for i in range(len(RUS7))})
+# Строчные латинские 0x61..0x7A → заглавные (эхо в Н2: латиница однозначно
+# заглавная — строка 0x60.. в Н2 занята русскими).
+_LATIN_UPPER = _subst_table({0x61 + i: 0x41 + i for i in range(26)})
+# Маска «7 бит» (сырой 8-разрядный поток без UTF-8) и тот же срез для
+# знаков алфавита: байт с битом алфавита (0x80..) в ОЗУ лежит без него.
+MASK7 = _subst_table({i: i & 0x7F for i in range(256)})
 
 
 def koi7_raw_upper(data: bytes) -> bytes:
@@ -262,16 +283,19 @@ def koi7_raw_upper(data: bytes) -> bytes:
     `koi7_rus_to_unicode` в SIMH). Перекладываем строку 0x60..0x7E в
     форму Н1 с битом алфавита (0x80..0x9E) — экран покажет заглавные.
     """
-    return bytes(b + 0x20 if 0x60 <= b < 0x60 + len(RUS7) else b
-                 for b in data)
+    return data.translate(_RUS_UPPER)
 
 
 def koi7_display_upper(data: bytes) -> bytes:
     """Локальное эхо АВТОНОМНО: алфавит Н1 одно-регистрный — русские
     буквы печатаются заглавными, как их покажет ЭВМ (`koi7_rus_to_unicode`
     в SIMH отдаёт строку 0x60.. заглавными)."""
-    return bytes(b - 0x60 if 0xE0 <= b < 0xE0 + len(RUS7) else b
-                 for b in data)
+    return data.translate(_DISPLAY_UPPER)
+
+
+def latin_upper(data: bytes) -> bytes:
+    """Строчные латинские → заглавные (строка Н2: 0x60.. занята русскими)."""
+    return data.translate(_LATIN_UPPER)
 
 
 def to_line(data: bytes, encoding: str = "utf8") -> bytes:
