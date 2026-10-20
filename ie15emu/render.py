@@ -9,7 +9,7 @@ from __future__ import annotations
 import struct
 import zlib
 
-from . import COLS, ROWS
+from . import ROWS
 from .charset import Charset
 from .screen import ATTR_BLINK, ATTR_CTRL, ATTR_INV, Screen
 
@@ -24,7 +24,7 @@ def to_ansi(screen: Screen, charset: Charset,
     if green:
         out.append("\x1b[32;40m\x1b[2J\x1b[H")
     for y in range(screen.rows):
-        for x in range(COLS):
+        for x in range(screen.cols):
             code = screen.glyph(y, x)
             a = screen.attr[y][x]
             if a & ATTR_CTRL and not screen.show_ctrl:
@@ -52,11 +52,11 @@ def _png_chunk(tag: bytes, data: bytes) -> bytes:
 
 
 def to_png_bytes(screen: Screen, charset: Charset, path: str) -> None:
-    w, h = COLS * 7 * SCALE, screen.rows * 8 * SCALE
+    w, h = screen.cols * 7 * SCALE, screen.rows * 8 * SCALE
     rows = []
     for y in range(screen.rows):
         glyph_rows = [b"" for _ in range(8)]
-        for x in range(COLS):
+        for x in range(screen.cols):
             code = screen.glyph(y, x)
             a = screen.attr[y][x]
             if a & ATTR_CTRL and not screen.show_ctrl:
@@ -88,12 +88,12 @@ def to_text(screen: Screen, charset: Charset | None = None) -> str:
     lines = []
     for y in range(sc.rows):
         lines.append("".join(charset.label(c) for c in sc.cells[y]))
-    out = ["+" + "-" * COLS + "+"]
+    out = ["+" + "-" * screen.cols + "+"]
     for i, line in enumerate(lines):
         marker = "*" if i == sc.y else " "
         out.append(f"|{line}|{marker}")
-    out.append("+" + "-" * COLS + "+")
-    with sc.panel_width(COLS):            # дамп всегда шириной кадра
+    out.append("+" + "-" * screen.cols + "+")
+    with sc.panel_width(screen.cols):            # дамп всегда шириной кадра
         out.append("|" + "".join(sc.service) + f"|  (служебная, стр. 25)")
         for extra in sc.service_more:
             out.append("|" + extra + "|")

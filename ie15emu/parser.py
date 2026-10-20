@@ -80,10 +80,11 @@ class Parser:
     невозможна.
     """
 
-    def __init__(self, mode: int = 2, history: int = 1000) -> None:
+    def __init__(self, mode: int = 2, history: int = 1000,
+                 cols: int = COLS) -> None:
         if mode not in (1, 2):
             raise ValueError(f"неизвестный режим набора команд: {mode!r}")
-        self.screen = Screen(history=history)
+        self.screen = Screen(history=history, cols=cols)
         self.state = "raw"
         self._esc_args: list[int] = []
         self.mode = mode         # 1 — только УП; 2 — набор №2 (VT52), по умолчанию
@@ -141,7 +142,7 @@ class Parser:
             row, col = self._esc_args[0] - 0x20, b - 0x20
             sc = self.screen
             sc.y = max(0, min(row, sc.rows - 1))
-            sc.x = max(0, min(col, COLS - 1))
+            sc.x = max(0, min(col, sc.cols - 1))
             self.state = "raw"
             self._esc_args = []
             return None
@@ -173,7 +174,7 @@ class Parser:
         elif b == VT_UP:                 # 0x19 — курсор вверх
             self.screen.y = max(0, self.screen.y - 1)
         elif b == VT_RIGHT:              # 0x18 — курсор вправо
-            self.screen.x = min(COLS - 1, self.screen.x + 1)
+            self.screen.x = min(self.screen.cols - 1, self.screen.x + 1)
         elif b == VT_DOWN:               # 0x1A — курсор вниз (как ESC [ B)
             self.screen.y = min(self.screen.rows - 1,
                                    self.screen.y + 1)
@@ -210,7 +211,7 @@ class Parser:
         elif b == ord("B"):
             sc.y = min(sc.rows - 1, sc.y + 1)
         elif b == ord("C"):
-            sc.x = min(COLS - 1, sc.x + 1)
+            sc.x = min(sc.cols - 1, sc.x + 1)
         elif b == ord("D"):
             sc.x = max(0, sc.x - 1)
         elif b == ord("H"):

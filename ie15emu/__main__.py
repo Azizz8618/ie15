@@ -19,7 +19,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import COLS, ROWS, __version__
+from . import COLS, MAX_COLS, ROWS, __version__
 from .charset import Charset, encode_koi7
 from .keyboard import DEFAULT_LAYOUT, decode_keys, group_paste, key_to_bytes
 from .link import LinkError, open_link
@@ -159,6 +159,10 @@ def apply_conf(ns, cp: configparser.ConfigParser):
         # глубина отмены правок набора (АВТОНОМНО); 0 — отмена выключена
         ns.undo = cp.get("terminal", "undo", fallback=str(DEFAULT_UNDO)) \
             or str(DEFAULT_UNDO)
+    if getattr(ns, "cols", None) is None:
+        # ширина кадра: 80 у настоящего 15ИЭ, до 130 — чтобы смотреть
+        # широкую выдачу (АЦПУ-128; программа ЛИСТ в КРАБе)
+        ns.cols = cp.get("terminal", "cols", fallback="") or ""
     if getattr(ns, "buffer", None) is None:
         # предел буфера набора в АВТОНОМНО (знаков); 0 — не ограничивать
         ns.buffer = cp.get("terminal", "buffer",
@@ -314,6 +318,7 @@ class WindowFit:
         self.tries = 0
         self.last = 0.0
         self.saved: tuple[int, int] | None = None   # размер до подгонки
+        self.warned = False        # окно уже предупредили о ширине кадра
 
     def restore(self, parser: Parser) -> bool:
         """Подогнать окно под кадр с подвалом. True — отправили запрос."""
@@ -324,10 +329,16 @@ class WindowFit:
             cols, rows = os.get_terminal_size()
         except OSError:
             return False
-        if rows == need and cols >= COLS:
+        if rows == need and cols >= parser.screen.cols:
             self.pending = False
             self.tries = 0
             return False
+        if cols < parser.screen.cols and not self.warned:
+            # окно уже короче кадра: правые столбцы не видны — сказать
+            self.warned = True
+            say(f"[кадр] ширина кадра {parser.screen.cols} знаков, а окно "
+                f"терминала — {cols}: правые столбцы не видны, окно "
+                f"расширьте или возьмите кадр уже")
         if not self.pending:       # окно сбили (масштаб/граница) — начинаем сначала
             self.pending = True
             self.tries = 0
@@ -340,7 +351,7 @@ class WindowFit:
         self.last = time.time()
         if self.saved is None:
             self.saved = (cols, rows)         # вернём окно по выходе
-        _esc(f"\x1b[8;{need};{max(cols, COLS)}t".encode())
+        _esc(f"\x1b[8;{need};{max(cols, parser.screen.cols)}t".encode())
         return True
 
     def restore_saved(self) -> None:
@@ -967,6 +978,10 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--undo", default=None, type=str,
                     help="глубина отмены правок набора в АВТОНОМНО "
                          f"(Ctrl+U, по умолчанию {DEFAULT_UNDO}; 0 — выключить)")
+    ap.add_argument("--cols", default=None, type=str,
+                    help=f"ширина кадра, знаков (по умолчанию {COLS}; "
+                         f"до {MAX_COLS} — широкая выдача, АЦПУ-128; "
+                         "окно терминала должно быть не уже)")
     ap.add_argument("--buffer", default=None, type=str,
                     help="предел буфера набора в АВТОНОМНО, знаков "
                          f"(по умолчанию {DEFAULT_BUFFER}; 0 — не ограничивать)")
@@ -1031,8 +1046,14 @@ def main(argv: list[str] | None = None) -> None:
     rus_layout = args.layout != "off"
 
     charset = Charset(Path(args.roms) / "chargen-15ie.bin")
+    cols = COLS
+    if args.cols:
+        try:
+            cols = int(args.cols)
+        except ValueError:
+            say(f"[кадр] ширина «{args.cols}» не число — беру {COLS}")
     parser = Parser(mode=2 if args.nabor == "n2" else 1,
-                    history=int(args.history))
+                    history=int(args.history), cols=cols)
     parser.screen.display_set = args.charset or args.nabor
     parser.charset = charset
 

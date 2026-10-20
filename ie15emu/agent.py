@@ -52,6 +52,7 @@ import queue
 import threading
 import time
 
+from . import COLS
 from .link import LinkError, open_link
 from .parser import Parser
 from .session import DEFAULT_BUFFER, MODE_HOST, MODE_LOCAL, TerminalSession
@@ -212,12 +213,13 @@ class Terminal:
                  keymap: dict[str, str] | None = None, machine: str = "",
                  show_help: bool = False, banner_timeout: float = 3.0,
                  read_async: bool = True, buffer_limit: int = DEFAULT_BUFFER,
-                 rus_layout: bool = True,
+                 rus_layout: bool = True, cols: int = COLS,
                  **linkkw) -> None:
         if mode not in (MODE_LOCAL, MODE_HOST):
             raise ValueError(f"неизвестный режим: {mode!r}")
         self.link = open_link(url, **linkkw)
-        self.session = TerminalSession(Parser(), link=self.link, mode=mode,
+        self.session = TerminalSession(Parser(cols=cols), link=self.link,
+                                       mode=mode,
                                        layout=layout, keymap=keymap,
                                        buffer_limit=buffer_limit,
                                        rus_layout=rus_layout)

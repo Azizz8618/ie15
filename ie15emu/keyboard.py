@@ -297,6 +297,7 @@ KEY_CMDSET = "CMDSET"   # клавиша «НАБОР»: набор №1 ↔ н�
 KEY_BLINK = "BLINK"     # клавиша «УПР.СИМВ»: показ/скрытие знаков УП
 KEY_ECHO = "ECHO"       # клавиша «ЭХО»: подавить вывод набора на экран
 KEY_CLEAR = "CLEAR"     # «ОЧИСТКА»: экран в историю, кадр — в начало
+KEY_WIDTH = "WIDTH"     # клавиша «ШИРИНА»: кадр 80 ↔ 128 знаков (АЦПУ-128)
 KEY_WHEELUP = "KEY_WHEELUP"       # колесо мыши вверх: листание «истории»
 KEY_WHEELDOWN = "KEY_WHEELDOWN"   # колесо мыши вниз: к кадру ЭВМ
 KEY_SELCLEAR = "SELCLEAR"   # снять всё выделение мышью (F3)
@@ -326,8 +327,10 @@ KEY_BEGIN = "KEY_BEGIN"             # середина цифровой клав
 SPECIAL_KEYS = {"KEY_UNDO": KEY_UNDO, "KEY_SEND": KEY_SEND, "KEY_MODE": KEY_MODE,
                 "KEY_CMDSET": KEY_CMDSET, "KEY_BLINK": KEY_BLINK,
                 "KEY_ECHO": KEY_ECHO, "KEY_CLEAR": KEY_CLEAR,
+                "KEY_WIDTH": KEY_WIDTH,
                 "KEY_SELCLEAR": KEY_SELCLEAR, "KEY_SELTAKE": KEY_SELTAKE,
                 "F3": KEY_SELCLEAR, "F4": KEY_SELTAKE,
+                "F2": KEY_WIDTH,
                 "F5": KEY_CLEAR, "F6": KEY_ECHO, "F7": KEY_BLINK,
                 "F8": KEY_CMDSET, "F9": KEY_MODE, "F10": KEY_SEND}
 
@@ -374,6 +377,9 @@ SEQ_KEYS = {
     # сам F1 как запасная, если терминал его пропускает
     b"\x1b[24~": KEY_HELP, b"\x1b[11~": KEY_HELP, b"\x1bOP": KEY_HELP,
     b"\x1b[[A": KEY_HELP,
+    b"\x1b[12~": KEY_WIDTH,                         # F2 — ШИРИНА (80↔128)
+    b"\x1b[[B": KEY_WIDTH,                          # F2 консоли Linux
+    b"\x1bOQ": KEY_WIDTH,                           # F2 в application-режиме
     b"\x1b[17~": KEY_ECHO,                          # F6 — ЭХО (подавить набор)
     b"\x1b[18~": KEY_BLINK,                         # F7 — УПР.СИМВ (показ УП)
     b"\x1b[19~": KEY_CMDSET,                        # F8 — НАБОР (набор 1↔2)

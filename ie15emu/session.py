@@ -19,7 +19,7 @@ import bisect
 import re
 import time
 
-from . import COLS, ROWS, __version__
+from . import COLS, ROWS, WIDE_COLS, __version__
 from .charset import (decode_koi7, encode_koi7, koi7_display_upper,
                       koi7_raw_upper, latin_upper,
                       normalize_incremental, to_line, virt340_rus_upper)
@@ -43,7 +43,7 @@ LINE_TYPE_DKS = "ДКС"
 # имена клавиш-команд (не знаки и не вставка — ветки feed_key ниже)
 COMMAND_KEYS = frozenset((
     "UNDO", "SEND", "MODE", "CMDSET", "BLINK", "ECHO", "CLEAR",
-    "SELCLEAR", "SELTAKE", "SELBSPACE", "HELP",
+    "SELCLEAR", "SELTAKE", "SELBSPACE", "HELP", "WIDTH",
 ))
 
 # Индикация последней нажатой управляющей клавиши: клавиша=отданный код
@@ -61,6 +61,7 @@ CONTROL_HINTS = {
     "SELHOME": "ВЫД=^ДОМ", "SELEND": "ВЫД=^КОНЕЦ",
     "SELBSPACE": "ВК-ВЫДЕЛ",
     "SEND": "SEND", "MODE": "СЕАНС", "CMDSET": "НАБОР", "BLINK": "УПР.СИМВ",
+    "WIDTH": "ШИРИНА",
     "ECHO": "ЭХО", "CLEAR": "ОЧИСТКА", "HELP": "СПРАВКА=F12",
 }
 
@@ -559,16 +560,16 @@ class TerminalSession:
                 j = n
             word = seg[i:j]
             i = j
-            if col and col + len(spaces) + len(word) > COLS:
+            if col and col + len(spaces) + len(word) > self.cols:
                 out += b"\r"                    # перелом по пробелу
                 col = 0
                 spaces = b""                   # пробелы съедены переносом
             out += spaces
             col += len(spaces)
             spaces = b""
-            while len(word) > COLS - col:      # слово шире ряда
-                out += word[:COLS - col] + b"\r"
-                word = word[COLS - col:]
+            while len(word) > self.cols - col:      # слово шире ряда
+                out += word[:self.cols - col] + b"\r"
+                word = word[self.cols - col:]
                 col = 0
             out += word
             col += len(word)
@@ -587,6 +588,11 @@ class TerminalSession:
     NABOR_LABELS = {"n0": "Н0", "n1": "Н1", "n2": "Н2"}   # кириллица на панель
 
     @property
+    def cols(self) -> int:
+        """Ширина кадра (знаков): 80 у настоящего 15ИЭ, до 130."""
+        return self.parser.screen.cols
+
+    @property
     def nabor(self) -> str:
         return self.parser.screen.display_set
 
@@ -600,6 +606,25 @@ class TerminalSession:
         # Н0/Н2 — ASCII/VT-52: клавиши печатают латиницу как есть
         self.layout = self.default_layout if value == "n1" else None
         self.koi7 = value == "n1"
+
+    def toggle_width(self) -> int:
+        """Переключить ширину кадра: 80 ↔ 128 знаков (АЦПУ-128).
+
+        Узкий кадр — как у настоящего 15ИЭ (80 знаков), широкий — чтобы
+        видеть выдачу, печатаемую на АЦПУ-128 (программа ЛИСТ в КРАБе).
+        Возвращает новую ширину.
+        """
+        sc = self.parser.screen
+        wide = sc.cols >= WIDE_COLS
+        sc.set_cols(COLS if wide else WIDE_COLS)
+        if self.echo and self.buffer:
+            # эхо набора переверстать по новой ширине (текст переносится
+            # иначе); перерисовка идёт по буферу — содержимое то же
+            self._redraw_echo()
+        self.last_key = f"ШИРИНА={sc.cols}"
+        self._update_service()
+        self._update_status()
+        return sc.cols
 
     def key_bytes(self, key: str) -> bytes:
         """Нажатие (или строка) → байты внутреннего потока по правилам
@@ -752,7 +777,7 @@ class TerminalSession:
             # движение мимо текста игнорируем: начало и конец не теряются
             return None
         kind_row, kind_idx = sc.view_map[v]
-        x = max(0, min(col - 1, COLS - 1))   # координаты терминала с 1
+        x = max(0, min(col - 1, self.cols - 1))   # координаты терминала с 1
         if kind == "MOUSEDOWN":
             sc.sel_begin(kind_row, kind_idx, x, block)
         elif kind == "MOUSEUP":
@@ -1145,6 +1170,9 @@ class TerminalSession:
             self.nabor = nxt
             self._update_service()
             return None
+        if key == "WIDTH":
+            self.toggle_width()
+            return None
         if key == "BLINK":
             self.parser.show_ctrl = not self.parser.show_ctrl
             self._update_service()
@@ -1243,7 +1271,7 @@ class TerminalSession:
             _kind, idx, _x = sc.cursor_anchor()
             if sc._drag is None:
                 sc.kbd_sel_begin(block=False)
-            sc.kbd_sel_drag(idx, 0 if key == KEY_SELHOME else COLS - 1)
+            sc.kbd_sel_drag(idx, 0 if key == KEY_SELHOME else self.cols - 1)
             _fr, lines, chars = sc.sel_stats()
             self.last_key = (f"ВЫД: {lines} стр., {chars} зн. (F4 — взять)"
                              if lines else "ВЫД: пусто")
@@ -1576,7 +1604,7 @@ class TerminalSession:
                 if k < last:                       # за строкой идёт ПР
                     line_len = (pos + len(part)) - line_start
                     out += part
-                    out += b"\r" if line_len and line_len % COLS == 0 \
+                    out += b"\r" if line_len and line_len % self.cols == 0 \
                         else b"\r\n"
                 else:
                     out += part
@@ -1602,7 +1630,7 @@ class TerminalSession:
         if buf:
             row = _row_of(starts, self._buf_pos)
             rows = row
-            col = (self._buf_pos - starts[row]) % COLS
+            col = (self._buf_pos - starts[row]) % self.cols
         else:
             rows, col = self._buf_rowcol(self._buf_pos)
         sc.y = max(0, min(sc.rows - 1, self._echo_top + rows))
@@ -1620,11 +1648,11 @@ class TerminalSession:
         перенос. Строка, заполнившая кадр ровно (длина кратна COLS),
         перевела курсор переносом печати — её ПР нового ряда не даёт
         (иначе перерисовка вставила бы пустой ряд после каждой такой
-        строки), колонка — по остатку от COLS.
+        строки), колонка — по остатку от self.cols.
         """
         starts, _total = self._rows_table(bytes(self.buffer))
         row = _row_of(starts, i)
-        return row, (i - starts[row]) % COLS
+        return row, (i - starts[row]) % self.cols
 
     def _buf_rows_up_to(self, i: int) -> int:
         """Сколько рядов кадра занимает эхо буфера до позиции i."""
@@ -1663,14 +1691,14 @@ class TerminalSession:
             if nl < 0:
                 break
             run = nl - pos
-            full = max(1, (run + COLS - 1) // COLS)
+            full = max(1, (run + self.cols - 1) // self.cols)
             for j in range(1, full):              # переносы строки
-                starts.append(pos + j * COLS)
+                starts.append(pos + j * self.cols)
             starts.append(nl + 1)                  # ряд после разрыва
             pos = nl + 1
         run = n - pos
-        for j in range(1, run // COLS + 1):       # хвост незакрытой строки
-            starts.append(pos + j * COLS)
+        for j in range(1, run // self.cols + 1):       # хвост незакрытой строки
+            starts.append(pos + j * self.cols)
         return starts
 
     def _rows_table(self, buf: bytes) -> tuple[list[int], int]:
@@ -1802,7 +1830,7 @@ class TerminalSession:
         rows = run = 0
         for idx, b in enumerate(buf):
             if b in (0x0D, 0x0A):
-                rows += max(1, (run + COLS - 1) // COLS)
+                rows += max(1, (run + self.cols - 1) // self.cols)
                 run = 0
                 if rows > a:                   # конец строки уже ниже верха
                     return (idx + 1, len(buf))
@@ -1954,8 +1982,8 @@ class TerminalSession:
         # в наборе команд №1 (Н0/Н1) ESC в парсер игнорируется, и
         # «ESC Y … ESC K» печатался бы в кадр буквально — «Y  K».
         for y in range(top, y_end + 1):
-            sc.cells[y] = [0x20] * COLS
-            sc.attr[y] = [0] * COLS
+            sc.cells[y] = [0x20] * self.cols
+            sc.attr[y] = [0] * self.cols
             sc.row_rev[y] = sc.rev + 1
         sc.rev += 1
         sc.x = 0
@@ -2279,6 +2307,10 @@ class TerminalSession:
         if self.line_mode:
             mode_cell = mk("РЕЖИМ=", (self.line_mode, "state"))
             cells.append(mode_cell)
+        # ширина кадра (80 ↔ 128, переключается клавишей F2) — в строке
+        # состояния над кадром: подвал от этого не растёт (кадр не теряет
+        # высоту), а режим кадра видно всегда
+        cells.append(mk("ШИР=", (str(self.cols), "state")))
         # мышь терминала отдана эмулятору? (выделение текста, колесо)
         mouse_cell = mk(("МЫШЬ=", "label"),
                         ("ВКЛ" if self.mouse_on else "ВЫКЛ",

@@ -760,6 +760,67 @@ def test_numpad_center_does_not_wipe_screen():
     assert bytes(session.buffer) == b"\x90\x92\x89\x97\x85\x94"
 
 
+def test_width_toggle_at_runtime():
+    # Ширина кадра переключается в ходе сеанса (клавиша «ШИРИНА», F2):
+    # 80 ↔ 128 знаков (АЦПУ-128). По умолчанию — 80
+    from ie15emu import COLS, WIDE_COLS
+    from ie15emu.keyboard import decode_key_bytes
+    assert WIDE_COLS == 128
+    session, _ = make_session(MODE_LOCAL)
+    assert session.cols == COLS
+    # переключение — командой «WIDTH» (F2 в терминале)
+    session.feed_key("WIDTH")
+    assert session.cols == WIDE_COLS
+    session.feed_key("WIDTH")
+    assert session.cols == COLS
+    # F2 в разных формах терминала
+    for seq in (b"\x1b[12~", b"\x1b[[B", b"\x1bOQ"):
+        assert decode_key_bytes(seq) == ["WIDTH"], seq
+    # содержимое кадра при расширении сохраняется
+    session2, _ = make_session(MODE_LOCAL)
+    for ch in "ПРИВЕТ":
+        session2.feed_key(ch)
+    session2.feed_key("WIDTH")
+    assert session2.parser.screen.row_text("frame", 0).startswith("ПРИВЕТ")
+    # ширина видна в строке состояния над кадром (подвал не растёт)
+    session2.feed_key("WIDTH")
+    status = "".join(t for cell in session2.parser.screen.status_cells
+                     for t, _ in cell)
+    assert "ШИР=80" in status
+
+
+def test_wide_frame_cols():
+    # Ширина кадра настраивается: 80 у настоящего 15ИЭ, до 130 — чтобы
+    # смотреть широкую выдачу (АЦПУ-128, 128 знаков в строке; программа
+    # ЛИСТ в КРАБе печатает такие таблицы)
+    from ie15emu import COLS, MAX_COLS
+    from ie15emu.parser import Parser
+    assert MAX_COLS == 130
+    # ширина экрана и сессии
+    sc = Parser(cols=130).screen
+    assert sc.cols == 130 and len(sc.cells[0]) == 130
+    # вне диапазона — приводим к допустимому
+    assert Parser(cols=200).screen.cols == MAX_COLS
+    assert Parser(cols=10).screen.cols == COLS
+    # сессия видит ту же ширину
+    session, _ = make_session(MODE_LOCAL)
+    assert session.cols == COLS
+    wide = TerminalSession(Parser(cols=130), link=FakeLink(), mode=MODE_LOCAL)
+    assert wide.cols == 130
+    # широкая строка (128 знаков): в кадре 130 — влезает целиком,
+    # в кадре 80 — переносится
+    line = "".join(chr(0x41 + i % 26) for i in range(128))
+    for sess, cols in ((wide, 130), (session, COLS)):
+        sess.parser.feed(line.encode())
+        row0 = sess.parser.screen.row_text("frame", 0)
+        if cols >= 128:
+            assert len(row0.rstrip()) == 128, row0
+            assert sess.parser.screen.row_text("frame", 1).strip() == ""
+        else:
+            assert len(row0) == COLS, row0
+            assert len(sess.parser.screen.row_text("frame", 1).rstrip()) == 48
+
+
 def test_fast_typing_is_not_paste():
     # Быстрый набор: терминал отдаёт за одно чтение несколько знаков —
     # это обычный набор, а не вставка из буфера обмена. Раньше такой
@@ -3153,9 +3214,8 @@ def test_console_f_keys():
     assert decode_key_bytes(b"\x1b[[C") == [KEY_SELCLEAR]
     assert decode_key_bytes(b"\x1b[[D") == [KEY_SELTAKE]
     assert decode_key_bytes(b"\x1b[[A") == [KEY_HELP]   # консольное F1
-    # остальная ESC[[… консоли (F2) в линию не уходит: ESC гасится,
-    # скобка и буква — печатные знаки (безопасный fallback)
-    assert decode_key_bytes(b"\x1b[[B") == ["KEY_ESC", "[", "[", "B"]
+    # F2 консоли — переключение ширины кадра (80 ↔ 128)
+    assert decode_key_bytes(b"\x1b[[B") == ["WIDTH"]
     # xterm-формы не задеты; F12 — основная клавиша справки
     assert decode_key_bytes(b"\x1b[15~") == [KEY_CLEAR]
     assert decode_key_bytes(b"\x1b[13~") == [KEY_SELCLEAR]
@@ -3358,7 +3418,7 @@ def test_buffer_limit_off_keeps_everything():
 def test_buffer_rows_match_naive_count():
     # быстрый построчный расчёт (поиск разрывов) совпадает с перебором
     # каждого знака: иначе эхо печаталось бы не в тех рядах
-    from ie15emu.session import COLS
+    from ie15emu import COLS
     session, _ = make_session(MODE_LOCAL)
     buf = b"abc" * 30 + b"\r" + b"x" * (COLS * 2 + 5) + b"\r" + b"tail"
     session.buffer.extend(buf)

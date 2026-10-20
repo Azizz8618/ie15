@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
-from . import COLS, ROWS, SERVICE_ROW
+from . import COLS, MAX_COLS, ROWS, SERVICE_ROW
 
 MAX_ROWS = 100       # предохранитель: кадр выше не растём
 
@@ -72,18 +72,21 @@ def cell_text(cell: Cell) -> str:
 
 
 class Screen:
-    def __init__(self, history: int = 1000) -> None:
+    def __init__(self, history: int = 1000, cols: int = COLS) -> None:
         self.rows = ROWS       # рядов кадра: 25 у «железа», больше — на всю
                                # высоту окна минус подвал
-        self.cells = [[0x20] * COLS for _ in range(self.rows)]
-        self.attr = [[0] * COLS for _ in range(self.rows)]
-        self.service = [" "] * COLS   # служебная строка (первый ряд подвала)
+        # ширина кадра: 80 у настоящего 15ИЭ, до MAX_COLS (130) — чтобы
+        # смотреть широкую выдачу (АЦПУ-128; программа ЛИСТ в КРАБе)
+        self.cols = max(COLS, min(int(cols), MAX_COLS))
+        self.cells = [[0x20] * self.cols for _ in range(self.rows)]
+        self.attr = [[0] * self.cols for _ in range(self.rows)]
+        self.service = [" "] * self.cols   # служебная строка (первый ряд подвала)
         self.service_more: list[str] = []   # дополнительные ряды подвала
         self.service_dirty = True
-        self.panel_cols = COLS     # ширина подвала: тянется на окно терминала
+        self.panel_cols = self.cols  # ширина подвала: тянется на окно терминала
         self._panel: tuple[list[Cell], list[Cell]] | None = None
         self._panel_rows: list[list[Cell]] = []   # ряды подвала (с цветами)
-        self._panel_colw = COLS    # ширина колонки сетки подвала
+        self._panel_colw = self.cols   # ширина колонки сетки подвала
         self.panel_colw_min = 0    # ниже этой ширины колонка не сжимается
         self.status_cells: list[Cell] = []   # строка состояния линии
         # выпадающая строка сообщения ЭВМ (АВТОНОМНО): показывается между
@@ -148,8 +151,8 @@ class Screen:
             return
         if rows > self.rows:
             for _ in range(rows - self.rows):
-                self.cells.append([0x20] * COLS)
-                self.attr.append([0] * COLS)
+                self.cells.append([0x20] * self.cols)
+                self.attr.append([0] * self.cols)
         else:
             del self.cells[rows:]
             del self.attr[rows:]
@@ -157,6 +160,38 @@ class Screen:
         self.y = min(self.y, rows - 1)
         del self.row_rev[rows:]
         self.row_rev.extend([0] * (rows - len(self.row_rev)))
+        self.touch()
+
+    def set_cols(self, cols: int) -> None:
+        """Ширина кадра — 80 у настоящего 15ИЭ, до 130 (АЦПУ-128).
+
+        Переключается в ходе сеанса (клавиша «ШИРИНА»): при сужении
+        текст за правой кромкой теряется, при расширении — появляются
+        пустые столбцы. Ряды истории (ушедшая выдача) тянутся/обрезаются
+        вместе с кадром.
+        """
+        cols = max(COLS, min(int(cols), MAX_COLS))
+        if cols == self.cols:
+            return
+        for y in range(self.rows):
+            row, at = self.cells[y], self.attr[y]
+            if cols > self.cols:              # шире — добавить пустых знаков
+                row.extend([0x20] * (cols - self.cols))
+                at.extend([0] * (cols - self.cols))
+            else:                             # уже — отбросить правые
+                del row[cols:]
+                del at[cols:]
+        for i, (row, at) in enumerate(self.history):
+            if cols > self.cols:
+                row.extend([0x20] * (cols - self.cols))
+                at.extend([0] * (cols - self.cols))
+            else:
+                del row[cols:]
+                del at[cols:]
+        self.cols = cols
+        self.x = min(self.x, cols - 1)
+        self.service = self.service[:cols] + \
+            [" "] * max(0, cols - len(self.service))
         self.touch()
 
     def _push_history(self, row: list[int], attr: list[int]) -> None:
@@ -260,7 +295,7 @@ class Screen:
 
     # --- курсор -----------------------------------------------------
     def wrap_cursor(self) -> None:
-        if self.x >= COLS:
+        if self.x >= self.cols:
             self.x = 0
             self.y += 1
         if self.y >= self.rows:
@@ -285,7 +320,7 @@ class Screen:
             self.x -= 1
 
     def ht(self) -> None:
-        self.x = min((self.x // 8 + 1) * 8, COLS - 1)
+        self.x = min((self.x // 8 + 1) * 8, self.cols - 1)
 
     def scroll_up(self) -> None:
         self.scrolled += 1             # ряд ушёл из кадра (для протяжки)
@@ -293,8 +328,8 @@ class Screen:
         gone_attr = self.attr.pop(0)
         self.row_rev.pop(0)
         self._push_history(gone, gone_attr)       # в «историю» просмотра
-        self.cells.append([0x20] * COLS)
-        self.attr.append([0] * COLS)
+        self.cells.append([0x20] * self.cols)
+        self.attr.append([0] * self.cols)
         self.row_rev.append(0)
         self.touch()
 
@@ -302,8 +337,8 @@ class Screen:
         self.cells.pop()
         self.attr.pop()
         self.row_rev.pop()
-        self.cells.insert(0, [0x20] * COLS)
-        self.attr.insert(0, [0] * COLS)
+        self.cells.insert(0, [0x20] * self.cols)
+        self.attr.insert(0, [0] * self.cols)
         self.row_rev.insert(0, 0)
         self.touch()
 
@@ -313,12 +348,12 @@ class Screen:
     WORD_DELIMS = (0x20, ord("."))
 
     def _grid_at(self, i: int) -> int:
-        return self.cells[i // COLS][i % COLS]
+        return self.cells[i // self.cols][i % self.cols]
 
     def cursor_anchor(self) -> tuple[str, int, int]:
         """Строка под курсором для протяжки с клавиатуры: («frame», y, x)."""
         return ("frame", min(self.y, self.rows - 1),
-                min(max(self.x, 0), COLS - 1))
+                min(max(self.x, 0), self.cols - 1))
 
     def kbd_sel_begin(self, block: bool = False) -> None:
         """Начать протяжку с клавиатуры (Shift+стрелка).
@@ -343,26 +378,26 @@ class Screen:
         if self._drag is None:
             return
         y = max(0, min(y, self.rows - 1))
-        x = max(0, min(x, COLS - 1))
+        x = max(0, min(x, self.cols - 1))
         self.sel_drag("frame", y, x)
 
     def word_right(self) -> None:
         """Ctrl+→: курсор на начало следующего слова (из середины слова —
         на начало идущего за ним)."""
-        i = self.y * COLS + self.x
-        n = self.rows * COLS
+        i = self.y * self.cols + self.x
+        n = self.rows * self.cols
         i += 1
         while i < n and self._grid_at(i) not in self.WORD_DELIMS:
             i += 1                       # через хвост текущего слова
         while i < n and self._grid_at(i) in self.WORD_DELIMS:
             i += 1                       # через разделители
         if i < n:
-            self.y, self.x = divmod(i, COLS)
+            self.y, self.x = divmod(i, self.cols)
 
     def word_left(self) -> None:
         """Ctrl+←: курсор на начало текущего слова; если уже там —
         на начало предыдущего."""
-        cur = self.y * COLS + self.x
+        cur = self.y * self.cols + self.x
         if cur == 0:
             return
         i = cur
@@ -372,7 +407,7 @@ class Screen:
         while j > 0 and self._grid_at(j - 1) not in self.WORD_DELIMS:
             j -= 1                       # к началу слова слева
         if j != cur:
-            self.y, self.x = divmod(j, COLS)
+            self.y, self.x = divmod(j, self.cols)
             return
         i = j                            # уже в начале — предыдущее слово
         while i > 0 and self._grid_at(i - 1) in self.WORD_DELIMS:
@@ -380,7 +415,7 @@ class Screen:
         j = i
         while j > 0 and self._grid_at(j - 1) not in self.WORD_DELIMS:
             j -= 1
-        self.y, self.x = divmod(j if i > 0 else 0, COLS)
+        self.y, self.x = divmod(j if i > 0 else 0, self.cols)
 
     def line_start(self) -> None:
         """Ctrl+↑: начало текущей строки."""
@@ -411,7 +446,7 @@ class Screen:
             return
         self.x += 1
         # перенос строки — здесь, без вызова: put() зовётся на каждый знак
-        if self.x >= COLS:
+        if self.x >= self.cols:
             self.x = 0
             self.y += 1
         if self.y >= self.rows:
@@ -437,7 +472,7 @@ class Screen:
         x = self.x
         i = 0
         while i < n:
-            room = COLS - x
+            room = self.cols - x
             take = n - i
             if take > room:
                 take = room
@@ -446,7 +481,7 @@ class Screen:
             self.row_rev[y] = self.rev + 1
             i += take
             x += take
-            if x >= COLS:
+            if x >= self.cols:
                 x = 0
                 y += 1
                 if y >= self.rows:
@@ -457,7 +492,7 @@ class Screen:
         self.rev += 1
 
     def erase_eol(self) -> None:
-        for x in range(self.x, COLS):
+        for x in range(self.x, self.cols):
             self.cells[self.y][x] = 0x20
             self.attr[self.y][x] = 0
         self.touch(self.y)
@@ -465,14 +500,14 @@ class Screen:
     def erase_eod(self) -> None:
         self.erase_eol()
         for y in range(self.y + 1, self.rows):
-            self.cells[y] = [0x20] * COLS
-            self.attr[y] = [0] * COLS
+            self.cells[y] = [0x20] * self.cols
+            self.attr[y] = [0] * self.cols
             self.row_rev[y] = self.rev + 1
         self.rev += 1
 
     def clear_all(self) -> None:
-        self.cells = [[0x20] * COLS for _ in range(self.rows)]
-        self.attr = [[0] * COLS for _ in range(self.rows)]
+        self.cells = [[0x20] * self.cols for _ in range(self.rows)]
+        self.attr = [[0] * self.cols for _ in range(self.rows)]
         self.x = self.y = 0
         self.touch()
 
@@ -878,7 +913,7 @@ class Screen:
         if hit is not None and hit[0] == sig:
             return hit[1]
         out = []
-        for x, code in enumerate(cells[:COLS]):
+        for x, code in enumerate(cells[:self.cols]):
             a = attrs[x]
             if a & ATTR_CTRL:
                 out.append(display_char(code | 0x40, "n0") if self.show_ctrl
@@ -1076,7 +1111,7 @@ class Screen:
 
     def set_panel_cols(self, cols: int) -> None:
         """Ширина подвала = ширина окна терминала (кадр всегда 80)."""
-        cols = max(COLS, min(int(cols), 400))
+        cols = max(self.cols, min(int(cols), 400))
         if cols != self.panel_cols:
             self.panel_cols = cols
             self.relayout()
@@ -1117,16 +1152,16 @@ class Screen:
         return self.display_code(self.cells[y][x], self.attr[y][x])
 
     def text(self) -> str:
-        return "\n".join("".join(self.char_at(y, x) for x in range(COLS))
+        return "\n".join("".join(self.char_at(y, x) for x in range(self.cols))
                          for y in range(self.rows))
 
     def dump(self) -> str:
-        out = ["+" + "-" * COLS + "+"]
+        out = ["+" + "-" * self.cols + "+"]
         for i, line in enumerate(self.text().splitlines()):
             marker = "*" if i == self.y else " "
             out.append(f"|{line}|{marker}")
-        out.append("+" + "-" * COLS + "+")
-        with self.panel_width(COLS):
+        out.append("+" + "-" * self.cols + "+")
+        with self.panel_width(self.cols):
             out.append("|" + "".join(self.service) + "|  (служебная панель, поз."
                        f"{SERVICE_ROW} — под кадром ЭВМ)")
             for extra in self.service_more:
