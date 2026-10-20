@@ -279,13 +279,12 @@ def test_shift_to_rus_h2():
 
 # --- вставка: взрыв знаков одного чтения = буфер обмена -----------------
 
-def test_group_paste_burst():
-    # Терминал со СВОЕЙ вставкой шлёт буфер одним чтением: ≥3 разных
-    # знака — вставка, одним ключом (иначе Н2 портит заглавные:
-    # «ВНИМАНИЕ» → «DYBVFYBT» — мусор)
-    text = "ВНИМАНИЕ: ТЕРМ-20"
-    keys, until = group_paste(list(text), 100.0, 0.0)
-    assert keys == [text]
+def test_group_paste_real_paste_only():
+    # Настоящая вставка (bracketed paste / OSC52) приходит одним куском —
+    # он и есть вставка: один ключ, перекодировка целиком (иначе Н2
+    # портит заглавные: «ВНИМАНИЕ» → «DYBVFYBT» — мусор)
+    keys, until = group_paste(["ВНИМАНИЕ: ТЕРМ-20"], 100.0, 0.0)
+    assert keys == ["ВНИМАНИЕ: ТЕРМ-20"]
     assert until > 100.0                      # признак живёт ещё gap сек
     # обычный набор (клавиши по одной) — посимвольно
     keys, until = group_paste(["a", "б"], 100.0, 0.0)
@@ -296,17 +295,27 @@ def test_group_paste_burst():
     # ВК и управляющие рвут строку: знаки до и после — свои ключи
     keys, _ = group_paste(["П", "Р", "И", "KEY_ENTER", "В", "Е", "Т"],
                           100.0, 0.0)
-    assert keys == ["ПРИ", "KEY_ENTER", "ВЕТ"]
+    assert keys == ["П", "Р", "И", "KEY_ENTER", "В", "Е", "Т"]
     # события мыши и прочие имена не группируются
     keys, _ = group_paste(["MOUSEDRAG@3,4", "а", "б"], 100.0, 0.0)
     assert keys == ["MOUSEDRAG@3,4", "а", "б"]
+
+
+def test_group_paste_fast_typing_not_paste():
+    # Взрыв знаков одного чтения — это быстрый набор, а не вставка:
+    # терминал отдаёт всё, что накопилось с прошлого чтения. Раньше такой
+    # взрыв считался вставкой — и путь вставки переписывал пробелы
+    # (лишний пробел между фрагментами, двойные схлопывались)
+    keys, until = group_paste(list("абвгд"), 100.0, 0.0)
+    assert keys == list("абвгд")
+    assert until == 0.0                      # признака вставки нет
 
 
 def test_group_paste_tail_within_gap():
     # Хвост вставки, пришедший отдельным чтением (буфер > 256 байт):
     # короткий, но в промежутке gap — продолжает вставку; после паузы
     # набор снова посимвольный
-    keys, until = group_paste(list("ВНИ"), 100.0, 0.0)        # первая половина
+    keys, until = group_paste(["ВНИ"], 100.0, 0.0)            # первая половина
     assert keys == ["ВНИ"] and until == 100.15
     keys, until2 = group_paste(list("МАНИ"), 100.10, until)   # чтение впритык
     assert keys == ["МАНИ"] and until2 >= 100.20
@@ -322,9 +331,9 @@ def test_group_paste_keeps_esc_sequences_whole():
     # распознанные последовательности (стрелки и т.п.) уходят как есть —
     # group_paste видит их после decode_keys, но и сырые имена не трогает
     keys, _ = group_paste(["KEY_UP", "a", "b", "c"], 100.0, 0.0)
-    assert keys == ["KEY_UP", "abc"]
+    assert keys == ["KEY_UP", "a", "b", "c"]
     keys, _ = group_paste(["ctrl+shift+x", "д", "е", "ж"], 100.0, 0.0)
-    assert keys == ["ctrl+shift+x", "деж"]
+    assert keys == ["ctrl+shift+x", "д", "е", "ж"]
 
 
 # --- bracketed paste (режим терминала 2004) -----------------------------

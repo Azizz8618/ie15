@@ -728,18 +728,49 @@ def test_clipboard_combos_never_reach_line():
     assert "не поддерживает" in session2.last_key
 
 
+def test_fast_typing_is_not_paste():
+    # Быстрый набор: терминал отдаёт за одно чтение несколько знаков —
+    # это обычный набор, а не вставка из буфера обмена. Раньше такой
+    # взрыв считался вставкой, и путь вставки переписывал пробелы: между
+    # фрагментами появлялся лишний пробел, двойные схлопывались, а
+    # набранное выходило на экран с задержкой.
+    from ie15emu.keyboard import group_paste
+    keys, until = group_paste(list("абв"), 0.0, 0.0)
+    assert keys == list("абв") and until == 0.0      # посимвольно, не вставка
+    # набор по-настоящему: буфер и экран совпадают с набранным
+    session, _ = make_session(MODE_LOCAL)
+    for k in keys:
+        session.feed_key(k)
+    assert bytes(session.buffer) == b"\x81\x82\x97"   # абв (внутренние коды)
+    assert "АБВ" in session.parser.screen.text()
+
+
+def test_paste_keeps_spaces_as_typed():
+    # Настоящая вставка (текст пришёл одним куском) идёт в буфер как есть:
+    # ни один пробел не добавляется и ни один не теряется
+    session, _ = make_session(MODE_LOCAL)
+    session.feed_key("abc ")
+    session.feed_key("def")
+    session.flush_paste()
+    assert bytes(session.buffer) == b"abc def"
+    session2, _ = make_session(MODE_LOCAL)
+    session2.feed_key("abc  def")
+    session2.flush_paste()
+    assert bytes(session2.buffer) == b"abc  def"
+
+
 def test_terminal_own_paste_is_faithful():
     # Терминал со СВОЕЙ вставкой (Ctrl+Shift+V уровня терминала) шлёт
-    # буфер обмена обычным потоком знаков: в Н2 каждый заглавный уходит
-    # посимвольной сменой алфавита (правило клавиатуры) — копирование
-    # в буфер ОС возвращается мусором «DYBVFYBT…». Группировка взрыва
-    # (group_paste) собирает чтение одним ключом — перекодировка верная.
+    # буфер обмена с метками «ESC [ 200 ~ … ESC [ 201 ~» — текст приходит
+    # одним куском (decode_keys) и уходит в набор одним ключом: в Н2
+    # посимвольный набор иначе превратил бы «ВНИМАНИЕ» в «DYBVFYBT…».
     from ie15emu.charset import decode_koi7, encode_koi7
-    from ie15emu.keyboard import group_paste, key_to_bytes
+    from ie15emu.keyboard import decode_keys, group_paste, key_to_bytes
 
     text = "ВНИМАНИЕ: ТЕРМ-20 ОТКЛЮЧЕН"
     session, _ = make_session(MODE_LOCAL)
-    keys, _ = group_paste(list(text), 0.0, 0.0)
+    keys, _ = group_paste(decode_keys(
+        f"\x1b[200~{text}\x1b[201~".encode())[0], 0.0, 0.0)
     assert keys == [text]                   # один ключ вставки
     for k in keys:
         session.feed_key(k)
