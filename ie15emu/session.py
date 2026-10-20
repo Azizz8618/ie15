@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import base64
+import bisect
 import re
 import time
 
@@ -318,6 +319,13 @@ class TerminalSession:
         # ждём эхо нашей команды «Сброс» (0x0C) — его надо срезать,
         # иначе кадр увидит «ДОМ» и курсор уйдёт в начало
         self._hold_echo = False
+        self._legend: list | None = None    # ячейки легенды подвала (разово)
+        # кэш таблицы рядов буфера набора: стабильная часть (до последней
+        # строки) и её хэш — чтобы при наборе в конец считать только хвост
+        self._rows_tab: list[int] | None = None
+        self._rows_line = 0
+        self._rows_hash = 0
+        self._rows_len = 0
         self._banner_tail = b""      # недобранная строка баннера
         self._banner_done = False    # баннер закончился (пошли данные ЭВМ)
         self._update_service()
@@ -623,26 +631,7 @@ class TerminalSession:
             last,                                   # «ПОСЛ» — свой ряд
             RULE,                                 # состояние от справки
             HELP,                                 # дальше — справка (можно убрать)
-            # F-клавиши — верхним рядом справки, по порядку F5…F10
-            mk(("СБРОС=F3", "fkey")), mk(("ВЗЯТЬ=F4", "fkey")),
-            mk(("ОЧИСТКА=F5", "fkey")), mk(("ЭХО=F6", "fkey")),
-            mk(("УПР.СИМВ=F7", "fkey")), mk(("НАБОР=F8", "fkey")),
-            mk(("СЕТЬ=F9", "fkey")), mk(("ПЕРЕДАЧА=F10", "fkey")),
-            "",                                   # конец группы F-клавиш
-            # прочая клавиатура терминала
-            mk("ВК=Bksp"), mk("ТАБ=Tab"), mk("ЗВН=Ctrl-G"), mk("ПРПС=Enter"),
-            mk("ESC=Esc"), mk("КУРСОР=Стрелки"),
-            mk("ЭКРАН↑=PgUp"), mk("ЭКРАН↓=PgDn"),
-            "",                                   # конец группы клавиатуры
-            # сочетания с Ctrl («УПР») — отдельной группой
-            mk(("СЛОВО=Ctrl+→", "ctrl")), mk(("СЛОВО=Ctrl+←", "ctrl")),
-            mk(("НАЧСТР=Ctrl+↑", "ctrl")), mk(("НИЖСТР=Ctrl+↓", "ctrl")),
-            mk(("ВЫД=Shift+Стрелки", "edit")),    # выделение с клавиатуры
-            mk(("ВЫДКОЛ=Shift+Ctrl", "edit")),
-            # правка текста — отдельной группой
-            mk(("ДОМ=Home", "edit")), mk(("СТЕРСТР=End", "edit")),
-            mk(("ИНВЕРС=Ins", "edit")), mk(("НОРМ=Del", "edit")),
-        ]
+        ] + self._legend_cells()
         # «АВТОНОМНО» длиннее «С ЭВМ»: ширина колонки сетки не должна
         # зависеть от режима сеанса, иначе на F9 (СЕТЬ↔АВТОНОМНО) все
         # колонки подвала съезжают. Пол «СЕТЬ=АВТОНОМНО» держит колонку
@@ -652,6 +641,38 @@ class TerminalSession:
         # «ПОСЛ» — длинная ячейка: всегда свой ряд и не влияет на ширину
         # колонок, иначе сетка подвала скачет на каждом нажатии
         sc.set_panel(state, wide=[last])
+
+    def _legend_cells(self) -> list:
+        """Ячейки легенды подвала (справка по клавишам) — собираются один раз.
+
+        Легенда не меняется (клавиши те же), а подвал пересобирается на
+        каждое нажатие: пересобирать легенду каждый раз — пустая работа.
+        """
+        legend = self._legend
+        if legend is None:
+            # F-клавиши — верхним рядом справки, по порядку F5…F10
+            legend = [
+                mk(("СБРОС=F3", "fkey")), mk(("ВЗЯТЬ=F4", "fkey")),
+                mk(("ОЧИСТКА=F5", "fkey")), mk(("ЭХО=F6", "fkey")),
+                mk(("УПР.СИМВ=F7", "fkey")), mk(("НАБОР=F8", "fkey")),
+                mk(("СЕТЬ=F9", "fkey")), mk(("ПЕРЕДАЧА=F10", "fkey")),
+                "",                               # конец группы F-клавиш
+                # прочая клавиатура терминала
+                mk("ВК=Bksp"), mk("ТАБ=Tab"), mk("ЗВН=Ctrl-G"),
+                mk("ПРПС=Enter"), mk("ESC=Esc"), mk("КУРСОР=Стрелки"),
+                mk("ЭКРАН↑=PgUp"), mk("ЭКРАН↓=PgDn"),
+                "",                               # конец группы клавиатуры
+                # сочетания с Ctrl («УПР») — отдельной группой
+                mk(("СЛОВО=Ctrl+→", "ctrl")), mk(("СЛОВО=Ctrl+←", "ctrl")),
+                mk(("НАЧСТР=Ctrl+↑", "ctrl")), mk(("НИЖСТР=Ctrl+↓", "ctrl")),
+                mk(("ВЫД=Shift+Стрелки", "edit")),  # выделение с клавиатуры
+                mk(("ВЫДКОЛ=Shift+Ctrl", "edit")),
+                # правка текста — отдельной группой
+                mk(("ДОМ=Home", "edit")), mk(("СТЕРСТР=End", "edit")),
+                mk(("ИНВЕРС=Ins", "edit")), mk(("НОРМ=Del", "edit")),
+            ]
+            self._legend = legend
+        return legend
 
     # --- выделение текста мышью -------------------------------------
     def _mouse(self, key: str) -> None:
@@ -1479,7 +1500,7 @@ class TerminalSession:
             avail = max(1, sc.rows - top)
             # таблица начал рядов — одна на перерисовку: и окно, и позиция
             # курсора считаются по ней (иначе буфер просматривался бы трижды)
-            starts, _total = self._buf_starts(buf)
+            starts, _total = self._rows_table(buf)
             start, end, lo = self._buf_window(buf, avail, starts)
             page_end = end
             if end > start and buf[end - 1] in (0x0D, 0x0A):
@@ -1544,32 +1565,17 @@ class TerminalSession:
 
     # --- выделение в буфере набора (АВТОНОМНО) ------------------------
     def _buf_rowcol(self, i: int) -> tuple[int, int]:
-        """(ряд эха, колонка) для позиции i — проходом по разрывам строк.
+        """(ряд эха, колонка) для позиции i — по таблице рядов.
 
         Точно повторяет печать: ПР/ПС дают новый ряд, каждые COLS знаков —
         перенос. Строка, заполнившая кадр ровно (длина кратна COLS),
         перевела курсор переносом печати — её ПР нового ряда не даёт
         (иначе перерисовка вставила бы пустой ряд после каждой такой
         строки), колонка — по остатку от COLS.
-
-        Разрывы строк ищутся ПОИСКОМ байта (счёт идёт в C), а не
-        просмотром каждого знака: буфер набора бывает большой (вставка,
-        макрос), и просмотр по знакам делал нажатие клавиши дорогим тем
-        больше, чем длиннее набор.
         """
-        buf = self.buffer
-        rows = run = 0
-        pos = 0
-        while pos < i:
-            nl = _find_break(buf, pos, i)
-            if nl < 0:
-                break
-            run = nl - pos
-            rows += max(1, (run + COLS - 1) // COLS)
-            run = 0
-            pos = nl + 1
-        run = i - pos
-        return rows + run // COLS, run % COLS
+        starts, _total = self._rows_table(bytes(self.buffer))
+        row = _row_of(starts, i)
+        return row, (i - starts[row]) % COLS
 
     def _buf_rows_up_to(self, i: int) -> int:
         """Сколько рядов кадра занимает эхо буфера до позиции i."""
@@ -1596,9 +1602,12 @@ class TerminalSession:
 
         Разрывы строк ищутся поиском байта (счёт в C) — см. `_buf_rowcol`.
         """
-        starts = [0]
-        rows = 0
-        pos = 0
+        starts = self._buf_starts_from(buf, 0)
+        return starts, len(starts) - 1
+
+    def _buf_starts_from(self, buf: bytes, pos: int) -> list[int]:
+        """Начала рядов от позиции `pos` (pos — начало строки)."""
+        starts = [pos]
         n = len(buf)
         while pos < n:
             nl = _find_break(buf, pos, n)
@@ -1607,16 +1616,41 @@ class TerminalSession:
             run = nl - pos
             full = max(1, (run + COLS - 1) // COLS)
             for j in range(1, full):              # переносы строки
-                rows += 1
                 starts.append(pos + j * COLS)
-            rows += 1                             # ряд после разрыва
-            starts.append(nl + 1)
+            starts.append(nl + 1)                  # ряд после разрыва
             pos = nl + 1
         run = n - pos
         for j in range(1, run // COLS + 1):       # хвост незакрытой строки
-            rows += 1
             starts.append(pos + j * COLS)
-        return starts, rows
+        return starts
+
+    def _rows_table(self, buf: bytes) -> tuple[list[int], int]:
+        """Таблица начал рядов буфера набора — с кэшем.
+
+        Буфер меняется обычно в конце (набор) — тогда пересчитывается
+        только последняя строка, а стабильная часть (до неё) берётся из
+        кэша. Правка в середине пересчитывает всё.
+
+        Кэш проверяется хэшем стабильной части: таблица не может
+        «протухнуть» молча (случайная коллизия — 2⁻⁶⁴).
+        """
+        n = len(buf)
+        tab = self._rows_tab
+        if tab is not None and n >= self._rows_len \
+                and hash(memoryview(buf)[:self._rows_line]) == self._rows_hash:
+            # стабильная часть цела — считаем только последнюю строку
+            tail = self._buf_starts_from(buf, self._rows_line)
+            full = tab + tail
+        else:
+            full, _total = self._buf_starts(buf)
+        # новая стабильная часть — всё до последней строки буфера
+        line = buf.rfind(b"\r") + 1
+        cut = bisect.bisect_left(full, line)
+        self._rows_tab = full[:cut]
+        self._rows_line = line
+        self._rows_hash = hash(memoryview(buf)[:line])
+        self._rows_len = n
+        return full, len(full) - 1
 
     def _buf_pos_at_row(self, row: int, col: int) -> int:
         """Позиция буфера: начало ряда `row` плюс колонка (в границах ряда)."""
@@ -1679,7 +1713,7 @@ class TerminalSession:
         # starts[r] — индекс буфера, с которого начинается ряд r
         # (границы строк и переносов считаются так же, как в _buf_rowcol)
         if starts is None:
-            starts, _total = self._buf_starts(buf)
+            starts, _total = self._rows_table(buf)
         total = len(starts) - 1
 
         pos = self._buf_pos

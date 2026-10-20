@@ -66,6 +66,8 @@ HELP = _Help()   # с этой ячейки начинается справка 
 
 def cell_text(cell: Cell) -> str:
     """Ячейка подвала сплошным текстом (для дампов и PNG)."""
+    if len(cell) == 1:                 # чаще всего одна часть — без join
+        return cell[0][0]
     return "".join(t for t, _ in cell)
 
 
