@@ -170,7 +170,8 @@ def ctrl_code(key: str) -> bytes | None:
 
 
 def key_to_bytes(key: str, layout: str | None = None,
-                 shift_to_rus: bool = False) -> bytes:
+                 shift_to_rus: bool = False,
+                 latin_up: bool = False) -> bytes:
     """Нажатие ПК-клавиши → байты внутреннего КОИ7-потока терминала.
 
     layout: None — выключена; "positional" (по умолчанию для --koi7) —
@@ -186,6 +187,9 @@ def key_to_bytes(key: str, layout: str | None = None,
     ^ @ # № [ ] ' | ? % ; ! > < набираются одним и тем же знаком
     с обеих раскладок и при любом CapsLock (N2_SYMBOLS + проброс
     ASCII как есть).
+    latin_up: строка 0x60.. линии занята кириллицей ЭВМ, поэтому строчную
+    латиницу поднимаем в верх (в Н2 — всегда; в Н1 — когда раскладка
+    выключена). С русской раскладкой (shift_to_rus) это уже сделано.
     """
     if key in ("KEY_ENTER", "\n", "\r"):
         return b"\r"
@@ -273,6 +277,11 @@ def key_to_bytes(key: str, layout: str | None = None,
         if ch.upper().isascii():
             return ch.upper().encode("ascii")
         # не-ASCII вне кириллицы (AltGr-акценты и т.п.) — ниже в «?»
+    if latin_up and ch.isalpha() and ch.upper().isascii():
+        # Н2 с выключенной русской раскладкой: латиница уходит в линию как
+        # есть (только регистр поднимается — строка 0x60.. занята кириллицей
+        # ЭВМ). Это режим набора команд ДИСПАК: «HOM» значит «НОМ».
+        return ch.upper().encode("ascii")
     return ch.encode("ascii", errors="replace")
 
 

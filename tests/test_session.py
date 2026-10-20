@@ -1637,6 +1637,35 @@ def test_dks_line_raw_with_cr_eol():
     assert "ВЫД" in session.parser.screen.text()   # баннер занял строку 0
 
 
+def test_dks_line_national_page_decoded():
+    # «Национальная» страница ВТ-340 (линия ДКС): кириллица на местах
+    # латинских омографов — «ВАМ НЕЛЬЗЯ» приходит как «BAM HElxzq»
+    # (проверено на живой БЭСМ-6). Омографы переносятся в русские.
+    session, _ = make_session(MODE_HOST)
+    session.handle_line_reply(b"Encoding is RAW\r\nConnected to DKS\r\n")
+    assert session.encoding == "dks" and session.rx_encoding == "raw"
+    session.handle_line_reply(b" BAM HElxzq\r\n")
+    text = session.parser.screen.text()
+    assert "ВАМ НЕЛЬЗЯ" in text
+    assert "BAM" not in text
+
+
+def test_n2_latin_as_is_without_rus_layout():
+    # Н2 с выключенной русской раскладкой (layout = off): латиница уходит
+    # в линию как есть — так набирают приказы ДИСПАК («HOM» = «НОМ»).
+    # По умолчанию Shift+латинская даёт русскую букву позиции (W→Ц).
+    session, link = make_session(MODE_HOST)
+    session.emit(session.feed_key("H"))
+    assert link.sent == ["Р".encode()]        # Р — позиция клавиши H
+    session.rus_layout = False
+    session.emit(session.feed_key("H"))
+    assert link.sent[-1] == b"H"                # латиница как есть
+    # строчная латиница поднимается в верх: строка 0x60.. линии занята
+    # кириллицей ЭВМ
+    session.emit(session.feed_key("o"))
+    assert link.sent[-1] == b"O"
+
+
 def test_service_panel_all_bits():
     # Подвал: ряд состояний + ряды-легенды «функция=клавиша:код» через «|»,
     # последняя нажатая клавиша — справа

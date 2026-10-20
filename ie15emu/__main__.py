@@ -377,6 +377,7 @@ def run_line(parser: Parser, url: str, png: str | None,
              keylog: str | None = None,
              pulse: float = PULSE_INTERVAL,
              check: float = CHECK_INTERVAL,
+             rus_layout: bool = True,
              **linkkw) -> None:
     import os
     import select
@@ -390,7 +391,8 @@ def run_line(parser: Parser, url: str, png: str | None,
         return
     session = TerminalSession(parser, link=link, mode=mode, layout=layout,
                               keymap=keymap, undo_depth=undo_depth,
-                              buffer_limit=buffer_limit)
+                              buffer_limit=buffer_limit,
+                              rus_layout=rus_layout)
     # «пробел поддержки»: как часто шлём пробел в линию (0 — выключен)
     session.pulse_interval = max(0.0, float(pulse))
     session._pulse_next = time.time() + session.pulse_interval
@@ -454,7 +456,7 @@ def run_line(parser: Parser, url: str, png: str | None,
     if url.startswith(("tcp://", "ssh://")):
         _drain_banner(session, timeout=2.0)
     if feed:
-        session.emit(key_to_bytes(feed, layout=layout))
+        session.emit(session.key_bytes(feed))
 
     fd = sys.stdin.fileno() if sys.stdin.isatty() else None
     old = termios.tcgetattr(fd) if fd is not None else None
@@ -852,6 +854,7 @@ def run_headless(parser: Parser, url: str, feed: str | None, dump: str | None,
                  mode: str = "host", layout: str | None = None,
                  keymap: dict[str, str] | None = None, machine: str = "",
                  check: float = CHECK_INTERVAL,
+                 rus_layout: bool = True,
                  **linkkw) -> None:
     """Работа без окна терминала: ни панели, ни справки, ни мыши.
 
@@ -863,7 +866,7 @@ def run_headless(parser: Parser, url: str, feed: str | None, dump: str | None,
 
     try:
         term = Terminal(url, mode=mode, layout=layout, keymap=keymap,
-                        machine=machine, **linkkw)
+                        machine=machine, rus_layout=rus_layout, **linkkw)
     except (LinkError, OSError) as e:
         say(f"[линия] {url} — не удалось подключиться: {e}")
         return
@@ -1022,6 +1025,10 @@ def main(argv: list[str] | None = None) -> None:
         layout = DEFAULT_LAYOUT
     else:
         layout = None
+    # Русская раскладка в Н2 (Shift+латинская → русская буква позиции).
+    # layout = off — набор чистой латиницей: так набирают команды ДИСПАК
+    # («HOM» = «НОМ»). В Н1/Н0 флаг не значим.
+    rus_layout = args.layout != "off"
 
     charset = Charset(Path(args.roms) / "chargen-15ie.bin")
     parser = Parser(mode=2 if args.nabor == "n2" else 1,
@@ -1036,6 +1043,7 @@ def main(argv: list[str] | None = None) -> None:
                          mode=args.mode, layout=layout,
                          keymap=args.keymap, machine=args.machine or "",
                          check=float(args.check),
+                         rus_layout=rus_layout,
                          password=args.password, keyfile=args.keyfile)
         else:
             run_line(parser, args.line, args.png, args.seconds,
@@ -1048,6 +1056,7 @@ def main(argv: list[str] | None = None) -> None:
                      keylog=args.keylog,
                      pulse=float(args.pulse),
                      check=float(args.check),
+                     rus_layout=rus_layout,
                      password=args.password, keyfile=args.keyfile)
     else:
         run_script(parser, args.png)

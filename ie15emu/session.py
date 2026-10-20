@@ -22,7 +22,7 @@ import time
 from . import COLS, ROWS, __version__
 from .charset import (decode_koi7, encode_koi7, koi7_display_upper,
                       koi7_raw_upper, latin_upper,
-                      normalize_incremental, to_line)
+                      normalize_incremental, to_line, virt340_rus_upper)
 from .link import LinkError, parse_probe
 from .keyboard import (DEFAULT_LAYOUT, ctrl_code, is_key_combo, key_to_bytes,
                        KEY_CTRLSELDOWN, KEY_CTRLSELLEFT, KEY_CTRLSELRIGHT,
@@ -229,7 +229,8 @@ class TerminalSession:
                  layout: str | None = None,
                  keymap: dict[str, str] | None = None,
                  undo_depth: int = DEFAULT_UNDO,
-                 buffer_limit: int = DEFAULT_BUFFER) -> None:
+                 buffer_limit: int = DEFAULT_BUFFER,
+                 rus_layout: bool = True) -> None:
         if mode not in (MODE_LOCAL, MODE_HOST):
             raise ValueError(f"неизвестный режим: {mode!r}")
         self.parser = parser
@@ -245,6 +246,11 @@ class TerminalSession:
         if getattr(parser.screen, "display_set", "n2") != "n1":
             layout = None
         self.layout = layout
+        # русская раскладка в Н2 (Shift+латинская → русская буква позиции
+        # клавиши). Выключается конфигом ([terminal] layout = off): тогда
+        # набор идёт чистой латиницей — так набирают команды ДИСПАК
+        # («HOM» = «НОМ»). В Н1/Н0 набор не затрагивается.
+        self.rus_layout = rus_layout
         # переназначение из [keys] конфига: клавиша → знак/строка/KEY_имя
         self.keymap = keymap or {}
         self.default_layout = layout     # раскладка, включаемая набором Н1
@@ -570,6 +576,18 @@ class TerminalSession:
         # Н0/Н2 — ASCII/VT-52: клавиши печатают латиницу как есть
         self.layout = self.default_layout if value == "n1" else None
         self.koi7 = value == "n1"
+
+    def key_bytes(self, key: str) -> bytes:
+        """Нажатие (или строка) → байты внутреннего потока по правилам
+        текущего набора знаков (см. `keyboard.key_to_bytes`).
+
+        Н2: русская раскладка (Shift+латинская → русская буква позиции)
+        — пока `rus_layout`; иначе латиница уходит как есть (только
+        регистр поднимается: строка 0x60.. линии занята кириллицей ЭВМ).
+        """
+        return key_to_bytes(key, layout=self.layout,
+                            shift_to_rus=self.nabor == "n2" and self.rus_layout,
+                            latin_up=self.nabor == "n2")
 
     def _flag_style(self, value: str) -> str:
         """Цвет значения состояния: включено — зелёный, выключено — красный."""
@@ -1233,8 +1251,7 @@ class TerminalSession:
                 self._update_service()
                 self._update_status()
             return None
-        data = key_to_bytes(key, layout=self.layout,
-                            shift_to_rus=self.nabor == "n2")
+        data = self.key_bytes(key)
         if not data:
             return None
         if self.mode == MODE_HOST:
@@ -2423,8 +2440,13 @@ class TerminalSession:
                 # UTF-8-разбор здесь портил бы кадры, tmxr-баннер — единственная
                 # UTF-8-строка, ей жертвуем. Верхний регистр (одно-регистная
                 # традиция ЭВМ) применяется только в Н2 — в Н0/Н1 линия
-                # печатает оба регистра как есть
+                # печатает оба регистра как есть.
+                # Линия ДКС (Э-60) — «национальная» страница ВТ-340:
+                # кириллица на местах латинских омографов (A=А, B=В, …)
+                # приходит латинскими буквами — их переносим в русские.
                 stream = koi7_raw_upper(data) if self.nabor == "n2" else data
+                if self.encoding == "dks":
+                    stream = virt340_rus_upper(stream)
                 stream, self._carry = stream, b""
         else:
             # utf8-приём читается инкрементально: незавершённая на границе
