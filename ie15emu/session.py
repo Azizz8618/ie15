@@ -53,6 +53,7 @@ CONTROL_HINTS = {
     "KEY_UP": "UP=ESCA", "KEY_DOWN": "DOWN=ESCB", "KEY_RIGHT": "RGHT=ESCC",
     "KEY_LEFT": "LEFT=ESCD", "KEY_HOME": "HOME=ESCH", "KEY_END": "END=ESCK",
     "KEY_PAGEUP": "ЭКРАН↑", "KEY_PAGEDOWN": "ЭКРАН↓",
+    "KEY_BEGIN": "НАЧАЛО=ESCE",
     "KEY_WHEELUP": "КОЛЕСО↑", "KEY_WHEELDOWN": "КОЛЕСО↓",
     "KEY_INSERT": "INS=ESCb", "KEY_DELETE": "DEL=ESCc",
     "KEY_CTRLRIGHT": "СЛОВО=^→", "KEY_CTRLLEFT": "СЛОВО=^←",
@@ -1273,6 +1274,14 @@ class TerminalSession:
                     self._redraw_echo()
                 self._update_service()
                 self._update_status()
+            return None
+        if key in ("KEY_ESC", "\x1b") and self.mode == MODE_LOCAL:
+            # ESC в буфер набора не идёт: это начало escape-последовательности,
+            # и при перерисовке эха (любая правка набора) он съедал бы
+            # следующие знаки — текст на экране исчезал. Настоящей 15ИЭ
+            # клавиши Esc нет; в С ЭВМ ESC уходит в линию как есть.
+            self.last_key = "ESC=1B (в набор не идёт)"
+            self._update_service()
             return None
         data = self.key_bytes(key)
         if not data:

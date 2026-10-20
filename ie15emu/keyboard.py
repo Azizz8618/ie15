@@ -319,6 +319,9 @@ KEY_SELHOME = "SELHOME"             # выделить до начала стр�
 KEY_SELEND = "SELEND"               # …до конца строки (Ctrl+End)
 KEY_SELBSPACE = "SELBSPACE"         # Shift+Backspace — удалить выделенное
 KEY_HELP = "HELP"                   # F12 — показать/убрать справку подвала
+KEY_BEGIN = "KEY_BEGIN"             # середина цифровой клавиатуры без
+                                    # NumLock («ESC [ E»): на 15ИЭ такой
+                                    # клавиши нет — гасим нажатие
 
 SPECIAL_KEYS = {"KEY_UNDO": KEY_UNDO, "KEY_SEND": KEY_SEND, "KEY_MODE": KEY_MODE,
                 "KEY_CMDSET": KEY_CMDSET, "KEY_BLINK": KEY_BLINK,
@@ -350,6 +353,13 @@ SEQ_KEYS = {
     b"\x1b[4~": "KEY_END", b"\x1b[F": "KEY_END", b"\x1bOF": "KEY_END",
     b"\x1b[2~": "KEY_INSERT", b"\x1b[3~": "KEY_DELETE",
     b"\x1b[5~": "KEY_PAGEUP", b"\x1b[6~": "KEY_PAGEDOWN",
+    # Цифровая клавиатура без NumLock — навигационный кластер: 7→Home,
+    # 1→End, 9→PgUp, 3→PgDn, 0→Insert, .→Delete, 8/2/4/6→стрелки (они
+    # уже разобраны выше как «ESC [ A…D»). Осталась середина «5» — на
+    # настоящей 15ИЭ такой клавиши нет, гасим: раньше «ESC [ E» падал
+    # в разбор как Esc+«[»+«E», а Esc попадал в буфер набора и при
+    # перерисовке эха съедал весь текст (исчезал шрифт на экране)
+    b"\x1b[E": "KEY_BEGIN",
     b"\x1bOR": KEY_SELCLEAR, b"\x1b[13~": KEY_SELCLEAR,   # F3 — снять выделение
     b"\x1bOS": KEY_SELTAKE, b"\x1b[14~": KEY_SELTAKE,     # F4 — взять в буфер
     b"\x1b[15~": KEY_CLEAR,                         # F5 — ОЧИСТКА экрана

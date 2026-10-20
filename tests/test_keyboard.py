@@ -336,6 +336,27 @@ def test_group_paste_keeps_esc_sequences_whole():
     assert keys == ["ctrl+shift+x", "д", "е", "ж"]
 
 
+def test_numpad_without_numlock():
+    # Цифровая клавиатура без NumLock — навигационный кластер: 7→Home,
+    # 1→End, 9→PgUp, 3→PgDn, 0→Insert, .→Delete, 8/2/4/6→стрелки. На
+    # настоящей 15ИЭ таких клавиш нет — но разбирать их надо, иначе
+    # «ESC [ E» (середина «5») падает в разбор как Esc+«[»+«E», а Esc
+    # попадает в буфер набора и при перерисовке эха съедает текст
+    from ie15emu.keyboard import decode_keys
+    assert decode_keys(b"\x1b[E")[0] == ["KEY_BEGIN"]
+    # остальные клавиши кластера — обычные имена
+    assert decode_keys(b"\x1b[H")[0] == ["KEY_HOME"]      # 7
+    assert decode_keys(b"\x1b[F")[0] == ["KEY_END"]       # 1
+    assert decode_keys(b"\x1b[5~")[0] == ["KEY_PAGEUP"]   # 9
+    assert decode_keys(b"\x1b[6~")[0] == ["KEY_PAGEDOWN"]  # 3
+    assert decode_keys(b"\x1b[2~")[0] == ["KEY_INSERT"]   # 0
+    assert decode_keys(b"\x1b[3~")[0] == ["KEY_DELETE"]   # .
+    assert decode_keys(b"\x1b[A")[0] == ["KEY_UP"]        # 8
+    assert decode_keys(b"\x1b[B")[0] == ["KEY_DOWN"]      # 2
+    assert decode_keys(b"\x1b[D")[0] == ["KEY_LEFT"]      # 4
+    assert decode_keys(b"\x1b[C")[0] == ["KEY_RIGHT"]     # 6
+
+
 # --- bracketed paste (режим терминала 2004) -----------------------------
 
 def test_bracketed_paste():

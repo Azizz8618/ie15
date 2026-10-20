@@ -728,6 +728,38 @@ def test_clipboard_combos_never_reach_line():
     assert "не поддерживает" in session2.last_key
 
 
+def test_esc_does_not_poison_buffer():
+    # Esc в буфер набора не идёт: ESC — начало escape-последовательности,
+    # и при перерисовке эха (любая правка) он съедал следующие знаки —
+    # текст на экране исчезал. Так проявлялась середина цифровой
+    # клавиатуры без NumLock («ESC [ E»), которую эмулятор разбирал как
+    # Esc+«[»+«E».
+    session, _ = make_session(MODE_LOCAL)
+    for ch in "ПРИВЕТ":
+        session.feed_key(ch)
+    session.feed_key("KEY_ESC")
+    assert bytes(session.buffer) == b"\x90\x92\x89\x97\x85\x94"
+    assert session.parser.screen.row_text("frame", 0) == "ПРИВЕТ"
+    # правка набора (перерисовка эха) — текст на месте; «X» в Н2 — русская
+    # буква позиции клавиши (Ч)
+    session.feed_key("X")
+    assert session.parser.screen.row_text("frame", 0) == "ПРИВЕТЧ"
+
+
+def test_numpad_center_does_not_wipe_screen():
+    # Цифровая клавиатура без NumLock: «5» — «ESC [ E» (середина
+    # навигационного кластера). На 15ИЭ такой клавиши нет — нажатие
+    # гасится, текст на экране остаётся
+    from ie15emu.keyboard import decode_key_bytes
+    session, _ = make_session(MODE_LOCAL)
+    for ch in "ПРИВЕТ":
+        session.feed_key(ch)
+    for k in decode_key_bytes(b"\x1b[E"):
+        session.feed_key(k)
+    assert session.parser.screen.row_text("frame", 0) == "ПРИВЕТ"
+    assert bytes(session.buffer) == b"\x90\x92\x89\x97\x85\x94"
+
+
 def test_fast_typing_is_not_paste():
     # Быстрый набор: терминал отдаёт за одно чтение несколько знаков —
     # это обычный набор, а не вставка из буфера обмена. Раньше такой
