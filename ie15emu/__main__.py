@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import configparser
 import os
+import select
 import sys
 import time
 from pathlib import Path
@@ -391,7 +392,6 @@ def run_line(parser: Parser, url: str, png: str | None,
              rus_layout: bool = True,
              **linkkw) -> None:
     import os
-    import select
     import termios
     import tty
 
@@ -425,31 +425,36 @@ def run_line(parser: Parser, url: str, png: str | None,
         "F8 — РЕЖИМ (набор №1↔№2), F9 — АВТОНОМНО↔С ЭВМ, F10 — SEND, "
         "Ctrl-C — выход")
 
+    # счётчик попыток повторного соединения (ВВОД при «ЛИНИЯ=НЕТ»):
+    # показывается в подвале, чтобы было видно, что попытки повторяются
+    reconnects = 0
+
     def _reconnect() -> None:
         """Повторное соединение — ВВОД в С ЭВМ при «ЛИНИЯ=НЕТ».
 
         Старый сокет закрывается, ссылка в сессии заменяется; новый
         баннер линии отфильтруется заново (сброс _banner_*). При неудаче
-        флаг обрыва остаётся — ВВОД повторит попытку.
+        флаг обрыва остаётся — ВВОД повторит попытку (попытки не
+        ограничены: обрыв сети сеанс не роняет).
         """
-        nonlocal link
+        nonlocal link, reconnects
         if not url.startswith(("tcp://", "ssh://")):
             say("[линия] переподключение предусмотрено для tcp/ssh-линий")
             return
+        reconnects += 1
         say(f"[линия] {url} — повторное соединение…")
-        try:
-            link.close()
-        except OSError:
-            pass                              # сокет уже мёртв
-        try:
-            new = open_link(url, **linkkw)
-        except (LinkError, OSError) as e:
-            say(f"[линия] не подключилось: {e} — ВВОД повторит попытку")
-            session.last_key = "ЛИНИЯ: не подключилась"
+        # reopen_link не выпускает исключений наружу: любая ошибка
+        # соединения (LinkError, OSError, исключения SSH-библиотеки)
+        # останется попыткой, а не падением сеанса
+        new, err = reopen_link(url, linkkw, link)
+        if new is None:
+            say(f"[линия] не подключилось: {err} — ВВОД повторит попытку")
+            session.last_key = f"ЛИНИЯ: не подключилась ({reconnects})"
             session._update_service()
             return
         link = new
         session.link = new
+        reconnects = 0            # счётчик попыток — с нуля (связь есть)
         # новый сокет = баннер заново: служебные строки — в статус,
         # не в кадр
         session._banner_done = False
@@ -584,9 +589,9 @@ def run_line(parser: Parser, url: str, png: str | None,
                 if fd is not None:
                     fds.append(fd)
                 if fds:
-                    ready, _, _ = select.select(fds, [], [], 0.05)
+                    ready = select_ready(fds, 0.05)
                 else:
-                    ready, _ = [], None
+                    ready = []
                     time.sleep(0.05)
                 dirty = False
                 kb_ready = fd is not None and fd in ready
@@ -710,7 +715,10 @@ def link_sock(link):
     try:
         sock = getattr(link, "sock", None)
         if sock is not None:
-            return sock.fileno()
+            fd = sock.fileno()
+            # закрытый сокет отдаёт fileno() == -1: такой дескриптор в
+            # select нельзя (ValueError) — линию читаем без select
+            return fd if fd >= 0 else None
         chan = getattr(link, "chan", None)
         if chan is not None and hasattr(chan, "recv_ready"):
             return None          # SSH-канал опрашивается неблокирующе
@@ -718,6 +726,47 @@ def link_sock(link):
         return btn.fileno() if btn is not None else None
     except Exception:
         return None
+
+
+def select_ready(fds, timeout: float) -> list:
+    """Готовые к чтению дескрипторы из select — с защитой от «мёртвых».
+
+    Линия может умереть между выборкой дескриптора и select'ом (сокет
+    закрыт — fileno() == -1): select на таком дескрипторе поднимает
+    ValueError, и сеанс падал с трейсбеком. Мёртвые дескрипторы
+    отбрасываем, линию опрашиваем вручную (recv без select).
+    """
+    alive = [f for f in fds if f is not None and f >= 0]
+    if not alive:
+        time.sleep(timeout)
+        return []
+    try:
+        ready, _, _ = select.select(alive, [], [], timeout)
+        return list(ready)
+    except (OSError, ValueError):
+        # дескриптор умер прямо во время select — ждём и идём дальше
+        time.sleep(timeout)
+        return []
+
+
+def reopen_link(url: str, linkkw: dict, old_link):
+    """Повторное соединение: закрыть старую линию и открыть новую тем же URL.
+
+    Возвращает (link, err): link — новая линия (err пусто) либо None и
+    причина неудачи. Исключения наружу не выпускаем: обрыв сети не
+    должен ронять сеанс — ВВОД в С ЭВМ повторит попытку.
+    """
+    if old_link is not None:
+        try:
+            old_link.close()
+        except Exception:
+            pass                 # линия уже мёртва (сокет закрыт)
+    try:
+        return open_link(url, **linkkw), ""
+    except Exception as e:
+        # LinkError, OSError и исключения SSH-библиотеки — причина одна:
+        # связаться не вышло. Текст — в подвал, сеанс продолжается.
+        return None, (str(e) or e.__class__.__name__)
 
 
 def text_screen(parser: Parser) -> str:
